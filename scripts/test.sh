@@ -4,6 +4,7 @@ set -euo pipefail
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 export SWAP_V2="$PROJECT_DIR/src/swap_v2.py"
+export SWAP_AGENT="$PROJECT_DIR/src/swap_agent.py"
 export PYTHONPATH="$PROJECT_DIR/src:$PROJECT_DIR/tests${PYTHONPATH:+:$PYTHONPATH}"
 
 cd "$PROJECT_DIR"
@@ -50,6 +51,10 @@ echo "== Bounded funding scan =="
 python3 tests/swap_bounded_scan_tests.py
 
 echo
+echo "== Autonomous agents: kill / restart / recovery =="
+python3 tests/swap_autonomous_agents_tests.py
+
+echo
 echo "============================================================"
-echo "CORE TEST SUITES PASSED"
+echo "ALL V1.5 TEST SUITES PASSED"
 echo "============================================================"

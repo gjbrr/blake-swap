@@ -872,7 +872,7 @@ def test_race() -> None:
                 sys.executable,
                 str(runner),
                 str(gate),
-                str(Path.home() / "swap_v2.py"),
+                str(SWAP_V2),
                 swap_id,
             ]
 

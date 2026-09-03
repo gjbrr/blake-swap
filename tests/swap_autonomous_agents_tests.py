@@ -13,8 +13,14 @@ import swap_protocol_tests as h
 
 
 AGENT = str(
-    Path.home()
-    / "swap_agent.py"
+    Path(
+        os.environ.get(
+            "SWAP_AGENT",
+            Path(__file__).resolve().parents[1]
+            / "src"
+            / "swap_agent.py",
+        )
+    )
 )
 
 LOG_DIR = (

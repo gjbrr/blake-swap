@@ -12,8 +12,7 @@ import time
 
 
 SWAP = str(
-    Path.home()
-    / "swap_v2.py"
+    Path(os.environ.get("SWAP_V2", Path(__file__).resolve().parent / "swap_v2.py"))
 )
 
 BASE = (

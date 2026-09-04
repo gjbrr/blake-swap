@@ -1573,7 +1573,21 @@ def command_status(args):
     print("Bitcoin height:", btc_height)
 
 def command_show(args):
-    swap = load_swap(args.swap_id)
+    role = os.environ.get(
+        "BLAKE_SWAP_ROLE",
+        "alice",
+    )
+
+    if role not in ("alice", "bob"):
+        raise ValueError(
+            "BLAKE_SWAP_ROLE must be alice or bob"
+        )
+
+    swap = load_swap(
+        args.swap_id,
+        role=role,
+    )
+
     print_swap(swap)
 
 

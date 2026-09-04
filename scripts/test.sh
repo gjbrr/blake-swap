@@ -1,4 +1,17 @@
 #!/usr/bin/env bash
+
+unset BLAKE_SWAP_ROLE || true
+unset BLAKE_SWAP_STATE_DIR || true
+unset BLAKE_SWAP_NOSTR_KEY_DIR || true
+unset BLAKE_SWAP_TRANSPORT || true
+
+unset BLAKE_SWAP_BTC_CLI || true
+unset BLAKE_SWAP_BTC_DATADIR || true
+unset BLAKE_SWAP_BTC_RPC_ARGS || true
+
+unset BLAKE_SWAP_BLAKE_CLI || true
+unset BLAKE_SWAP_BLAKE_DATADIR || true
+unset BLAKE_SWAP_BLAKE_RPC_ARGS || true
 set -euo pipefail
 
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

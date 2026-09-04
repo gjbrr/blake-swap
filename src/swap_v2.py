@@ -23,7 +23,12 @@ import subprocess
 import os
 import fcntl
 
-BASE_SWAP_DIR = Path.home() / ".blake-swaps-v2"
+BASE_SWAP_DIR = Path(
+    os.environ.get(
+        "BLAKE_SWAP_STATE_DIR",
+        Path.home() / ".blake-swaps-v2",
+    )
+).expanduser()
 
 ALICE_SWAP_DIR = BASE_SWAP_DIR / "alice"
 BOB_SWAP_DIR = BASE_SWAP_DIR / "bob"
@@ -37,12 +42,24 @@ for directory in (
     directory.mkdir(parents=True, exist_ok=True)
 
 # BLAKE node
-BLAKE_CLI = "/home/gary/bitcoin-blake-rc2/build-rc2/bin/bitcoin-cli"
-BLAKE_DATADIR = "/home/gary/blake-swap-regtest"
+BLAKE_CLI = os.environ.get(
+    "BLAKE_SWAP_BLAKE_CLI",
+    "/home/gary/bitcoin-blake-rc2/build-rc2/bin/bitcoin-cli",
+)
+BLAKE_DATADIR = os.environ.get(
+    "BLAKE_SWAP_BLAKE_DATADIR",
+    "/home/gary/blake-swap-regtest",
+)
 
 # Normal Bitcoin Core node
-BTC_CLI = "/home/gary/bitcoin-core/build/bin/bitcoin-cli"
-BTC_DATADIR = "/home/gary/bitcoin-swap-regtest"
+BTC_CLI = os.environ.get(
+    "BLAKE_SWAP_BTC_CLI",
+    "/home/gary/bitcoin-core/build/bin/bitcoin-cli",
+)
+BTC_DATADIR = os.environ.get(
+    "BLAKE_SWAP_BTC_DATADIR",
+    "/home/gary/bitcoin-swap-regtest",
+)
 
 ALICE_WALLET = "alice"
 BOB_WALLET = "bob"

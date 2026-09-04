@@ -197,7 +197,7 @@ def main():
         (proc.stdout or "")
         + "\n"
         + (proc.stderr or ""),
-        "BITCOIN",
+        "BTC",
     )
 
     h.require(

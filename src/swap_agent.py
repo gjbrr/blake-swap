@@ -15,10 +15,12 @@ SWAP = str(
     Path(os.environ.get("SWAP_V2", Path(__file__).resolve().parent / "swap_v2.py"))
 )
 
-BASE = (
-    Path.home()
-    / ".blake-swaps-v2"
-)
+BASE = Path(
+    os.environ.get(
+        "BLAKE_SWAP_STATE_DIR",
+        Path.home() / ".blake-swaps-v2",
+    )
+).expanduser()
 
 
 def state_path(

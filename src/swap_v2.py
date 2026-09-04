@@ -1736,10 +1736,15 @@ def nostr_private_key_hex():
             "when using Nostr transport"
         )
 
+    key_dir = Path(
+        os.environ.get(
+            "BLAKE_SWAP_NOSTR_KEY_DIR",
+            BASE_SWAP_DIR / "nostr-keys",
+        )
+    ).expanduser()
+
     key_path = (
-        Path.home()
-        / ".blake-swaps-v2"
-        / "nostr-keys"
+        key_dir
         / f"{role}.key"
     )
 

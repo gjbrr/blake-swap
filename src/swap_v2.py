@@ -961,11 +961,22 @@ def command_extract_secret(args):
     )
 
 def mine_btc(blocks=1):
+    role = os.environ.get(
+        "BLAKE_SWAP_ROLE",
+        "alice",
+    )
+
+    wallet = (
+        ALICE_WALLET
+        if role == "alice"
+        else BOB_WALLET
+    )
+
     addr = btc_cli(
         "getnewaddress",
         "",
         "bech32",
-        wallet=ALICE_WALLET,
+        wallet=wallet,
     )
 
     return btc_cli(
@@ -1000,9 +1011,20 @@ def get_wallet_pubkey(chain_cli, wallet):
 
 
 def mine_blake(blocks=1):
+    role = os.environ.get(
+        "BLAKE_SWAP_ROLE",
+        "alice",
+    )
+
+    wallet = (
+        ALICE_WALLET
+        if role == "alice"
+        else BOB_WALLET
+    )
+
     addr = blake_cli(
         "getnewaddress",
-        wallet=ALICE_WALLET,
+        wallet=wallet,
     )
 
     return blake_cli(

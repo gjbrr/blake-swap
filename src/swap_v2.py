@@ -21,6 +21,7 @@ from swap_timeout_policy import (
 
 import subprocess
 import os
+import shlex
 import fcntl
 
 BASE_SWAP_DIR = Path(
@@ -51,6 +52,15 @@ BLAKE_DATADIR = os.environ.get(
     "/home/gary/blake-swap-regtest",
 )
 
+BLAKE_RPC_ARGS = tuple(
+    shlex.split(
+        os.environ.get(
+            "BLAKE_SWAP_BLAKE_RPC_ARGS",
+            "",
+        )
+    )
+)
+
 # Normal Bitcoin Core node
 BTC_CLI = os.environ.get(
     "BLAKE_SWAP_BTC_CLI",
@@ -59,6 +69,15 @@ BTC_CLI = os.environ.get(
 BTC_DATADIR = os.environ.get(
     "BLAKE_SWAP_BTC_DATADIR",
     "/home/gary/bitcoin-swap-regtest",
+)
+
+BTC_RPC_ARGS = tuple(
+    shlex.split(
+        os.environ.get(
+            "BLAKE_SWAP_BTC_RPC_ARGS",
+            "",
+        )
+    )
 )
 
 ALICE_WALLET = "alice"
@@ -451,8 +470,14 @@ def blake_cli(*args, wallet=None):
     cmd = [
         BLAKE_CLI,
         "-regtest",
-        f"-datadir={BLAKE_DATADIR}",
     ]
+
+    if BLAKE_DATADIR:
+        cmd.append(
+            f"-datadir={BLAKE_DATADIR}"
+        )
+
+    cmd.extend(BLAKE_RPC_ARGS)
 
     if wallet:
         cmd.append(f"-rpcwallet={wallet}")
@@ -485,8 +510,14 @@ def blake_cli(*args, wallet=None):
 def btc_cli(*args, wallet=None):
     cmd = [
         BTC_CLI,
-        f"-datadir={BTC_DATADIR}",
     ]
+
+    if BTC_DATADIR:
+        cmd.append(
+            f"-datadir={BTC_DATADIR}"
+        )
+
+    cmd.extend(BTC_RPC_ARGS)
 
     if wallet:
         cmd.append(f"-rpcwallet={wallet}")

@@ -5,12 +5,24 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+import os
 
 from swap_wire import encode_message
 
 
-BASE = Path.home() / ".blake-swaps-v2"
-MESSAGE_DIR = BASE / "messages"
+BASE = Path(
+    os.environ.get(
+        "BLAKE_SWAP_STATE_DIR",
+        Path.home() / ".blake-swaps-v2",
+    )
+).expanduser()
+
+MESSAGE_DIR = Path(
+    os.environ.get(
+        "BLAKE_SWAP_MESSAGE_DIR",
+        BASE / "messages",
+    )
+).expanduser()
 
 
 def main():

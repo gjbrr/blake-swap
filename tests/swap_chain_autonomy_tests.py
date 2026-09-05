@@ -9,11 +9,7 @@ from pathlib import Path
 import swap_protocol_tests as h
 
 
-MESSAGE_DIR = (
-    Path.home()
-    / ".blake-swaps-v2"
-    / "messages"
-)
+MESSAGE_DIR = h.MESSAGE_DIR
 
 
 def message_path(

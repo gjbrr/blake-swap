@@ -24,8 +24,7 @@ AGENT = str(
 )
 
 LOG_DIR = (
-    Path.home()
-    / ".blake-swaps-v2"
+    h.MESSAGE_DIR.parent
     / "agent-logs"
 )
 
@@ -42,9 +41,7 @@ def message_path(
     message_type,
 ):
     return (
-        Path.home()
-        / ".blake-swaps-v2"
-        / "messages"
+        h.MESSAGE_DIR
         / f"{swap_id}.{message_type}.json"
     )
 

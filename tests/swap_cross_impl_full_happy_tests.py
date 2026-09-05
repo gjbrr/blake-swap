@@ -115,6 +115,15 @@ def wire_write(
 
 
 def main():
+    #
+    # All implementations in this interoperability test
+    # communicate through one explicit shared file-transport
+    # directory. Independent writers inherit this environment.
+    #
+    os.environ["BLAKE_SWAP_MESSAGE_DIR"] = str(
+        h.MESSAGE_DIR
+    )
+
     h.preflight()
     ok("preflight")
 
@@ -591,6 +600,7 @@ def main():
         swap_id,
         "--role",
         "alice",
+        role="alice",
     )
 
     h.swap_cmd(
@@ -598,6 +608,7 @@ def main():
         swap_id,
         "--role",
         "bob",
+        role="bob",
     )
 
     alice = h.load_state(
@@ -630,11 +641,7 @@ def main():
     # Final transport-secret audit.
     # ============================================================
 
-    for path in (
-        Path.home()
-        / ".blake-swaps-v2"
-        / "messages"
-    ).glob(
+    for path in h.MESSAGE_DIR.glob(
         f"{swap_id}.*.json"
     ):
         data = json.loads(

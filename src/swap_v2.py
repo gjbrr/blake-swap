@@ -88,6 +88,58 @@ ALICE_PUB = "03c2b0716765cce0ad45843be950aba370feecd46d127c8888d3c69dd653606356"
 BOB_PUB = "02670525ad0c200edcc985e0523fc8691703e62808a2dc0d493a20b1b18a0dce44"
 
 
+MARKET_DIRECTION_BLAKE_FOR_BTC = "blake-for-btc"
+MARKET_DIRECTION_BTC_FOR_BLAKE = "btc-for-blake"
+
+MARKET_DIRECTIONS = {
+    MARKET_DIRECTION_BLAKE_FOR_BTC,
+    MARKET_DIRECTION_BTC_FOR_BLAKE,
+}
+
+
+def market_protocol_roles(direction):
+    """
+    Convert human market direction into the already-tested
+    atomic-swap protocol roles.
+
+    Protocol Alice always funds/sells BLAKE.
+    Protocol Bob always funds/pays BTC.
+    """
+    if direction == MARKET_DIRECTION_BLAKE_FOR_BTC:
+        return {
+            "maker_role": "alice",
+            "taker_role": "bob",
+        }
+
+    if direction == MARKET_DIRECTION_BTC_FOR_BLAKE:
+        return {
+            "maker_role": "bob",
+            "taker_role": "alice",
+        }
+
+    raise ValueError(
+        f"Unknown market direction: {direction!r}"
+    )
+
+
+def market_give_want(direction, blake_amount, btc_sats):
+    if direction == MARKET_DIRECTION_BLAKE_FOR_BTC:
+        return {
+            "give": f"{blake_amount:g} BLAKE",
+            "want": f"{int(btc_sats):,} sats",
+        }
+
+    if direction == MARKET_DIRECTION_BTC_FOR_BLAKE:
+        return {
+            "give": f"{int(btc_sats):,} sats",
+            "want": f"{blake_amount:g} BLAKE",
+        }
+
+    raise ValueError(
+        f"Unknown market direction: {direction!r}"
+    )
+
+
 class State(str, Enum):
     OFFERED = "OFFERED"
 
@@ -371,20 +423,50 @@ def load_swap(swap_id, role="alice"):
     return swap
 
 
+def make_swap_id():
+    """
+    Allocate a protocol swap identifier.
+
+    A swap ID is public coordination data.
+    Creating it does NOT create Alice's secret S
+    and does not imply either party has funded.
+    """
+    return uuid.uuid4().hex[:12]
+
+
 def make_swap(
     blake_amount,
     btc_sats,
     blake_timeout,
     btc_timeout,
+    swap_id=None,
 ):
     secret = secrets.token_bytes(32)
+
+    if swap_id is None:
+        swap_id = make_swap_id()
+
+    if (
+        not isinstance(swap_id, str)
+        or len(swap_id) != 12
+    ):
+        raise ValueError(
+            "swap_id must be 12 hex characters"
+        )
+
+    try:
+        int(swap_id, 16)
+    except ValueError as e:
+        raise ValueError(
+            "swap_id must be 12 hex characters"
+        ) from e
 
     secret_hash = hashlib.sha256(
         secret
     ).hexdigest()
 
     swap = Swap(
-        swap_id=uuid.uuid4().hex[:12],
+        swap_id=swap_id,
 
         state=State.OFFERED.value,
 
@@ -1764,25 +1846,38 @@ NOSTR_RELAY = NOSTR_RELAYS[0]
 
 
 def nostr_private_key_hex():
-    role = os.environ.get("BLAKE_SWAP_ROLE")
-
-    if role not in ("alice", "bob"):
-        raise RuntimeError(
-            "BLAKE_SWAP_ROLE must be alice or bob "
-            "when using Nostr transport"
-        )
-
-    key_dir = Path(
-        os.environ.get(
-            "BLAKE_SWAP_NOSTR_KEY_DIR",
-            BASE_SWAP_DIR / "nostr-keys",
-        )
-    ).expanduser()
-
-    key_path = (
-        key_dir
-        / f"{role}.key"
+    explicit_key = os.environ.get(
+        "BLAKE_SWAP_NOSTR_KEY_FILE"
     )
+
+    if explicit_key:
+        key_path = Path(
+            explicit_key
+        ).expanduser()
+
+    else:
+        role = os.environ.get(
+            "BLAKE_SWAP_ROLE"
+        )
+
+        if role not in ("alice", "bob"):
+            raise RuntimeError(
+                "BLAKE_SWAP_ROLE must be alice or bob "
+                "unless BLAKE_SWAP_NOSTR_KEY_FILE "
+                "is explicitly configured"
+            )
+
+        key_dir = Path(
+            os.environ.get(
+                "BLAKE_SWAP_NOSTR_KEY_DIR",
+                BASE_SWAP_DIR / "nostr-keys",
+            )
+        ).expanduser()
+
+        key_path = (
+            key_dir
+            / f"{role}.key"
+        )
 
     if not key_path.exists():
         raise RuntimeError(
@@ -3588,7 +3683,20 @@ def add_sha256_preimage(psbt_b64, hash_hex, secret_hex):
     return base64.b64encode(raw).decode()
 
 def command_verify_blake(args):
-    swap = load_swap(args.swap_id)
+    role = os.environ.get(
+        "BLAKE_SWAP_ROLE",
+        "alice",
+    )
+
+    if role not in ("alice", "bob"):
+        raise ValueError(
+            "BLAKE_SWAP_ROLE must be alice or bob"
+        )
+
+    swap = load_swap(
+        args.swap_id,
+        role=role,
+    )
 
     if State(swap.state) != State.BLAKE_FUNDED:
         raise ValueError(
@@ -5937,7 +6045,11 @@ def nostr_parse_market_offer_event(event):
             "Event is not a market offer"
         )
 
-    if message.get("version") != 1:
+    version = message.get(
+        "version"
+    )
+
+    if version not in (1, 2):
         raise RuntimeError(
             "Unsupported market offer version"
         )
@@ -5952,10 +6064,43 @@ def nostr_parse_market_offer_event(event):
             "Market offer quote is not BTC"
         )
 
-    if message.get("side") != "sell":
-        raise RuntimeError(
-            "Market offer side is not sell"
+    #
+    # v1 had only one possible direction:
+    # maker sells BLAKE for BTC.
+    #
+    if version == 1:
+        if message.get("side") != "sell":
+            raise RuntimeError(
+                "Market offer side is not sell"
+            )
+
+        direction = (
+            MARKET_DIRECTION_BLAKE_FOR_BTC
         )
+
+    #
+    # v2 makes economic direction explicit.
+    #
+    else:
+        direction = message.get(
+            "direction"
+        )
+
+        if direction not in MARKET_DIRECTIONS:
+            raise RuntimeError(
+                "Market offer has invalid direction"
+            )
+
+        if not any(
+            len(tag) >= 2
+            and tag[0] == "direction"
+            and tag[1] == direction
+            for tag in event.get("tags", [])
+        ):
+            raise RuntimeError(
+                "Market offer direction does not "
+                "match Nostr direction tag"
+            )
 
     if (
         message.get("created_at")
@@ -6018,6 +6163,10 @@ def nostr_parse_market_offer_event(event):
             "settlement data"
         )
 
+    roles = market_protocol_roles(
+        direction
+    )
+
     offer = {
         "event_id": event["id"],
         "maker": event["pubkey"],
@@ -6025,6 +6174,9 @@ def nostr_parse_market_offer_event(event):
         "expires_at": expires_at,
         "blake_amount": blake_amount,
         "btc_sats": btc_sats,
+        "direction": direction,
+        "maker_role": roles["maker_role"],
+        "taker_role": roles["taker_role"],
     }
 
     return message, offer
@@ -6202,8 +6354,8 @@ def command_market(args):
     print(
         f'{"Offer":14} '
         f'{"Maker":14} '
-        f'{"Selling":16} '
-        f'{"Asking":16} '
+        f'{"Giving":18} '
+        f'{"Wanting":18} '
         f'{"Expires"}'
     )
 
@@ -6241,19 +6393,17 @@ def command_market(args):
                 f"{remaining // 86400}d"
             )
 
-        amount = (
-            f'{offer["blake_amount"]:g} BLAKE'
-        )
-
-        asking = (
-            f'{offer["btc_sats"]:,} sats'
+        terms = market_give_want(
+            offer["direction"],
+            offer["blake_amount"],
+            offer["btc_sats"],
         )
 
         print(
             f'{offer["event_id"][:12]:14} '
             f'{offer["maker"][:12]:14} '
-            f'{amount:16} '
-            f'{asking:16} '
+            f'{terms["give"]:18} '
+            f'{terms["want"]:18} '
             f'{ttl}'
         )
 
@@ -6267,6 +6417,126 @@ def command_market(args):
         "cancellations are hidden."
     )
 
+
+
+def build_market_offer_v2_event(
+    blake_amount,
+    btc_sats,
+    minutes,
+    direction,
+):
+    import time
+    import secrets
+    from coincurve import PrivateKey
+
+    if direction not in MARKET_DIRECTIONS:
+        raise ValueError(
+            f"Unsupported market direction: {direction!r}"
+        )
+
+    if blake_amount <= 0:
+        raise ValueError(
+            "BLAKE amount must be positive"
+        )
+
+    if btc_sats <= 0:
+        raise ValueError(
+            "BTC sat amount must be positive"
+        )
+
+    if minutes <= 0:
+        raise ValueError(
+            "Offer lifetime must be positive"
+        )
+
+    private_key = PrivateKey(
+        bytes.fromhex(
+            nostr_private_key_hex()
+        )
+    )
+
+    compressed = (
+        private_key.public_key.format(
+            compressed=True
+        )
+    )
+
+    pubkey_hex = compressed[1:].hex()
+
+    created_at = int(time.time())
+
+    expires_at = (
+        created_at
+        + (minutes * 60)
+    )
+
+    message = {
+        "type": "market-offer",
+        "version": 2,
+
+        # Economic pair is canonical regardless
+        # of which asset the maker is giving.
+        "base": "BLAKE",
+        "quote": "BTC",
+
+        "direction": direction,
+
+        "blake_amount": str(
+            blake_amount
+        ),
+        "btc_sats": int(
+            btc_sats
+        ),
+
+        "created_at": created_at,
+        "expires_at": expires_at,
+        "nonce": secrets.token_hex(8),
+    }
+
+    content = json.dumps(
+        message,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+
+    event = {
+        "pubkey": pubkey_hex,
+        "created_at": created_at,
+        "kind": 1,
+        "tags": [
+            [
+                "t",
+                "blake-swap-market",
+            ],
+            [
+                "base",
+                "BLAKE",
+            ],
+            [
+                "quote",
+                "BTC",
+            ],
+            [
+                "direction",
+                direction,
+            ],
+        ],
+        "content": content,
+    }
+
+    event_id = nostr_event_id(
+        event
+    )
+
+    event["id"] = event_id.hex()
+
+    event["sig"] = (
+        private_key.sign_schnorr(
+            event_id
+        ).hex()
+    )
+
+    return event, message
 
 
 def build_market_offer_event(
@@ -6360,10 +6630,11 @@ def command_publish_market_offer(args):
             "Offer lifetime must be positive"
         )
 
-    event, message = build_market_offer_event(
+    event, message = build_market_offer_v2_event(
         args.blake,
         args.sats,
         args.minutes,
+        args.direction,
     )
 
     event_id = asyncio.run(
@@ -6378,15 +6649,31 @@ def command_publish_market_offer(args):
         "maker:   ",
         event["pubkey"],
     )
+    terms = market_give_want(
+        message["direction"],
+        float(message["blake_amount"]),
+        int(message["btc_sats"]),
+    )
+
+    roles = market_protocol_roles(
+        message["direction"]
+    )
+
     print(
-        "selling: ",
-        message["blake_amount"],
-        "BLAKE",
+        "giving:  ",
+        terms["give"],
     )
     print(
-        "asking:  ",
-        f'{message["btc_sats"]:,}',
-        "sats",
+        "wanting: ",
+        terms["want"],
+    )
+    print(
+        "direction:",
+        message["direction"],
+    )
+    print(
+        "maker protocol role:",
+        roles["maker_role"],
     )
     print(
         "lifetime:",
@@ -6542,45 +6829,46 @@ def build_market_take_event(
         )
     )
 
-    compressed = private_key.public_key.format(
-        compressed=True
+    compressed = (
+        private_key.public_key.format(
+            compressed=True
+        )
     )
 
-    bob_pubkey = compressed[1:].hex()
+    taker_pubkey = compressed[1:].hex()
     created_at = int(time.time())
 
-    message = {
-        "type": "market-take",
-        "version": 1,
-
-        "offer_id": offer_event["id"],
-        "maker": offer_event["pubkey"],
-
-        "base": "BLAKE",
-        "quote": "BTC",
-
-        "blake_amount": str(
-            offer_message["blake_amount"]
-        ),
-        "btc_sats": int(
-            offer_message["btc_sats"]
-        ),
-
-        "created_at": created_at,
-        "nonce": secrets.token_hex(8),
-    }
-
-    content = json.dumps(
-        message,
-        separators=(",", ":"),
-        sort_keys=True,
+    offer_version = offer_message.get(
+        "version"
     )
 
-    event = {
-        "pubkey": bob_pubkey,
-        "created_at": created_at,
-        "kind": 1,
-        "tags": [
+    #
+    # Historical v1 negotiation stays byte/schema
+    # compatible with the original implementation.
+    #
+    if offer_version == 1:
+        message = {
+            "type": "market-take",
+            "version": 1,
+
+            "offer_id": offer_event["id"],
+            "maker": offer_event["pubkey"],
+
+            "base": "BLAKE",
+            "quote": "BTC",
+
+            "blake_amount": str(
+                offer_message["blake_amount"]
+            ),
+            "btc_sats": int(
+                offer_message["btc_sats"]
+            ),
+
+            "created_at": created_at,
+            "nonce": secrets.token_hex(8),
+        }
+
+        tags = [
             [
                 "t",
                 "blake-swap-market-take",
@@ -6593,21 +6881,102 @@ def build_market_take_event(
                 "p",
                 offer_event["pubkey"],
             ],
-        ],
+        ]
+
+    elif offer_version == 2:
+        direction = offer_message.get(
+            "direction"
+        )
+
+        roles = market_protocol_roles(
+            direction
+        )
+
+        message = {
+            "type": "market-take",
+            "version": 2,
+
+            "offer_id": offer_event["id"],
+            "maker": offer_event["pubkey"],
+            "taker": taker_pubkey,
+
+            "base": "BLAKE",
+            "quote": "BTC",
+
+            "direction": direction,
+
+            #
+            # These roles are DERIVED from direction,
+            # not chosen independently by the taker.
+            #
+            "maker_role":
+                roles["maker_role"],
+            "taker_role":
+                roles["taker_role"],
+
+            "blake_amount": str(
+                offer_message["blake_amount"]
+            ),
+            "btc_sats": int(
+                offer_message["btc_sats"]
+            ),
+
+            "created_at": created_at,
+            "nonce": secrets.token_hex(8),
+        }
+
+        tags = [
+            [
+                "t",
+                "blake-swap-market-take",
+            ],
+            [
+                "e",
+                offer_event["id"],
+            ],
+            [
+                "p",
+                offer_event["pubkey"],
+            ],
+            [
+                "direction",
+                direction,
+            ],
+        ]
+
+    else:
+        raise RuntimeError(
+            "Cannot build take for unsupported "
+            f"market offer version {offer_version!r}"
+        )
+
+    content = json.dumps(
+        message,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+
+    event = {
+        "pubkey": taker_pubkey,
+        "created_at": created_at,
+        "kind": 1,
+        "tags": tags,
         "content": content,
     }
 
-    event_id = nostr_event_id(event)
+    event_id = nostr_event_id(
+        event
+    )
 
     event["id"] = event_id.hex()
 
-    event["sig"] = private_key.sign_schnorr(
-        event_id
-    ).hex()
+    event["sig"] = (
+        private_key.sign_schnorr(
+            event_id
+        ).hex()
+    )
 
     return event, message
-
-
 
 
 
@@ -6737,9 +7106,28 @@ def nostr_validate_market_take_event(
             "Event is not a market take"
         )
 
-    if message.get("version") != 1:
+    version = message.get(
+        "version"
+    )
+
+    if version not in (1, 2):
         raise RuntimeError(
             "Unsupported market take version"
+        )
+
+    offer_version = offer_message.get(
+        "version"
+    )
+
+    #
+    # Negotiation versions must move together.
+    # A v2 offer cannot be downgraded by answering
+    # it with an old v1 take.
+    #
+    if version != offer_version:
+        raise RuntimeError(
+            "Market take version does not match "
+            "market offer version"
         )
 
     if message.get("offer_id") != offer_id:
@@ -6763,6 +7151,70 @@ def nostr_validate_market_take_event(
     if message.get("quote") != "BTC":
         raise RuntimeError(
             "Market take quote mismatch"
+        )
+
+    #
+    # v2 explicitly commits both parties to the
+    # economic direction and its derived protocol roles.
+    #
+    if version == 2:
+        direction = offer_message.get(
+            "direction"
+        )
+
+        if direction not in MARKET_DIRECTIONS:
+            raise RuntimeError(
+                "Market offer has invalid direction"
+            )
+
+        if message.get("direction") != direction:
+            raise RuntimeError(
+                "Market take changed direction"
+            )
+
+        roles = market_protocol_roles(
+            direction
+        )
+
+        if (
+            message.get("maker_role")
+            != roles["maker_role"]
+        ):
+            raise RuntimeError(
+                "Market take maker role mismatch"
+            )
+
+        if (
+            message.get("taker_role")
+            != roles["taker_role"]
+        ):
+            raise RuntimeError(
+                "Market take taker role mismatch"
+            )
+
+        if message.get("taker") != event["pubkey"]:
+            raise RuntimeError(
+                "Market take taker identity mismatch"
+            )
+
+        if not any(
+            len(tag) >= 2
+            and tag[0] == "direction"
+            and tag[1] == direction
+            for tag in event.get("tags", [])
+        ):
+            raise RuntimeError(
+                "Market take direction does not "
+                "match Nostr direction tag"
+            )
+
+    else:
+        direction = (
+            MARKET_DIRECTION_BLAKE_FOR_BTC
+        )
+
+        roles = market_protocol_roles(
+            direction
         )
 
     if (
@@ -6830,6 +7282,11 @@ def nostr_validate_market_take_event(
         "btc_sats": int(
             message["btc_sats"]
         ),
+        "direction": direction,
+        "maker_role":
+            roles["maker_role"],
+        "taker_role":
+            roles["taker_role"],
     }
 
 
@@ -7235,40 +7692,143 @@ def build_market_match_event(
     swap,
 ):
     import time
-    from coincurve import PrivateKey
 
-    private_key = PrivateKey(
-        bytes.fromhex(
-            nostr_private_key_hex()
+    maker_pubkey = current_nostr_pubkey()
+    created_at = int(time.time())
+
+    if maker_pubkey != offer_event["pubkey"]:
+        raise RuntimeError(
+            "SECURITY FAILURE: market match "
+            "must be signed by offer maker"
+        )
+
+    offer_message, parsed_offer = (
+        nostr_parse_market_offer_event(
+            offer_event
         )
     )
 
-    alice_pubkey = current_nostr_pubkey()
-    created_at = int(time.time())
+    offer_version = offer_message.get(
+        "version"
+    )
 
-    message = {
-        "type": "market-match",
-        "version": 1,
+    #
+    # Validate the exact take through the canonical
+    # take validator before building a match around it.
+    #
+    take_item = (
+        nostr_validate_market_take_event(
+            take_event,
+            offer_event,
+            offer_message,
+            offer_event["id"],
+        )
+    )
 
-        "offer_id": offer_event["id"],
-        "take_id": take_event["id"],
-        "swap_id": swap.swap_id,
+    if offer_version == 1:
+        #
+        # Preserve historical v1 match schema.
+        #
+        message = {
+            "type": "market-match",
+            "version": 1,
 
-        "maker": alice_pubkey,
-        "taker": take_event["pubkey"],
+            "offer_id": offer_event["id"],
+            "take_id": take_event["id"],
+            "swap_id": swap.swap_id,
 
-        "base": "BLAKE",
-        "quote": "BTC",
+            "maker": maker_pubkey,
+            "taker": take_event["pubkey"],
 
-        "blake_amount": str(
-            swap.blake_amount
-        ),
-        "btc_sats": int(
-            swap.btc_sats
-        ),
+            "base": "BLAKE",
+            "quote": "BTC",
 
-        "created_at": created_at,
-    }
+            "blake_amount": str(
+                swap.blake_amount
+            ),
+            "btc_sats": int(
+                swap.btc_sats
+            ),
+
+            "created_at": created_at,
+        }
+
+        extra_tags = []
+
+    elif offer_version == 2:
+        direction = parsed_offer[
+            "direction"
+        ]
+
+        roles = market_protocol_roles(
+            direction
+        )
+
+        #
+        # The take already committed to these roles.
+        # Do not allow the match builder to reinterpret
+        # them.
+        #
+        if (
+            take_item["maker_role"]
+            != roles["maker_role"]
+        ):
+            raise RuntimeError(
+                "Market take maker role disagrees "
+                "with offer direction"
+            )
+
+        if (
+            take_item["taker_role"]
+            != roles["taker_role"]
+        ):
+            raise RuntimeError(
+                "Market take taker role disagrees "
+                "with offer direction"
+            )
+
+        message = {
+            "type": "market-match",
+            "version": 2,
+
+            "offer_id": offer_event["id"],
+            "take_id": take_event["id"],
+            "swap_id": swap.swap_id,
+
+            "maker": maker_pubkey,
+            "taker": take_event["pubkey"],
+
+            "base": "BLAKE",
+            "quote": "BTC",
+
+            "direction": direction,
+            "maker_role":
+                roles["maker_role"],
+            "taker_role":
+                roles["taker_role"],
+
+            "blake_amount": str(
+                swap.blake_amount
+            ),
+            "btc_sats": int(
+                swap.btc_sats
+            ),
+
+            "created_at": created_at,
+        }
+
+        extra_tags = [
+            [
+                "direction",
+                direction,
+            ],
+        ]
+
+    else:
+        raise RuntimeError(
+            "Cannot build match for unsupported "
+            f"market offer version {offer_version!r}"
+        )
 
     content = json.dumps(
         message,
@@ -7277,7 +7837,7 @@ def build_market_match_event(
     )
 
     event = {
-        "pubkey": alice_pubkey,
+        "pubkey": maker_pubkey,
         "created_at": created_at,
         "kind": 1,
         "tags": [
@@ -7301,11 +7861,22 @@ def build_market_match_event(
                 "d",
                 swap.swap_id,
             ],
+            *extra_tags,
         ],
         "content": content,
     }
 
-    event_id = nostr_event_id(event)
+    event_id = nostr_event_id(
+        event
+    )
+
+    from coincurve import PrivateKey
+
+    private_key = PrivateKey(
+        bytes.fromhex(
+            nostr_private_key_hex()
+        )
+    )
 
     event["id"] = event_id.hex()
 
@@ -7316,6 +7887,7 @@ def build_market_match_event(
     )
 
     return event, message
+
 
 
 def command_publish_market_match(args):
@@ -7605,7 +8177,7 @@ async def nostr_fetch_market_match_events_from_relay(
 
 async def validate_market_match_event(
     event,
-    bob_pubkey,
+    expected_taker_pubkey,
 ):
     import asyncio
 
@@ -7645,7 +8217,11 @@ async def validate_market_match_event(
             "Event is not a market match"
         )
 
-    if message.get("version") != 1:
+    version = message.get(
+        "version"
+    )
+
+    if version not in (1, 2):
         raise RuntimeError(
             "Unsupported market match version"
         )
@@ -7667,6 +8243,61 @@ async def validate_market_match_event(
         raise RuntimeError(
             "Market match quote mismatch"
         )
+
+    #
+    # v1 has one implicit economic direction.
+    # v2 must explicitly commit to direction and
+    # the roles deterministically derived from it.
+    #
+    if version == 1:
+        direction = (
+            MARKET_DIRECTION_BLAKE_FOR_BTC
+        )
+
+        roles = market_protocol_roles(
+            direction
+        )
+
+    else:
+        direction = message.get(
+            "direction"
+        )
+
+        if direction not in MARKET_DIRECTIONS:
+            raise RuntimeError(
+                "Market match has invalid direction"
+            )
+
+        roles = market_protocol_roles(
+            direction
+        )
+
+        if (
+            message.get("maker_role")
+            != roles["maker_role"]
+        ):
+            raise RuntimeError(
+                "Market match maker role mismatch"
+            )
+
+        if (
+            message.get("taker_role")
+            != roles["taker_role"]
+        ):
+            raise RuntimeError(
+                "Market match taker role mismatch"
+            )
+
+        if not any(
+            len(tag) >= 2
+            and tag[0] == "direction"
+            and tag[1] == direction
+            for tag in event.get("tags", [])
+        ):
+            raise RuntimeError(
+                "Market match direction does not "
+                "match Nostr direction tag"
+            )
 
     offer_id = message.get(
         "offer_id"
@@ -7711,7 +8342,7 @@ async def validate_market_match_event(
             "Atomic swap ID is not hex"
         ) from e
 
-    if message.get("taker") != bob_pubkey:
+    if message.get("taker") != expected_taker_pubkey:
         raise RuntimeError(
             "Market match is for another taker"
         )
@@ -7730,7 +8361,7 @@ async def validate_market_match_event(
     if not any(
         len(tag) >= 2
         and tag[0] == "p"
-        and tag[1] == bob_pubkey
+        and tag[1] == expected_taker_pubkey
         for tag in event["tags"]
     ):
         raise RuntimeError(
@@ -7802,6 +8433,37 @@ async def validate_market_match_event(
         offer_id,
     )
 
+    #
+    # Offer, take and match must all resolve to
+    # exactly the same economic direction and roles.
+    #
+    if (
+        take_item["direction"]
+        != direction
+    ):
+        raise RuntimeError(
+            "Market match direction disagrees "
+            "with referenced take"
+        )
+
+    if (
+        take_item["maker_role"]
+        != roles["maker_role"]
+    ):
+        raise RuntimeError(
+            "Market match maker role disagrees "
+            "with referenced take"
+        )
+
+    if (
+        take_item["taker_role"]
+        != roles["taker_role"]
+    ):
+        raise RuntimeError(
+            "Market match taker role disagrees "
+            "with referenced take"
+        )
+
     maker = offer_event["pubkey"]
 
     if event["pubkey"] != maker:
@@ -7815,7 +8477,7 @@ async def validate_market_match_event(
             "Market match maker mismatch"
         )
 
-    if take_item["taker"] != bob_pubkey:
+    if take_item["taker"] != expected_taker_pubkey:
         raise RuntimeError(
             "SECURITY FAILURE: referenced take "
             "was not signed by current Bob"
@@ -7868,13 +8530,18 @@ async def validate_market_match_event(
         "take_id": take_id,
         "swap_id": swap_id,
         "maker": maker,
-        "taker": bob_pubkey,
+        "taker": expected_taker_pubkey,
         "blake_amount": float(
             offer_message["blake_amount"]
         ),
         "btc_sats": int(
             offer_message["btc_sats"]
         ),
+        "direction": direction,
+        "maker_role":
+            roles["maker_role"],
+        "taker_role":
+            roles["taker_role"],
         "created_at": event[
             "created_at"
         ],
@@ -8077,6 +8744,628 @@ def command_market_matches(args):
     )
     print(
         "PASS: market terms preserved"
+    )
+
+
+def command_accept_reverse_market_match(args):
+    """
+    Import a validated v2 btc-for-blake market match
+    as the TAKING participant.
+
+    For this direction:
+
+        market maker -> protocol Bob
+        market taker -> protocol Alice
+
+    This command is the point where protocol Alice
+    creates secret S.
+    """
+    import asyncio
+
+    if len(args.match_id) != 64:
+        raise ValueError(
+            "match_id must be the full "
+            "64-character Nostr event ID"
+        )
+
+    alice_pubkey = current_nostr_pubkey()
+
+    event = asyncio.run(
+        nostr_fetch_event_by_id(
+            args.match_id
+        )
+    )
+
+    #
+    # The validator requires the exact expected taker
+    # identity.  In reverse direction, the taker is Alice.
+    #
+    item = asyncio.run(
+        validate_market_match_event(
+            event,
+            alice_pubkey,
+        )
+    )
+
+    if (
+        item.get("direction")
+        != MARKET_DIRECTION_BTC_FOR_BLAKE
+    ):
+        raise RuntimeError(
+            "Market match is not btc-for-blake"
+        )
+
+    if item.get("maker_role") != "bob":
+        raise RuntimeError(
+            "SECURITY FAILURE: reverse match "
+            "maker is not protocol Bob"
+        )
+
+    if item.get("taker_role") != "alice":
+        raise RuntimeError(
+            "SECURITY FAILURE: reverse match "
+            "taker is not protocol Alice"
+        )
+
+    if item.get("taker") != alice_pubkey:
+        raise RuntimeError(
+            "SECURITY FAILURE: current participant "
+            "is not the matched taker"
+        )
+
+    bob_pubkey = item["maker"]
+    swap_id = item["swap_id"]
+
+    #
+    # Idempotency:
+    #
+    # If Alice already created this swap, reuse it.
+    # NEVER generate a second S for the same negotiated swap.
+    #
+    existing_path = swap_path(
+        swap_id,
+        role="alice",
+    )
+
+    if existing_path.exists():
+        existing = load_swap(
+            swap_id,
+            role="alice",
+        )
+
+        if (
+            existing.nostr_alice_pub
+            != alice_pubkey
+        ):
+            raise RuntimeError(
+                "SECURITY FAILURE: existing Alice "
+                "swap has different Alice identity"
+            )
+
+        if (
+            existing.nostr_bob_pub
+            != bob_pubkey
+        ):
+            raise RuntimeError(
+                "SECURITY FAILURE: existing Alice "
+                "swap has different Bob identity"
+            )
+
+        if (
+            float(existing.blake_amount)
+            != float(item["blake_amount"])
+        ):
+            raise RuntimeError(
+                "SECURITY FAILURE: existing Alice "
+                "swap has different BLAKE terms"
+            )
+
+        if (
+            int(existing.btc_sats)
+            != int(item["btc_sats"])
+        ):
+            raise RuntimeError(
+                "SECURITY FAILURE: existing Alice "
+                "swap has different BTC terms"
+            )
+
+        print()
+        print("REVERSE MARKET MATCH ALREADY IMPORTED")
+        print("=====================================")
+        print("match id:", args.match_id)
+        print("swap id: ", swap_id)
+        print()
+        print(
+            "PASS: existing Alice swap reused"
+        )
+        print(
+            "PASS: no second secret was generated"
+        )
+        print(
+            "PASS: no funds moved"
+        )
+        return
+
+    #
+    # Alice independently derives fresh v1.5 deadlines
+    # using her own view of both chains.
+    #
+    timeout_policy = TimeoutPolicy()
+
+    btc_height = int(
+        btc_cli(
+            "getblockcount"
+        )
+    )
+
+    blake_height = int(
+        blake_cli(
+            "getblockcount"
+        )
+    )
+
+    timeout_plan = build_timeout_plan(
+        btc_height=btc_height,
+        blake_height=blake_height,
+        policy=timeout_policy,
+    )
+
+    validate_timeout_plan(
+        timeout_plan,
+        timeout_policy,
+    )
+
+    #
+    # THIS is the security boundary:
+    #
+    # make_swap() generates a fresh 32-byte S locally,
+    # computes H = SHA256(S), and adopts the already
+    # negotiated public swap_id.
+    #
+    swap = make_swap(
+        float(item["blake_amount"]),
+        int(item["btc_sats"]),
+        timeout_plan.blake_timeout_height,
+        timeout_plan.btc_timeout_height,
+        swap_id=swap_id,
+    )
+
+    swap.timeout_policy_version = "1.5"
+
+    swap.btc_timeout_window_seconds = (
+        timeout_plan.btc_window_seconds
+    )
+
+    swap.blake_timeout_window_seconds = (
+        timeout_plan.blake_window_seconds
+    )
+
+    swap.bob_recovery_seconds = (
+        timeout_plan.bob_recovery_seconds
+    )
+
+    #
+    # Bind protocol roles to the authenticated
+    # market identities.
+    #
+    swap.nostr_alice_pub = (
+        alice_pubkey
+    )
+
+    swap.nostr_bob_pub = (
+        bob_pubkey
+    )
+
+    swap.validate()
+
+    save_swap(
+        swap,
+        role="alice",
+    )
+
+    #
+    # Durable reverse-market binding.
+    #
+    binding_dir = (
+        BASE_SWAP_DIR
+        / "market-match-bindings"
+    )
+
+    binding_dir.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    binding_path = (
+        binding_dir
+        / f"{swap_id}.json"
+    )
+
+    binding = {
+        "version": 2,
+        "direction":
+            MARKET_DIRECTION_BTC_FOR_BLAKE,
+
+        "offer_id": item["offer_id"],
+        "take_id": item["take_id"],
+        "match_id": item["event_id"],
+        "swap_id": swap_id,
+
+        "maker": item["maker"],
+        "taker": item["taker"],
+
+        "maker_role": "bob",
+        "taker_role": "alice",
+
+        "blake_amount": float(
+            item["blake_amount"]
+        ),
+
+        "btc_sats": int(
+            item["btc_sats"]
+        ),
+    }
+
+    tmp = binding_path.with_name(
+        binding_path.name + ".tmp"
+    )
+
+    with open(tmp, "w") as f:
+        json.dump(
+            binding,
+            f,
+            indent=2,
+            sort_keys=True,
+        )
+        f.write("\n")
+        f.flush()
+        os.fsync(f.fileno())
+
+    os.replace(
+        tmp,
+        binding_path,
+    )
+
+    print()
+    print("REVERSE MARKET MATCH IMPORTED")
+    print("=============================")
+    print("match id:", args.match_id)
+    print("swap id: ", swap.swap_id)
+    print()
+    print("direction: btc-for-blake")
+    print("maker role: bob")
+    print("taker role: alice")
+    print()
+    print(
+        "Alice Nostr:",
+        swap.nostr_alice_pub,
+    )
+    print(
+        "Bob Nostr:  ",
+        swap.nostr_bob_pub,
+    )
+    print()
+    print(
+        "BTC timeout:  ",
+        swap.btc_timeout,
+    )
+    print(
+        "BLAKE timeout:",
+        swap.blake_timeout,
+    )
+    print()
+    print(
+        "BTC window:",
+        f"{swap.btc_timeout_window_seconds / 3600:.2f} h",
+    )
+    print(
+        "Bob recovery:",
+        f"{swap.bob_recovery_seconds / 3600:.2f} h",
+    )
+    print(
+        "BLAKE window:",
+        f"{swap.blake_timeout_window_seconds / 3600:.2f} h",
+    )
+    print()
+    print(
+        "PASS: reverse match independently validated"
+    )
+    print(
+        "PASS: current participant derived as protocol Alice"
+    )
+    print(
+        "PASS: reserved swap_id adopted"
+    )
+    print(
+        "PASS: fresh secret S created only by Alice"
+    )
+    print(
+        "PASS: timeout plan independently derived"
+    )
+    print(
+        "PASS: no funds moved"
+    )
+
+
+def command_accept_reverse_swap_offer(args):
+    """
+    Import the ordinary atomic-swap offer after a
+    btc-for-blake market match.
+
+    In this direction:
+
+        market maker -> protocol Bob
+        market taker -> protocol Alice
+    """
+    import asyncio
+    import json
+    from types import SimpleNamespace
+
+    if len(args.match_id) != 64:
+        raise ValueError(
+            "match_id must be the full "
+            "64-character Nostr event ID"
+        )
+
+    bob_pubkey = current_nostr_pubkey()
+
+    match_event = asyncio.run(
+        nostr_fetch_event_by_id(
+            args.match_id
+        )
+    )
+
+    verify_nostr_event(
+        match_event
+    )
+
+    try:
+        match_message = json.loads(
+            match_event["content"]
+        )
+    except Exception as e:
+        raise RuntimeError(
+            "Market match content is invalid JSON"
+        ) from e
+
+    if (
+        match_message.get("type")
+        != "market-match"
+    ):
+        raise RuntimeError(
+            "Referenced event is not a market match"
+        )
+
+    #
+    # For reverse direction the current participant
+    # must be the MARKET MAKER, not the taker.
+    #
+    if (
+        match_event["pubkey"]
+        != bob_pubkey
+    ):
+        raise RuntimeError(
+            "SECURITY FAILURE: current participant "
+            "did not sign this market match"
+        )
+
+    if (
+        match_message.get("maker")
+        != bob_pubkey
+    ):
+        raise RuntimeError(
+            "SECURITY FAILURE: market match "
+            "maker identity mismatch"
+        )
+
+    expected_taker = match_message.get(
+        "taker"
+    )
+
+    if not isinstance(
+        expected_taker,
+        str,
+    ):
+        raise RuntimeError(
+            "Market match has no valid taker identity"
+        )
+
+    #
+    # Now invoke the canonical validator using the
+    # ACTUAL signed taker identity.
+    #
+    # That validator independently verifies:
+    #   offer
+    #   take
+    #   match
+    #   signatures
+    #   direction
+    #   roles
+    #   economic terms
+    #
+    item = asyncio.run(
+        validate_market_match_event(
+            match_event,
+            expected_taker,
+        )
+    )
+
+    if (
+        item.get("direction")
+        != MARKET_DIRECTION_BTC_FOR_BLAKE
+    ):
+        raise RuntimeError(
+            "Market match is not btc-for-blake"
+        )
+
+    if item.get("maker_role") != "bob":
+        raise RuntimeError(
+            "SECURITY FAILURE: maker did not "
+            "derive to protocol Bob"
+        )
+
+    if item.get("taker_role") != "alice":
+        raise RuntimeError(
+            "SECURITY FAILURE: taker did not "
+            "derive to protocol Alice"
+        )
+
+    if item["maker"] != bob_pubkey:
+        raise RuntimeError(
+            "SECURITY FAILURE: validated maker "
+            "is not current Bob"
+        )
+
+    alice_pubkey = item["taker"]
+
+    #
+    # Idempotency:
+    # if Bob already imported the resulting protocol
+    # offer, do not generate new Bob settlement keys.
+    #
+    existing_path = swap_path(
+        item["swap_id"],
+        role="bob",
+    )
+
+    if existing_path.exists():
+        existing = load_swap(
+            item["swap_id"],
+            role="bob",
+        )
+
+        if (
+            existing.nostr_alice_pub
+            != alice_pubkey
+        ):
+            raise RuntimeError(
+                "SECURITY FAILURE: existing Bob "
+                "state has different Alice identity"
+            )
+
+        if (
+            existing.nostr_bob_pub
+            != bob_pubkey
+        ):
+            raise RuntimeError(
+                "SECURITY FAILURE: existing Bob "
+                "state has different Bob identity"
+            )
+
+        if (
+            float(existing.blake_amount)
+            != float(item["blake_amount"])
+        ):
+            raise RuntimeError(
+                "SECURITY FAILURE: existing Bob "
+                "state has different BLAKE terms"
+            )
+
+        if (
+            int(existing.btc_sats)
+            != int(item["btc_sats"])
+        ):
+            raise RuntimeError(
+                "SECURITY FAILURE: existing Bob "
+                "state has different BTC terms"
+            )
+
+        print()
+        print("REVERSE SWAP OFFER ALREADY IMPORTED")
+        print("===================================")
+        print("match id:", args.match_id)
+        print("swap id: ", item["swap_id"])
+        print()
+        print(
+            "PASS: existing Bob state reused"
+        )
+        print(
+            "PASS: no new Bob settlement keys created"
+        )
+        print(
+            "PASS: Bob still does NOT know secret S"
+        )
+        return
+
+    #
+    # Import Start9's ordinary protocol offer, but
+    # constrain it to the identities and economics
+    # already authenticated by the market match.
+    #
+    command_accept_offer(
+        SimpleNamespace(
+            swap_id=item["swap_id"],
+            expected_alice_pub=alice_pubkey,
+            expected_blake_amount=item[
+                "blake_amount"
+            ],
+            expected_btc_sats=item[
+                "btc_sats"
+            ],
+        )
+    )
+
+    #
+    # command_accept_offer() created Bob state and
+    # generated Bob-owned settlement keys.
+    #
+    swap = load_swap(
+        item["swap_id"],
+        role="bob",
+    )
+
+    if swap.secret_hex is not None:
+        raise RuntimeError(
+            "SECURITY FAILURE: Bob learned "
+            "Alice's original secret"
+        )
+
+    if (
+        swap.nostr_alice_pub
+        != alice_pubkey
+    ):
+        raise RuntimeError(
+            "SECURITY FAILURE: protocol offer "
+            "Alice identity mismatch"
+        )
+
+    #
+    # Bob's Nostr identity was already proven by the
+    # market match. Persist that binding locally.
+    #
+    swap.nostr_bob_pub = bob_pubkey
+
+    save_swap(
+        swap,
+        role="bob",
+    )
+
+    print()
+    print("REVERSE SWAP OFFER IMPORTED")
+    print("===========================")
+    print("match id:", args.match_id)
+    print("swap id: ", swap.swap_id)
+    print()
+    print("Alice Nostr:", swap.nostr_alice_pub)
+    print("Bob Nostr:  ", swap.nostr_bob_pub)
+    print()
+    print(
+        "PASS: market maker derived as protocol Bob"
+    )
+    print(
+        "PASS: market taker derived as protocol Alice"
+    )
+    print(
+        "PASS: protocol offer signed by matched Alice"
+    )
+    print(
+        "PASS: economic terms match signed market match"
+    )
+    print(
+        "PASS: v1.5 timeout safety independently validated"
+    )
+    print(
+        "PASS: Bob does NOT know secret S"
     )
 
 
@@ -8413,6 +9702,298 @@ def command_accept_market_match(args):
     )
 
 
+def accept_reverse_market_take(
+    args,
+    original,
+    offer_message,
+    selected,
+    take_event,
+):
+    """
+    Accept a v2 btc-for-blake market take.
+
+    The offer maker is protocol Bob.
+    The taker is protocol Alice.
+
+    Bob may select the take and reserve the public swap_id,
+    but MUST NOT create Alice's secret S.
+    """
+    import asyncio
+    import json
+    from types import SimpleNamespace
+
+    direction = selected["direction"]
+
+    if (
+        direction
+        != MARKET_DIRECTION_BTC_FOR_BLAKE
+    ):
+        raise RuntimeError(
+            "Reverse-market helper called for "
+            "wrong direction"
+        )
+
+    roles = market_protocol_roles(
+        direction
+    )
+
+    if (
+        roles["maker_role"] != "bob"
+        or roles["taker_role"] != "alice"
+    ):
+        raise RuntimeError(
+            "SECURITY FAILURE: reverse direction "
+            "did not derive Bob/Alice roles"
+        )
+
+    maker_pub = original["pubkey"]
+    taker_pub = take_event["pubkey"]
+
+    if current_nostr_pubkey() != maker_pub:
+        raise RuntimeError(
+            "SECURITY FAILURE: current participant "
+            "did not create this market offer"
+        )
+
+    if selected["taker"] != taker_pub:
+        raise RuntimeError(
+            "SECURITY FAILURE: selected taker "
+            "identity mismatch"
+        )
+
+    selection_dir = (
+        BASE_SWAP_DIR
+        / "market-selections"
+    )
+
+    selection_dir.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    selection_path = (
+        selection_dir
+        / f"{args.take_id}.json"
+    )
+
+    offer_selection_path = (
+        selection_dir
+        / f"offer-{original['id']}.json"
+    )
+
+    #
+    # If already selected, reuse the exact same binding.
+    #
+    existing = None
+
+    for path in (
+        selection_path,
+        offer_selection_path,
+    ):
+        if not path.exists():
+            continue
+
+        with open(path) as f:
+            candidate = json.load(f)
+
+        if existing is None:
+            existing = candidate
+
+        elif candidate != existing:
+            raise RuntimeError(
+                "SECURITY FAILURE: reverse market "
+                "selection records disagree"
+            )
+
+    if existing is not None:
+        if (
+            existing.get("offer_id")
+            != original["id"]
+            or existing.get("take_id")
+            != args.take_id
+            or existing.get("direction")
+            != direction
+            or existing.get("maker_role")
+            != "bob"
+            or existing.get("taker_role")
+            != "alice"
+            or existing.get("nostr_bob_pub")
+            != maker_pub
+            or existing.get("nostr_alice_pub")
+            != taker_pub
+        ):
+            raise RuntimeError(
+                "SECURITY FAILURE: existing reverse "
+                "market selection is inconsistent"
+            )
+
+        swap_id = existing.get(
+            "swap_id"
+        )
+
+        if not swap_id:
+            raise RuntimeError(
+                "Existing reverse selection has "
+                "no swap_id"
+            )
+
+        print()
+        print("REVERSE MARKET TAKE ALREADY ACCEPTED")
+        print("====================================")
+        print("offer id:", original["id"])
+        print("take id: ", args.take_id)
+        print("swap id: ", swap_id)
+        print()
+        print(
+            "PASS: no second swap ID was created"
+        )
+        print(
+            "PASS: no secret was created by Bob"
+        )
+        return existing
+
+    #
+    # Public coordination ID only.
+    # No make_swap() here.
+    #
+    swap_id = make_swap_id()
+
+    selection = {
+        "version": 2,
+        "offer_id": original["id"],
+        "take_id": args.take_id,
+        "swap_id": swap_id,
+
+        "direction": direction,
+        "maker_role": "bob",
+        "taker_role": "alice",
+
+        "nostr_bob_pub": maker_pub,
+        "nostr_alice_pub": taker_pub,
+
+        "blake_amount": float(
+            offer_message["blake_amount"]
+        ),
+        "btc_sats": int(
+            offer_message["btc_sats"]
+        ),
+    }
+
+    for path in (
+        selection_path,
+        offer_selection_path,
+    ):
+        tmp = path.with_name(
+            path.name + ".tmp"
+        )
+
+        with open(tmp, "w") as f:
+            json.dump(
+                selection,
+                f,
+                indent=2,
+                sort_keys=True,
+            )
+            f.write("\n")
+            f.flush()
+            os.fsync(f.fileno())
+
+        os.replace(
+            tmp,
+            path,
+        )
+
+    #
+    # Build the signed v2 match using only public
+    # negotiated terms.  Still no secret/hashlock.
+    #
+    public_swap = SimpleNamespace(
+        swap_id=swap_id,
+        blake_amount=selection[
+            "blake_amount"
+        ],
+        btc_sats=selection[
+            "btc_sats"
+        ],
+    )
+
+    match_event, match_message = (
+        build_market_match_event(
+            original,
+            take_event,
+            public_swap,
+        )
+    )
+
+    verify_nostr_event(
+        match_event
+    )
+
+    match_id = asyncio.run(
+        nostr_publish_event(
+            match_event
+        )
+    )
+
+    selection[
+        "market_match_id"
+    ] = match_id
+
+    for path in (
+        selection_path,
+        offer_selection_path,
+    ):
+        tmp = path.with_name(
+            path.name + ".tmp"
+        )
+
+        with open(tmp, "w") as f:
+            json.dump(
+                selection,
+                f,
+                indent=2,
+                sort_keys=True,
+            )
+            f.write("\n")
+            f.flush()
+            os.fsync(f.fileno())
+
+        os.replace(
+            tmp,
+            path,
+        )
+
+    print()
+    print("REVERSE MARKET TAKE ACCEPTED")
+    print("============================")
+    print("offer id:", original["id"])
+    print("take id: ", args.take_id)
+    print("match id:", match_id)
+    print("swap id: ", swap_id)
+    print()
+    print("direction:", direction)
+    print("maker role: bob")
+    print("taker role: alice")
+    print()
+    print(
+        "PASS: maker selected exact signed take"
+    )
+    print(
+        "PASS: public swap_id reserved"
+    )
+    print(
+        "PASS: Bob did NOT create secret S"
+    )
+    print(
+        "PASS: no atomic-swap state exists yet"
+    )
+    print(
+        "PASS: no funds moved"
+    )
+
+    return selection
+
+
 def command_accept_market_take(args):
     import asyncio
     import json
@@ -8530,6 +10111,25 @@ def command_accept_market_take(args):
         raise RuntimeError(
             "SECURITY FAILURE: selected take "
             "did not pass market-take validation"
+        )
+
+    #
+    # v2 reverse direction:
+    #
+    # The offer maker is protocol Bob and must NOT
+    # create Alice's secret/hashlock.  Stop before
+    # entering the historical Alice-maker path.
+    #
+    if (
+        selected.get("direction")
+        == MARKET_DIRECTION_BTC_FOR_BLAKE
+    ):
+        return accept_reverse_market_take(
+            args,
+            original,
+            offer_message,
+            selected,
+            take_event,
         )
 
     #
@@ -10054,6 +11654,20 @@ def main():
         help="Offer lifetime in minutes (default: 60)"
     )
 
+    p.add_argument(
+        "--direction",
+        choices=[
+            MARKET_DIRECTION_BLAKE_FOR_BTC,
+            MARKET_DIRECTION_BTC_FOR_BLAKE,
+        ],
+        default=MARKET_DIRECTION_BLAKE_FOR_BTC,
+        help=(
+            "Asset the maker gives: "
+            "blake-for-btc or btc-for-blake "
+            "(default: blake-for-btc)"
+        ),
+    )
+
     p.set_defaults(
         func=command_publish_market_offer
     )
@@ -10121,6 +11735,34 @@ def main():
 
     p.set_defaults(
         func=command_market_matches
+    )
+
+    p = sub.add_parser(
+        "accept-reverse-market-match",
+        help=(
+            "Import a btc-for-blake market match "
+            "as protocol Alice"
+        ),
+    )
+
+    p.add_argument("match_id")
+
+    p.set_defaults(
+        func=command_accept_reverse_market_match
+    )
+
+    p = sub.add_parser(
+        "accept-reverse-swap-offer",
+        help=(
+            "Import matched Alice's protocol offer "
+            "as Bob for btc-for-blake"
+        ),
+    )
+
+    p.add_argument("match_id")
+
+    p.set_defaults(
+        func=command_accept_reverse_swap_offer
     )
 
     p = sub.add_parser(

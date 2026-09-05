@@ -64,6 +64,11 @@ echo "== Bounded funding scan =="
 python3 tests/swap_bounded_scan_tests.py
 
 echo
+echo
+echo "== Reorg safety =="
+PYTHONPATH="$PROJECT_DIR/tests:$PROJECT_DIR/src" python3 tests/swap_reorg_safety_tests.py
+
+
 echo "== Autonomous agents: kill / restart / recovery =="
 python3 tests/swap_autonomous_agents_tests.py
 

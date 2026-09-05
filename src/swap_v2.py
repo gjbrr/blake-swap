@@ -4563,6 +4563,91 @@ def command_receive_blake_claimed(args):
 
 
 
+def verify_confirmed_btc_claim_for_blake(swap):
+    """
+    Before Bob spends BLAKE with S, independently prove that
+    the exact Bitcoin claim which revealed S is still confirmed
+    on Bitcoin's active chain.
+    """
+
+    if not swap.btc_claim_txid:
+        raise RuntimeError(
+            "SECURITY FAILURE: Bob has no Bitcoin claim txid"
+        )
+
+    if not swap.btc_claim_blockhash:
+        raise RuntimeError(
+            "SECURITY FAILURE: Bob has no Bitcoin claim blockhash"
+        )
+
+    if not swap.btc_funding_txid:
+        raise RuntimeError(
+            "SECURITY FAILURE: swap has no Bitcoin funding txid"
+        )
+
+    if swap.btc_funding_vout is None:
+        raise RuntimeError(
+            "SECURITY FAILURE: swap has no Bitcoin funding vout"
+        )
+
+    if not swap.revealed_secret_hex:
+        raise RuntimeError(
+            "SECURITY FAILURE: Bob has no revealed Bitcoin secret"
+        )
+
+    tx = btc_cli(
+        "getrawtransaction",
+        swap.btc_claim_txid,
+        True,
+        swap.btc_claim_blockhash,
+    )
+
+    if tx.get("in_active_chain") is False:
+        raise RuntimeError(
+            "SECURITY FAILURE: Bitcoin claim is no longer "
+            "on the active chain"
+        )
+
+    confirmations = int(
+        tx.get("confirmations", 0) or 0
+    )
+
+    if confirmations < 1:
+        raise RuntimeError(
+            "SECURITY FAILURE: Bitcoin claim is not confirmed "
+            "on the active chain"
+        )
+
+    htlc_input = None
+
+    for vin in tx.get("vin", []):
+        if (
+            vin.get("txid") == swap.btc_funding_txid
+            and vin.get("vout") == swap.btc_funding_vout
+        ):
+            htlc_input = vin
+            break
+
+    if htlc_input is None:
+        raise RuntimeError(
+            "SECURITY FAILURE: Bitcoin claim no longer spends "
+            "the expected HTLC"
+        )
+
+    witness = htlc_input.get(
+        "txinwitness",
+        [],
+    )
+
+    if swap.revealed_secret_hex not in witness:
+        raise RuntimeError(
+            "SECURITY FAILURE: confirmed Bitcoin claim does not "
+            "contain Bob's revealed secret"
+        )
+
+    return True
+
+
 @serialized_funding("blake")
 def command_claim_blake(args):
 
@@ -4592,6 +4677,15 @@ def command_claim_blake(args):
         raise RuntimeError(
             "Revealed secret does not match swap hash"
         )
+
+    #
+    # Knowing S is not sufficient. Before Bob moves BLAKE,
+    # the Bitcoin spend which revealed S must still be
+    # confirmed on Bitcoin's active chain.
+    #
+    verify_confirmed_btc_claim_for_blake(
+        swap
+    )
 
     recovered = require_recovered_branch(
         swap,
@@ -4758,6 +4852,88 @@ def command_claim_blake(args):
     print()
     print("PASS: original BLAKE HTLC is spent")
 
+def verify_confirmed_btc_refund_for_blake(swap):
+    """
+    Before Alice refunds BLAKE from BTC_REFUNDED state,
+    independently prove that Bob's exact Bitcoin refund
+    is still confirmed on Bitcoin's active chain.
+    """
+
+    if not swap.btc_refund_txid:
+        raise RuntimeError(
+            "SECURITY FAILURE: Alice has no Bitcoin refund txid"
+        )
+
+    if not swap.btc_refund_blockhash:
+        raise RuntimeError(
+            "SECURITY FAILURE: Alice has no Bitcoin refund blockhash"
+        )
+
+    if not swap.btc_funding_txid:
+        raise RuntimeError(
+            "SECURITY FAILURE: swap has no Bitcoin funding txid"
+        )
+
+    if swap.btc_funding_vout is None:
+        raise RuntimeError(
+            "SECURITY FAILURE: swap has no Bitcoin funding vout"
+        )
+
+    tx = btc_cli(
+        "getrawtransaction",
+        swap.btc_refund_txid,
+        True,
+        swap.btc_refund_blockhash,
+    )
+
+    if tx.get("in_active_chain") is False:
+        raise RuntimeError(
+            "SECURITY FAILURE: Bitcoin refund is no longer "
+            "on the active chain"
+        )
+
+    confirmations = int(
+        tx.get("confirmations", 0) or 0
+    )
+
+    if confirmations < 1:
+        raise RuntimeError(
+            "SECURITY FAILURE: Bitcoin refund is not confirmed "
+            "on the active chain"
+        )
+
+    spends_htlc = False
+
+    for vin in tx.get("vin", []):
+        if (
+            vin.get("txid") == swap.btc_funding_txid
+            and vin.get("vout") == swap.btc_funding_vout
+        ):
+            spends_htlc = True
+            break
+
+    if not spends_htlc:
+        raise RuntimeError(
+            "SECURITY FAILURE: Bitcoin refund no longer spends "
+            "the expected HTLC"
+        )
+
+    branch = classify_htlc_spend(
+        tx,
+        swap.btc_funding_txid,
+        swap.btc_funding_vout,
+        swap.secret_hash,
+    )
+
+    if branch != "refund":
+        raise RuntimeError(
+            "SECURITY FAILURE: recorded Bitcoin refund is not "
+            "the refund branch"
+        )
+
+    return True
+
+
 @serialized_funding("blake")
 def command_refund_blake(args):
     swap = load_swap(
@@ -4772,6 +4948,17 @@ def command_refund_blake(args):
         raise ValueError(
             "refund-blake requires state "
             "BLAKE_FUNDED or BTC_REFUNDED"
+        )
+
+    if State(swap.state) == State.BTC_REFUNDED:
+        #
+        # Stale local BTC_REFUNDED state is not sufficient
+        # authority to move BLAKE. Re-prove Bob's refund
+        # against Bitcoin's active chain immediately before
+        # constructing/broadcasting Alice's BLAKE refund.
+        #
+        verify_confirmed_btc_refund_for_blake(
+            swap
         )
 
     if not swap.blake_funding_txid:
@@ -5693,6 +5880,316 @@ def command_refund_btc(args):
     print("block: ", blockhash)
     print("state: ", swap.state)
 
+def verify_final_blake_claim_active(swap):
+    """
+    Prove that Bob's final BLAKE claim still exists on the
+    active BLAKE chain and still spends this swap's HTLC
+    through the claim branch.
+    """
+
+    if not swap.blake_claim_txid:
+        raise RuntimeError(
+            "SECURITY FAILURE: swap has no BLAKE claim txid"
+        )
+
+    recovered = find_confirmed_htlc_spend(
+        swap,
+        "blake",
+    )
+
+    if recovered is None:
+        raise RuntimeError(
+            "SECURITY FAILURE: final BLAKE claim is no longer "
+            "confirmed on the active chain"
+        )
+
+    if recovered.get("branch") != "claim":
+        raise RuntimeError(
+            "SECURITY FAILURE: active BLAKE HTLC spend is not "
+            "the expected claim branch"
+        )
+
+    if recovered.get("txid") != swap.blake_claim_txid:
+        raise RuntimeError(
+            "SECURITY FAILURE: active BLAKE claim txid differs "
+            "from recorded final settlement"
+        )
+
+    return True
+
+
+def recover_final_blake_claim_reorg(swap):
+    """
+    Recover from a reorg which removed Bob's final BLAKE claim.
+
+    This is intentionally NOT a normal state transition. The normal
+    protocol graph remains forward-only.
+
+    A backward correction is permitted here only after both chains
+    prove that BTC_CLAIMED is again the authoritative durable state.
+    """
+
+    #
+    # First ask the active BLAKE chain what currently spends
+    # the original HTLC.
+    #
+    current_blake_spend = find_confirmed_htlc_spend(
+        swap,
+        "blake",
+    )
+
+    if current_blake_spend is not None:
+        #
+        # If the recorded final claim still exists, there is
+        # nothing to recover.
+        #
+        if (
+            current_blake_spend.get("branch") == "claim"
+            and current_blake_spend.get("txid")
+            == swap.blake_claim_txid
+        ):
+            return False
+
+        #
+        # Something else spent the BLAKE HTLC. Do not guess.
+        #
+        raise RuntimeError(
+            "SECURITY FAILURE: active BLAKE HTLC spend "
+            "conflicts with recorded final settlement"
+        )
+
+    #
+    # No confirmed BLAKE spend exists anymore.
+    #
+    # A reorg normally returns the disconnected transaction
+    # to the mempool. If Bob's exact recorded final claim is
+    # still pending there, do NOT roll durable state backward.
+    #
+    try:
+        blake_cli(
+            "getmempoolentry",
+            swap.blake_claim_txid,
+        )
+
+        pending_tx = blake_cli(
+            "getrawtransaction",
+            swap.blake_claim_txid,
+            True,
+        )
+
+        pending_branch = classify_htlc_spend(
+            pending_tx,
+            swap.blake_funding_txid,
+            swap.blake_funding_vout,
+            swap.secret_hash,
+        )
+
+        if pending_branch != "claim":
+            raise RuntimeError(
+                "SECURITY FAILURE: recorded BLAKE claim "
+                "is pending in mempool but does not use "
+                "the expected claim branch"
+            )
+
+        return "pending"
+
+    except RuntimeError as e:
+        #
+        # "Transaction not in mempool" means genuine rollback
+        # remains possible. Any other validation failure above
+        # must fail closed.
+        #
+        if (
+            "Transaction not in mempool"
+            not in str(e)
+        ):
+            raise
+
+    #
+    # The recorded claim is neither confirmed nor pending.
+    #
+    # Prove the funding HTLC has returned on the active chain,
+    # deliberately ignoring mempool effects.
+    #
+    utxo = blake_cli(
+        "gettxout",
+        swap.blake_funding_txid,
+        swap.blake_funding_vout,
+        False,
+    )
+
+    if not utxo:
+        raise RuntimeError(
+            "SECURITY FAILURE: BLAKE HTLC is unavailable "
+            "after final claim disappeared from both "
+            "active chain and mempool"
+        )
+
+    #
+    # Now establish the last still-confirmed settlement fact:
+    # Alice's Bitcoin claim.
+    #
+    current_btc_spend = find_confirmed_htlc_spend(
+        swap,
+        "btc",
+    )
+
+    if current_btc_spend is None:
+        raise RuntimeError(
+            "SECURITY FAILURE: cannot recover final BLAKE "
+            "claim reorg because no confirmed Bitcoin HTLC "
+            "spend establishes BTC_CLAIMED"
+        )
+
+    if current_btc_spend.get("branch") != "claim":
+        raise RuntimeError(
+            "SECURITY FAILURE: Bitcoin HTLC is not currently "
+            "spent through Alice's claim branch"
+        )
+
+    if (
+        not swap.btc_claim_txid
+        or current_btc_spend.get("txid")
+        != swap.btc_claim_txid
+    ):
+        raise RuntimeError(
+            "SECURITY FAILURE: active Bitcoin claim differs "
+            "from recorded BTC settlement"
+        )
+
+    #
+    # At this point both chains agree:
+    #
+    #   Bitcoin: Alice's claim is confirmed.
+    #   BLAKE:   Bob's claim vanished and the HTLC is unspent.
+    #
+    # The authoritative state is therefore BTC_CLAIMED.
+    #
+    # Do not use transition(); reorg recovery is deliberately
+    # separate from the normal forward-only protocol graph.
+    #
+    swap.blake_claim_txid = None
+    swap.blake_claim_blockhash = None
+
+    swap.state = State.BTC_CLAIMED.value
+
+    return True
+
+
+def recover_final_blake_refund_reorg(swap):
+    """
+    Revalidate a persisted BLAKE_REFUNDED terminal state.
+
+    Returns:
+        False       exact refund is still confirmed
+        "pending"   exact refund is currently in the mempool
+        True        refund vanished; state was corrected to BTC_REFUNDED
+
+    Normal protocol transitions remain forward-only. The backward
+    correction here is permitted only after both chains establish
+    that BTC_REFUNDED is again authoritative.
+    """
+
+    if not swap.blake_refund_txid:
+        raise RuntimeError(
+            "SECURITY FAILURE: swap has no BLAKE refund txid"
+        )
+
+    #
+    # First inspect confirmed active-chain truth.
+    #
+    active = find_confirmed_htlc_spend(
+        swap,
+        "blake",
+    )
+
+    if active is not None:
+        if (
+            active.get("branch") == "refund"
+            and active.get("txid")
+            == swap.blake_refund_txid
+        ):
+            return False
+
+        raise RuntimeError(
+            "SECURITY FAILURE: active BLAKE HTLC spend "
+            "conflicts with recorded final refund"
+        )
+
+    #
+    # No confirmed spend. A disconnected refund will normally
+    # return to the mempool. If our exact refund is still there,
+    # settlement is pending rather than rolled back.
+    #
+    try:
+        blake_cli(
+            "getmempoolentry",
+            swap.blake_refund_txid,
+        )
+
+        pending_tx = blake_cli(
+            "getrawtransaction",
+            swap.blake_refund_txid,
+            True,
+        )
+
+        branch = classify_htlc_spend(
+            pending_tx,
+            swap.blake_funding_txid,
+            swap.blake_funding_vout,
+            swap.secret_hash,
+        )
+
+        if branch != "refund":
+            raise RuntimeError(
+                "SECURITY FAILURE: recorded BLAKE refund "
+                "is pending but is not the refund branch"
+            )
+
+        return "pending"
+
+    except RuntimeError as e:
+        if "Transaction not in mempool" not in str(e):
+            raise
+
+    #
+    # The exact refund is neither confirmed nor pending.
+    # Confirm that the original HTLC exists again on-chain,
+    # ignoring mempool effects.
+    #
+    utxo = blake_cli(
+        "gettxout",
+        swap.blake_funding_txid,
+        swap.blake_funding_vout,
+        False,
+    )
+
+    if not utxo:
+        raise RuntimeError(
+            "SECURITY FAILURE: BLAKE HTLC is unavailable "
+            "after final refund disappeared"
+        )
+
+    #
+    # Before moving durable state backward, independently prove
+    # that Bob's Bitcoin refund is STILL confirmed. That makes
+    # BTC_REFUNDED the authoritative cross-chain state.
+    #
+    verify_confirmed_btc_refund_for_blake(
+        swap
+    )
+
+    swap.blake_refund_txid = None
+    swap.blake_refund_blockhash = None
+
+    #
+    # This is deliberate reorg recovery, not a normal transition.
+    #
+    swap.state = State.BTC_REFUNDED.value
+
+    return True
+
+
 def command_complete(args):
     swap = load_swap(
         args.swap_id,
@@ -5703,6 +6200,14 @@ def command_complete(args):
         raise ValueError(
             "complete requires state BLAKE_CLAIMED"
         )
+
+    #
+    # COMPLETE is only valid while the final Bob claim
+    # remains confirmed on the active BLAKE chain.
+    #
+    verify_final_blake_claim_active(
+        swap
+    )
 
     swap.transition(
         State.COMPLETE
@@ -11474,8 +11979,112 @@ def command_sync_settlement(args):
         if state in {
             State.COMPLETE,
             State.BLAKE_CLAIMED,
-            State.BLAKE_REFUNDED,
         }:
+            #
+            # Terminal claim state is not trusted merely
+            # because it was persisted earlier.
+            #
+            # If the recorded final BLAKE claim disappeared
+            # in a reorg, recover only after both chains prove
+            # that BTC_CLAIMED is again authoritative.
+            #
+            rolled_back = recover_final_blake_claim_reorg(
+                swap
+            )
+
+            if rolled_back == "pending":
+                print()
+                print("FINAL BLAKE CLAIM PENDING AFTER REORG")
+                print("====================================")
+                print("state:", swap.state)
+                print(
+                    "PASS: exact recorded BLAKE claim "
+                    "remains live in mempool"
+                )
+                print(
+                    "PASS: durable state was not rolled back"
+                )
+                break
+
+            if rolled_back is True:
+                old_state = state.value
+
+                save_swap(
+                    swap,
+                    role=role,
+                )
+
+                progress += 1
+
+                print()
+                print("FINAL BLAKE CLAIM REORG RECOVERED")
+                print("=================================")
+                print("old state:", old_state)
+                print("new state:", swap.state)
+                print(
+                    "PASS: Bitcoin claim remains confirmed"
+                )
+                print(
+                    "PASS: BLAKE HTLC is available again"
+                )
+
+                #
+                # Continue through reconciliation using the
+                # newly authoritative BTC_CLAIMED state.
+                #
+                continue
+
+            break
+
+        if state == State.BLAKE_REFUNDED:
+            recovered_refund = (
+                recover_final_blake_refund_reorg(
+                    swap
+                )
+            )
+
+            if recovered_refund == "pending":
+                print()
+                print("FINAL BLAKE REFUND PENDING AFTER REORG")
+                print("=====================================")
+                print("state:", swap.state)
+                print(
+                    "PASS: exact recorded BLAKE refund "
+                    "remains live in mempool"
+                )
+                print(
+                    "PASS: durable state was not rolled back"
+                )
+                break
+
+            if recovered_refund is True:
+                old_state = state.value
+
+                save_swap(
+                    swap,
+                    role=role,
+                )
+
+                progress += 1
+
+                print()
+                print("FINAL BLAKE REFUND REORG RECOVERED")
+                print("==================================")
+                print("old state:", old_state)
+                print("new state:", swap.state)
+                print(
+                    "PASS: Bitcoin refund remains confirmed"
+                )
+                print(
+                    "PASS: BLAKE HTLC is available again"
+                )
+
+                continue
+
+            #
+            # False means the exact recorded refund remains
+            # confirmed on the active BLAKE chain.
+            #
             break
 
         # No settlement spend exists yet at OFFERED.

@@ -763,6 +763,382 @@ def test_happy() -> None:
     print("happy swap:", swap_id)
 
 
+
+def test_reorg_btc_claim() -> None:
+    banner("REORG SAFETY: BTC CLAIM ROLLBACK")
+
+    swap_id = make_fresh_swap()
+    print("swap:", swap_id)
+
+    handshake(swap_id)
+    fund_blake_and_sync(swap_id)
+    fund_btc_and_sync(swap_id)
+
+    swap_cmd(
+        "claim-btc",
+        swap_id,
+        role="alice",
+    )
+
+    alice = load_state(
+        swap_id,
+        "alice",
+    )
+
+    claim_blockhash = alice.get(
+        "btc_claim_blockhash"
+    )
+
+    require(
+        bool(claim_blockhash),
+        "Alice has no BTC claim blockhash",
+    )
+
+    swap_cmd(
+        "publish-btc-claimed",
+        swap_id,
+        role="alice",
+    )
+
+    swap_cmd(
+        "receive-btc-claimed",
+        swap_id,
+        role="bob",
+    )
+
+    swap_cmd(
+        "extract-secret",
+        swap_id,
+        role="bob",
+    )
+
+    bob = load_state(
+        swap_id,
+        "bob",
+    )
+
+    require(
+        bob["state"] == "BTC_CLAIMED",
+        "Bob did not reach BTC_CLAIMED",
+    )
+
+    require(
+        bool(bob.get("revealed_secret_hex")),
+        "Bob did not recover S",
+    )
+
+    btc_cli(
+        "invalidateblock",
+        claim_blockhash,
+    )
+
+    try:
+        proc = swap_cmd(
+            "claim-blake",
+            swap_id,
+            role="bob",
+            expect_ok=False,
+        )
+
+        output = (
+            (proc.stdout or "")
+            + "\n"
+            + (proc.stderr or "")
+        )
+
+        require(
+            proc.returncode != 0,
+            "Bob claimed BLAKE after BTC claim reorg",
+        )
+
+        require(
+            (
+                "Bitcoin claim is no longer on the active chain"
+                in output
+                or
+                "Bitcoin claim is not confirmed"
+                in output
+            ),
+            (
+                "claim-blake failed for unexpected reason:\n"
+                + output[-1600:]
+            ),
+        )
+
+        ok(
+            "Bob refuses BLAKE claim after "
+            "BTC claim confirmation rollback"
+        )
+
+    finally:
+        btc_cli(
+            "reconsiderblock",
+            claim_blockhash,
+        )
+
+    print("reorg swap:", swap_id)
+
+
+
+def test_reorg_btc_claim() -> None:
+    banner("REORG SAFETY: BTC CLAIM ROLLBACK")
+
+    swap_id = make_fresh_swap()
+    print("swap:", swap_id)
+
+    handshake(swap_id)
+    fund_blake_and_sync(swap_id)
+    fund_btc_and_sync(swap_id)
+
+    swap_cmd(
+        "claim-btc",
+        swap_id,
+        role="alice",
+    )
+
+    alice = load_state(
+        swap_id,
+        "alice",
+    )
+
+    claim_blockhash = alice.get(
+        "btc_claim_blockhash"
+    )
+
+    require(
+        bool(claim_blockhash),
+        "Alice has no BTC claim blockhash",
+    )
+
+    swap_cmd(
+        "publish-btc-claimed",
+        swap_id,
+        role="alice",
+    )
+
+    swap_cmd(
+        "receive-btc-claimed",
+        swap_id,
+        role="bob",
+    )
+
+    swap_cmd(
+        "extract-secret",
+        swap_id,
+        role="bob",
+    )
+
+    bob = load_state(
+        swap_id,
+        "bob",
+    )
+
+    require(
+        bob["state"] == "BTC_CLAIMED",
+        "Bob did not reach BTC_CLAIMED",
+    )
+
+    require(
+        bool(bob.get("revealed_secret_hex")),
+        "Bob did not recover S",
+    )
+
+    btc_cli(
+        "invalidateblock",
+        claim_blockhash,
+    )
+
+    try:
+        proc = swap_cmd(
+            "claim-blake",
+            swap_id,
+            role="bob",
+            expect_ok=False,
+        )
+
+        output = (
+            (proc.stdout or "")
+            + "\n"
+            + (proc.stderr or "")
+        )
+
+        require(
+            proc.returncode != 0,
+            "Bob claimed BLAKE after BTC claim reorg",
+        )
+
+        require(
+            (
+                "Bitcoin claim is no longer on the active chain"
+                in output
+                or
+                "Bitcoin claim is not confirmed"
+                in output
+            ),
+            (
+                "claim-blake failed for unexpected reason:\n"
+                + output[-1600:]
+            ),
+        )
+
+        ok(
+            "Bob refuses BLAKE claim after "
+            "BTC claim confirmation rollback"
+        )
+
+    finally:
+        btc_cli(
+            "reconsiderblock",
+            claim_blockhash,
+        )
+
+    print("reorg swap:", swap_id)
+
+
+
+def test_reorg_btc_refund() -> None:
+    banner("REORG SAFETY: BTC REFUND ROLLBACK")
+
+    swap_id = make_fresh_swap()
+    print("swap:", swap_id)
+
+    handshake(swap_id)
+    fund_blake_and_sync(swap_id)
+    fund_btc_and_sync(swap_id)
+
+    bob = load_state(
+        swap_id,
+        "bob",
+    )
+
+    btc_height = int(
+        btc_cli("getblockcount")
+    )
+
+    blocks = (
+        int(bob["btc_timeout"])
+        - btc_height
+    )
+
+    if blocks > 0:
+        mine_btc(blocks)
+
+    swap_cmd(
+        "refund-btc",
+        swap_id,
+        role="bob",
+    )
+
+    bob = load_state(
+        swap_id,
+        "bob",
+    )
+
+    refund_blockhash = bob.get(
+        "btc_refund_blockhash"
+    )
+
+    require(
+        bool(refund_blockhash),
+        "Bob has no BTC refund blockhash",
+    )
+
+    swap_cmd(
+        "publish-btc-refunded",
+        swap_id,
+        role="bob",
+    )
+
+    swap_cmd(
+        "receive-btc-refunded",
+        swap_id,
+        role="alice",
+    )
+
+    alice = load_state(
+        swap_id,
+        "alice",
+    )
+
+    require(
+        alice["state"] == "BTC_REFUNDED",
+        "Alice did not reach BTC_REFUNDED",
+    )
+
+    btc_cli(
+        "invalidateblock",
+        refund_blockhash,
+    )
+
+    try:
+        alice = load_state(
+            swap_id,
+            "alice",
+        )
+
+        require(
+            alice["state"] == "BTC_REFUNDED",
+            "Alice's durable state unexpectedly changed",
+        )
+
+        blake_height = int(
+            blake_cli("getblockcount")
+        )
+
+        blake_blocks = (
+            int(alice["blake_timeout"])
+            - blake_height
+        )
+
+        if blake_blocks > 0:
+            mine_blake(blake_blocks)
+
+        proc = swap_cmd(
+            "refund-blake",
+            swap_id,
+            role="alice",
+            expect_ok=False,
+        )
+
+        output = (
+            (proc.stdout or "")
+            + "\n"
+            + (proc.stderr or "")
+        )
+
+        require(
+            proc.returncode != 0,
+            "Alice refunded BLAKE after BTC refund reorg",
+        )
+
+        require(
+            (
+                "Bitcoin refund is no longer on the active chain"
+                in output
+                or
+                "Bitcoin refund is not confirmed"
+                in output
+            ),
+            (
+                "refund-blake failed for unexpected reason:\n"
+                + output[-1600:]
+            ),
+        )
+
+        ok(
+            "Alice refuses BLAKE refund after "
+            "BTC refund confirmation rollback"
+        )
+
+    finally:
+        btc_cli(
+            "reconsiderblock",
+            refund_blockhash,
+        )
+
+    print("reorg refund swap:", swap_id)
+
+
 def test_refund() -> None:
     banner("TWO-FUNDED REFUND PATH")
     swap_id = make_fresh_swap()
@@ -1622,6 +1998,24 @@ def main() -> int:
                 fail("CONCURRENT BTC FUNDING RACE", str(e))
                 if args.suite != "all":
                     raise
+
+        if args.suite == "all":
+            try:
+                test_reorg_btc_claim()
+            except Exception as e:
+                fail(
+                    "BTC CLAIM REORG SAFETY",
+                    str(e),
+                )
+
+        if args.suite == "all":
+            try:
+                test_reorg_btc_refund()
+            except Exception as e:
+                fail(
+                    "BTC REFUND REORG SAFETY",
+                    str(e),
+                )
 
         if args.suite in ("refund", "all"):
             try:

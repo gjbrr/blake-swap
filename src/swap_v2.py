@@ -33,7 +33,12 @@ BASE_SWAP_DIR = Path(
 
 ALICE_SWAP_DIR = BASE_SWAP_DIR / "alice"
 BOB_SWAP_DIR = BASE_SWAP_DIR / "bob"
-MESSAGE_DIR = BASE_SWAP_DIR / "messages"
+MESSAGE_DIR = Path(
+    os.environ.get(
+        "BLAKE_SWAP_MESSAGE_DIR",
+        BASE_SWAP_DIR / "messages",
+    )
+).expanduser()
 
 for directory in (
     ALICE_SWAP_DIR,
@@ -1673,6 +1678,206 @@ def command_new(args):
         path,
     )
 
+def command_refresh_timeouts(args):
+    """
+    Refresh an unfunded protocol-Alice swap's v1.5
+    timeout plan without changing swap identity,
+    economic terms, keys, S, or H.
+
+    This is only valid before any funding action may
+    have occurred.
+    """
+    swap = load_swap(
+        args.swap_id,
+        role="alice",
+    )
+
+    if State(swap.state) != State.OFFERED:
+        raise RuntimeError(
+            "refresh-timeouts requires state OFFERED"
+        )
+
+    #
+    # Timeout refresh is unilateral only before the
+    # counterparty has accepted the protocol offer.
+    #
+    # Once Bob's settlement keys / identity are bound,
+    # the advertised CLTV terms are part of the accepted
+    # contract and Alice may not silently replace them.
+    #
+    if (
+        swap.blake_bob_pub is not None
+        or swap.btc_bob_pub is not None
+        or swap.nostr_bob_pub is not None
+    ):
+        raise RuntimeError(
+            "SECURITY FAILURE: cannot refresh timeouts "
+            "after counterparty acceptance"
+        )
+
+    #
+    # Refuse if canonical state contains any evidence
+    # that funding has begun or completed.
+    #
+    funding_fields = (
+        "blake_funding_txid",
+        "blake_funding_vout",
+        "blake_funding_blockhash",
+        "btc_funding_txid",
+        "btc_funding_vout",
+        "btc_funding_blockhash",
+    )
+
+    for field in funding_fields:
+        if getattr(swap, field, None) is not None:
+            raise RuntimeError(
+                "SECURITY FAILURE: cannot refresh "
+                f"timeouts after funding evidence exists: {field}"
+            )
+
+    #
+    # Funding intents are written before money may move.
+    # Their existence means a crash-window funding action
+    # may have started even if canonical state is still OFFERED.
+    #
+    for chain in ("blake", "btc"):
+        intent = funding_intent_path(
+            swap.swap_id,
+            chain,
+        )
+
+        if intent.exists():
+            raise RuntimeError(
+                "SECURITY FAILURE: cannot refresh "
+                f"timeouts while {chain} funding intent exists"
+            )
+
+    original_swap_id = swap.swap_id
+    original_secret = swap.secret_hex
+    original_hash = swap.secret_hash
+    original_blake_amount = swap.blake_amount
+    original_btc_sats = swap.btc_sats
+
+    old_btc_timeout = swap.btc_timeout
+    old_blake_timeout = swap.blake_timeout
+
+    btc_height = int(
+        btc_cli("getblockcount")
+    )
+
+    blake_height = int(
+        blake_cli("getblockcount")
+    )
+
+    policy = TimeoutPolicy()
+
+    plan = build_timeout_plan(
+        btc_height=btc_height,
+        blake_height=blake_height,
+        policy=policy,
+    )
+
+    validate_timeout_plan(
+        plan,
+        policy,
+    )
+
+    swap.btc_timeout = (
+        plan.btc_timeout_height
+    )
+
+    swap.blake_timeout = (
+        plan.blake_timeout_height
+    )
+
+    swap.timeout_policy_version = "1.5"
+
+    swap.btc_timeout_window_seconds = (
+        plan.btc_window_seconds
+    )
+
+    swap.blake_timeout_window_seconds = (
+        plan.blake_window_seconds
+    )
+
+    swap.bob_recovery_seconds = (
+        plan.bob_recovery_seconds
+    )
+
+    #
+    # Since we proved no funding action has started,
+    # move the recovery scan anchors forward too.
+    #
+    swap.btc_scan_start_height = btc_height
+    swap.blake_scan_start_height = blake_height
+
+    swap.validate()
+
+    #
+    # Explicit invariant checks.
+    #
+    if swap.swap_id != original_swap_id:
+        raise RuntimeError(
+            "SECURITY FAILURE: swap_id changed during timeout refresh"
+        )
+
+    if swap.secret_hex != original_secret:
+        raise RuntimeError(
+            "SECURITY FAILURE: secret S changed during timeout refresh"
+        )
+
+    if swap.secret_hash != original_hash:
+        raise RuntimeError(
+            "SECURITY FAILURE: hash H changed during timeout refresh"
+        )
+
+    if swap.blake_amount != original_blake_amount:
+        raise RuntimeError(
+            "SECURITY FAILURE: BLAKE amount changed during timeout refresh"
+        )
+
+    if swap.btc_sats != original_btc_sats:
+        raise RuntimeError(
+            "SECURITY FAILURE: BTC amount changed during timeout refresh"
+        )
+
+    save_swap(
+        swap,
+        role="alice",
+    )
+
+    print()
+    print("TIMEOUTS REFRESHED")
+    print("==================")
+    print("swap id:          ", swap.swap_id)
+    print("Bitcoin height:   ", btc_height)
+    print("BLAKE height:     ", blake_height)
+    print()
+    print("old BTC timeout:  ", old_btc_timeout)
+    print("new BTC timeout:  ", swap.btc_timeout)
+    print("old BLAKE timeout:", old_blake_timeout)
+    print("new BLAKE timeout:", swap.blake_timeout)
+    print()
+    print(
+        "BTC safety window:",
+        f"{swap.btc_timeout_window_seconds / 3600:.2f} h",
+    )
+    print(
+        "Bob recovery window:",
+        f"{swap.bob_recovery_seconds / 3600:.2f} h",
+    )
+    print(
+        "BLAKE safety window:",
+        f"{swap.blake_timeout_window_seconds / 3600:.2f} h",
+    )
+    print()
+    print("PASS: same swap_id")
+    print("PASS: same secret S")
+    print("PASS: same hash H")
+    print("PASS: same economic terms")
+    print("PASS: no funding evidence existed")
+
+
 def command_status(args):
     blake_height = blake_cli("getblockcount")
     btc_height = btc_cli("getblockcount")
@@ -1858,25 +2063,60 @@ NOSTR_RELAY = NOSTR_RELAYS[0]
 
 
 def nostr_private_key_hex():
-    explicit_key = os.environ.get(
+    """
+    Return this participant's Nostr private key.
+
+    Participant identity is intentionally independent
+    of the dynamic atomic-swap protocol role.
+
+    Preferred configuration:
+
+        BLAKE_SWAP_PARTICIPANT_KEY_FILE
+
+    Legacy compatibility:
+
+        BLAKE_SWAP_NOSTR_KEY_FILE
+        BLAKE_SWAP_NOSTR_KEY_DIR/<role>.key
+    """
+
+    participant_key = os.environ.get(
+        "BLAKE_SWAP_PARTICIPANT_KEY_FILE"
+    )
+
+    legacy_explicit_key = os.environ.get(
         "BLAKE_SWAP_NOSTR_KEY_FILE"
     )
 
-    if explicit_key:
+    if participant_key:
         key_path = Path(
-            explicit_key
+            participant_key
+        ).expanduser()
+
+    elif legacy_explicit_key:
+        key_path = Path(
+            legacy_explicit_key
         ).expanduser()
 
     else:
+        #
+        # Backward compatibility only.
+        #
+        # Historically the identity-key filename was
+        # derived from protocol role.  That assumption
+        # is no longer conceptually correct because the
+        # same participant can be Alice in one swap and
+        # Bob in another.
+        #
         role = os.environ.get(
             "BLAKE_SWAP_ROLE"
         )
 
         if role not in ("alice", "bob"):
             raise RuntimeError(
-                "BLAKE_SWAP_ROLE must be alice or bob "
-                "unless BLAKE_SWAP_NOSTR_KEY_FILE "
-                "is explicitly configured"
+                "Configure "
+                "BLAKE_SWAP_PARTICIPANT_KEY_FILE, "
+                "or set BLAKE_SWAP_ROLE for legacy "
+                "role-named key lookup"
             )
 
         key_dir = Path(
@@ -1893,17 +2133,20 @@ def nostr_private_key_hex():
 
     if not key_path.exists():
         raise RuntimeError(
-            f"Nostr key file does not exist: {key_path}"
+            f"Nostr participant key does not exist: "
+            f"{key_path}"
         )
 
     key_hex = key_path.read_text().strip()
 
     try:
-        raw = bytes.fromhex(key_hex)
-    except ValueError:
+        raw = bytes.fromhex(
+            key_hex
+        )
+    except ValueError as e:
         raise RuntimeError(
             f"Invalid Nostr key in {key_path}"
-        )
+        ) from e
 
     if len(raw) != 32:
         raise RuntimeError(
@@ -1912,6 +2155,7 @@ def nostr_private_key_hex():
         )
 
     return key_hex
+
 
 
 def nostr_event_id(event):
@@ -11560,6 +11804,21 @@ def main():
     p.add_argument("swap_id")
     p.set_defaults(func=command_verify_blake)
 
+    # refresh-timeouts
+    p = sub.add_parser(
+        "refresh-timeouts",
+        help=(
+            "Refresh an unfunded Alice swap's "
+            "v1.5 timeout plan"
+        ),
+    )
+
+    p.add_argument("swap_id")
+
+    p.set_defaults(
+        func=command_refresh_timeouts
+    )
+
     # status
     p = sub.add_parser(
         "status",
@@ -11704,7 +11963,7 @@ def main():
 
     p = sub.add_parser(
         "market-takes",
-        help="Show valid takes for one of Alice's market offers"
+        help="Show valid takes for one of your market offers"
     )
 
     p.add_argument("offer_id")
@@ -11721,7 +11980,7 @@ def main():
 
     p = sub.add_parser(
         "accept-market-take",
-        help="Alice selects a market take and creates a swap"
+        help="Select a market take and bind it to a swap"
     )
 
     p.add_argument("take_id")
@@ -11732,7 +11991,7 @@ def main():
 
     p = sub.add_parser(
         "publish-market-match",
-        help="Publish Alice's signed match for an accepted take"
+        help="Publish the maker's signed match for an accepted take"
     )
 
     p.add_argument("take_id")
@@ -11743,7 +12002,7 @@ def main():
 
     p = sub.add_parser(
         "market-matches",
-        help="Show Bob's authenticated market matches"
+        help="Show authenticated market matches for this participant"
     )
 
     p.add_argument(
@@ -11786,7 +12045,7 @@ def main():
 
     p = sub.add_parser(
         "accept-market-match",
-        help="Bob imports the swap bound to a market match"
+        help="Import the swap bound to a market match"
     )
 
     p.add_argument("match_id")

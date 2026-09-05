@@ -31,10 +31,32 @@ from pathlib import Path
 HOME = Path.home()
 SWAP_V2 = Path(os.environ.get("SWAP_V2", HOME / "swap_v2.py"))
 
-BASE = HOME / ".blake-swaps-v2"
-ALICE_DIR = BASE / "alice"
-BOB_DIR = BASE / "bob"
-MESSAGE_DIR = BASE / "messages"
+ALICE_BASE = Path(
+    os.environ.get(
+        "BLAKE_SWAP_ALICE_STATE_DIR",
+        HOME / ".blake-swap-alice",
+    )
+)
+
+BOB_BASE = Path(
+    os.environ.get(
+        "BLAKE_SWAP_BOB_STATE_DIR",
+        HOME / ".blake-swap-bob",
+    )
+)
+
+# Compatibility alias for tests that need a generic BASE.
+# Alice owns the secret-bearing side of ordinary test swaps.
+BASE = ALICE_BASE
+
+ALICE_DIR = ALICE_BASE / "alice"
+BOB_DIR = BOB_BASE / "bob"
+
+MESSAGE_DIR = (
+    HOME
+    / ".blake-swap-test-transport"
+    / "messages"
+)
 
 BTC_CLI = Path("/home/gary/bitcoin-core/build/bin/bitcoin-cli")
 BTC_DATADIR = Path("/home/gary/bitcoin-swap-regtest")
@@ -107,8 +129,26 @@ def run(cmd, *, env=None, expect_ok=True, echo=False) -> subprocess.CompletedPro
 
 def swap_cmd(*args, role=None, expect_ok=True, echo=False):
     env = {}
+    env["BLAKE_SWAP_MESSAGE_DIR"] = str(
+        MESSAGE_DIR
+    )
+
     if role:
         env["BLAKE_SWAP_ROLE"] = role
+
+        if role == "alice":
+            env["BLAKE_SWAP_STATE_DIR"] = str(
+                ALICE_BASE
+            )
+        elif role == "bob":
+            env["BLAKE_SWAP_STATE_DIR"] = str(
+                BOB_BASE
+            )
+        else:
+            raise TestFailure(
+                f"unknown swap role: {role}"
+            )
+
     return run(
         [sys.executable, SWAP_V2, *args],
         env=env,
@@ -256,6 +296,340 @@ def fund_btc_and_sync(swap_id: str) -> None:
     assert_state(swap_id, "alice", "BTC_FUNDED")
 
 
+def test_timeout_refresh() -> None:
+    banner("TIMEOUT REFRESH SUITE V1")
+
+    #
+    # 1. Refresh an unfunded v1.5 swap.
+    #
+    swap_id = make_fresh_swap()
+
+    before = load_state(
+        swap_id,
+        "alice",
+    )
+
+    original_secret = before["secret_hex"]
+    original_hash = before["secret_hash"]
+    original_blake = before["blake_amount"]
+    original_sats = before["btc_sats"]
+
+    swap_cmd(
+        "refresh-timeouts",
+        swap_id,
+        role="alice",
+    )
+
+    after = load_state(
+        swap_id,
+        "alice",
+    )
+
+    require(
+        after["swap_id"] == swap_id,
+        "timeout refresh changed swap_id",
+    )
+
+    require(
+        after["secret_hex"] == original_secret,
+        "timeout refresh changed Alice secret S",
+    )
+
+    require(
+        after["secret_hash"] == original_hash,
+        "timeout refresh changed hash H",
+    )
+
+    require(
+        after["blake_amount"] == original_blake,
+        "timeout refresh changed BLAKE amount",
+    )
+
+    require(
+        after["btc_sats"] == original_sats,
+        "timeout refresh changed BTC amount",
+    )
+
+    require(
+        after["state"] == "OFFERED",
+        "timeout refresh changed swap state",
+    )
+
+    require(
+        after.get("timeout_policy_version")
+        == "1.5",
+        "timeout refresh did not attach v1.5 policy",
+    )
+
+    ok("unfunded refresh preserves swap_id / S / H / terms")
+
+    #
+    # 2. Repeated refresh while unfunded is safe.
+    #
+    first = load_state(
+        swap_id,
+        "alice",
+    )
+
+    swap_cmd(
+        "refresh-timeouts",
+        swap_id,
+        role="alice",
+    )
+
+    second = load_state(
+        swap_id,
+        "alice",
+    )
+
+    require(
+        second["secret_hex"]
+        == first["secret_hex"],
+        "repeated refresh changed S",
+    )
+
+    require(
+        second["secret_hash"]
+        == first["secret_hash"],
+        "repeated refresh changed H",
+    )
+
+    require(
+        second["state"] == "OFFERED",
+        "repeated refresh changed state",
+    )
+
+    ok("repeated unfunded refresh is safe")
+
+    #
+    # 3. A BLAKE funding-intent marker must block
+    #    timeout mutation even while state is OFFERED.
+    #
+    intent_dir = ALICE_BASE / "funding-intents"
+    intent_dir.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    blake_intent = (
+        intent_dir
+        / f"{swap_id}.blake.json"
+    )
+
+    blake_intent.write_text(
+        json.dumps(
+            {
+                "swap_id": swap_id,
+                "chain": "blake",
+                "address": "test-only",
+                "amount": str(
+                    second["blake_amount"]
+                ),
+                "secret_hash":
+                    second["secret_hash"],
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n"
+    )
+
+    try:
+        proc = swap_cmd(
+            "refresh-timeouts",
+            swap_id,
+            role="alice",
+            expect_ok=False,
+        )
+
+        output = (
+            proc.stdout
+            + proc.stderr
+        )
+
+        require(
+            proc.returncode != 0,
+            "refresh unexpectedly accepted "
+            "BLAKE funding intent",
+        )
+
+        require(
+            "blake funding intent exists"
+            in output,
+            "wrong failure for BLAKE "
+            "funding-intent refresh",
+        )
+
+    finally:
+        blake_intent.unlink(
+            missing_ok=True
+        )
+
+    ok("BLAKE funding intent blocks refresh")
+
+    #
+    # 4. A BTC funding-intent marker must do the same.
+    #
+    btc_intent = (
+        intent_dir
+        / f"{swap_id}.btc.json"
+    )
+
+    btc_intent.write_text(
+        json.dumps(
+            {
+                "swap_id": swap_id,
+                "chain": "btc",
+                "address": "test-only",
+                "amount": str(
+                    second["btc_sats"]
+                ),
+                "secret_hash":
+                    second["secret_hash"],
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n"
+    )
+
+    try:
+        proc = swap_cmd(
+            "refresh-timeouts",
+            swap_id,
+            role="alice",
+            expect_ok=False,
+        )
+
+        output = (
+            proc.stdout
+            + proc.stderr
+        )
+
+        require(
+            proc.returncode != 0,
+            "refresh unexpectedly accepted "
+            "BTC funding intent",
+        )
+
+        require(
+            "btc funding intent exists"
+            in output,
+            "wrong failure for BTC "
+            "funding-intent refresh",
+        )
+
+    finally:
+        btc_intent.unlink(
+            missing_ok=True
+        )
+
+    ok("BTC funding intent blocks refresh")
+
+    #
+    # 5. Once Bob accepts the refreshed offer,
+    #    Alice may no longer alter the deadlines.
+    #
+    handshake(
+        swap_id
+    )
+
+    proc = swap_cmd(
+        "refresh-timeouts",
+        swap_id,
+        role="alice",
+        expect_ok=False,
+    )
+
+    output = (
+        proc.stdout
+        + proc.stderr
+    )
+
+    require(
+        proc.returncode != 0,
+        "refresh succeeded after counterparty acceptance",
+    )
+
+    require(
+        "after counterparty acceptance"
+        in output,
+        "wrong failure after counterparty acceptance",
+    )
+
+    ok("refresh rejected after counterparty acceptance")
+
+    #
+    # 6. Once BLAKE really funds, Alice must no
+    #    longer be allowed to alter deadlines.
+    #
+    fund_blake_and_sync(
+        swap_id
+    )
+
+    proc = swap_cmd(
+        "refresh-timeouts",
+        swap_id,
+        role="alice",
+        expect_ok=False,
+    )
+
+    output = (
+        proc.stdout
+        + proc.stderr
+    )
+
+    require(
+        proc.returncode != 0,
+        "refresh succeeded after BLAKE funding",
+    )
+
+    require(
+        "requires state OFFERED"
+        in output,
+        "wrong failure after BLAKE funding",
+    )
+
+    ok("refresh rejected after BLAKE funding")
+
+    #
+    # 6. Also prove rejection after both sides fund.
+    #
+    fund_btc_and_sync(
+        swap_id
+    )
+
+    proc = swap_cmd(
+        "refresh-timeouts",
+        swap_id,
+        role="alice",
+        expect_ok=False,
+    )
+
+    output = (
+        proc.stdout
+        + proc.stderr
+    )
+
+    require(
+        proc.returncode != 0,
+        "refresh succeeded after BTC funding",
+    )
+
+    require(
+        "requires state OFFERED"
+        in output,
+        "wrong failure after BTC funding",
+    )
+
+    ok("refresh rejected after BTC funding")
+
+    print(
+        "timeout-refresh swap:",
+        swap_id,
+    )
+
+
 def test_happy() -> None:
     banner("HAPPY PATH")
     swap_id = make_fresh_swap()
@@ -311,8 +685,21 @@ def test_happy() -> None:
     assert_state(swap_id, "alice", "BLAKE_CLAIMED")
     ok("duplicate BLAKE claim receive")
 
-    swap_cmd("complete", swap_id, "--role", "alice")
-    swap_cmd("complete", swap_id, "--role", "bob")
+    swap_cmd(
+        "complete",
+        swap_id,
+        "--role",
+        "alice",
+        role="alice",
+    )
+
+    swap_cmd(
+        "complete",
+        swap_id,
+        "--role",
+        "bob",
+        role="bob",
+    )
     assert_state(swap_id, "alice", "COMPLETE")
     assert_state(swap_id, "bob", "COMPLETE")
     ok("both sides COMPLETE")
@@ -431,6 +818,8 @@ def test_mallory() -> None:
         "advance",
         swap_id,
         "BTC_FUNDED",
+        "--role",
+        "alice",
         role="alice",
         expect_ok=False,
     )
@@ -552,7 +941,12 @@ def test_mallory() -> None:
 
     proc = run(
         [sys.executable, SWAP_V2, "publish-blake-funded", signer_blake_id],
-        env={**dead, "BLAKE_SWAP_ROLE": "bob"},
+        env={
+            **dead,
+            "BLAKE_SWAP_ROLE": "bob",
+            "BLAKE_SWAP_STATE_DIR": str(ALICE_BASE),
+            "BLAKE_SWAP_MESSAGE_DIR": str(MESSAGE_DIR),
+        },
         expect_ok=False,
     )
     expect_failure(
@@ -570,7 +964,12 @@ def test_mallory() -> None:
 
     proc = run(
         [sys.executable, SWAP_V2, "publish-btc-funded", signer_btc_id],
-        env={**dead, "BLAKE_SWAP_ROLE": "alice"},
+        env={
+            **dead,
+            "BLAKE_SWAP_ROLE": "alice",
+            "BLAKE_SWAP_STATE_DIR": str(BOB_BASE),
+            "BLAKE_SWAP_MESSAGE_DIR": str(MESSAGE_DIR),
+        },
         expect_ok=False,
     )
     expect_failure(
@@ -587,7 +986,12 @@ def test_mallory() -> None:
 
     proc = run(
         [sys.executable, SWAP_V2, "publish-btc-claimed", signer_btc_id],
-        env={**dead, "BLAKE_SWAP_ROLE": "bob"},
+        env={
+            **dead,
+            "BLAKE_SWAP_ROLE": "bob",
+            "BLAKE_SWAP_STATE_DIR": str(ALICE_BASE),
+            "BLAKE_SWAP_MESSAGE_DIR": str(MESSAGE_DIR),
+        },
         expect_ok=False,
     )
     expect_failure(
@@ -614,7 +1018,12 @@ def test_mallory() -> None:
 
     proc = run(
         [sys.executable, SWAP_V2, "publish-btc-refunded", refund_id],
-        env={**dead, "BLAKE_SWAP_ROLE": "alice"},
+        env={
+            **dead,
+            "BLAKE_SWAP_ROLE": "alice",
+            "BLAKE_SWAP_STATE_DIR": str(BOB_BASE),
+            "BLAKE_SWAP_MESSAGE_DIR": str(MESSAGE_DIR),
+        },
         expect_ok=False,
     )
 
@@ -867,6 +1276,14 @@ def test_race() -> None:
 
             env = os.environ.copy()
             env["BLAKE_SWAP_TRANSPORT"] = "file"
+            env["BLAKE_SWAP_ROLE"] = "bob"
+            env["BLAKE_SWAP_STATE_DIR"] = str(
+                BOB_BASE
+            )
+            env["BLAKE_SWAP_MESSAGE_DIR"] = str(
+                MESSAGE_DIR
+            )
+            env["BLAKE_SWAP_TRANSPORT"] = "file"
 
             cmd = [
                 sys.executable,
@@ -912,7 +1329,11 @@ def test_race() -> None:
             len(successes) == 1,
             (
                 "expected exactly one successful fund-btc; "
-                f"return codes={[r[0] for r in results]}"
+                f"return codes={[r[0] for r in results]}\n"
+                f"process 1 stdout:\n{out1[-1200:]}\n"
+                f"process 1 stderr:\n{err1[-1200:]}\n"
+                f"process 2 stdout:\n{out2[-1200:]}\n"
+                f"process 2 stderr:\n{err2[-1200:]}"
             ),
         )
 
@@ -1107,6 +1528,15 @@ def main() -> int:
     try:
         preflight()
         ok("preflight")
+
+        if args.suite == "all":
+            try:
+                test_timeout_refresh()
+            except Exception as e:
+                fail(
+                    "TIMEOUT REFRESH SUITE",
+                    str(e),
+                )
 
         if args.suite in ("happy", "all"):
             try:

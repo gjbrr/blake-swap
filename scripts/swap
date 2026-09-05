@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+source "$HOME/.config/blake-swap/env"
+
+if [[ -z "${BLAKE_SWAP_ROLE:-}" ]]; then
+    echo "ERROR: set BLAKE_SWAP_ROLE=alice or bob" >&2
+    exit 2
+fi
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+export PYTHONPATH="$ROOT/src${PYTHONPATH:+:$PYTHONPATH}"
+
+exec python3 \
+    "$ROOT/src/swap_v2.py" \
+    "$@"

@@ -101,9 +101,61 @@ def require(condition: bool, message: str) -> None:
 
 def run(cmd, *, env=None, expect_ok=True, echo=False) -> subprocess.CompletedProcess:
     merged = os.environ.copy()
+
+    #
+    # Tests must never depend on the operator's current
+    # participant/session configuration.
+    #
+    for key in (
+        "BLAKE_SWAP_STATE_DIR",
+        "BLAKE_SWAP_MESSAGE_DIR",
+        "BLAKE_SWAP_ROLE",
+        "BLAKE_SWAP_PARTICIPANT_KEY_FILE",
+        "BLAKE_SWAP_NOSTR_KEY_FILE",
+        "BLAKE_SWAP_NOSTR_KEY_DIR",
+    ):
+        merged.pop(key, None)
+
     merged["BLAKE_SWAP_TRANSPORT"] = "file"
+
     if env:
         merged.update(env)
+
+    #
+    # Direct test subprocesses may specify only the
+    # protocol role. Resolve that role to the corresponding
+    # participant's private state root unless the test
+    # intentionally supplied an explicit state directory.
+    #
+    role = merged.get(
+        "BLAKE_SWAP_ROLE"
+    )
+
+    if (
+        role == "alice"
+        and "BLAKE_SWAP_STATE_DIR" not in merged
+    ):
+        merged["BLAKE_SWAP_STATE_DIR"] = str(
+            ALICE_BASE
+        )
+
+    elif (
+        role == "bob"
+        and "BLAKE_SWAP_STATE_DIR" not in merged
+    ):
+        merged["BLAKE_SWAP_STATE_DIR"] = str(
+            BOB_BASE
+        )
+
+    #
+    # All file-transport participants communicate through
+    # the same test transport directory unless a particular
+    # test intentionally overrides it.
+    #
+    merged.setdefault(
+        "BLAKE_SWAP_MESSAGE_DIR",
+        str(MESSAGE_DIR),
+    )
 
     p = subprocess.run(
         [str(x) for x in cmd],
@@ -231,6 +283,7 @@ def make_fresh_swap(*, blake=10.0, sats=25_000) -> str:
         "--sats", str(sats),
         "--btc-timeout", str(btc_timeout),
         "--blake-timeout", str(blake_timeout),
+        role="alice",
     )
     swap_id = parse_swap_id(p.stdout)
     return swap_id

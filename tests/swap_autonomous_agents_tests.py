@@ -74,6 +74,31 @@ def start_agent(
 
     env = os.environ.copy()
 
+    #
+    # Autonomous Alice and Bob now have independent
+    # participant state roots.
+    #
+    if role == "alice":
+        env["BLAKE_SWAP_STATE_DIR"] = str(
+            h.ALICE_BASE
+        )
+    elif role == "bob":
+        env["BLAKE_SWAP_STATE_DIR"] = str(
+            h.BOB_BASE
+        )
+    else:
+        raise h.TestFailure(
+            f"unknown autonomous role: {role}"
+        )
+
+    #
+    # File transport itself remains shared between
+    # the two isolated participant state trees.
+    #
+    env["BLAKE_SWAP_MESSAGE_DIR"] = str(
+        h.MESSAGE_DIR
+    )
+
     env[
         "BLAKE_SWAP_TRANSPORT"
     ] = "file"

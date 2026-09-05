@@ -1414,7 +1414,10 @@ def recover_btc_funding(swap, address):
 
 @serialized_funding("blake")
 def command_fund_blake(args):
-    swap = load_swap(args.swap_id)
+    swap = load_swap(
+        args.swap_id,
+        role="alice",
+    )
 
     if State(swap.state) != State.OFFERED:
         raise ValueError(
@@ -1512,7 +1515,10 @@ def command_fund_blake(args):
         State.BLAKE_FUNDED
     )
 
-    save_swap(swap)
+    save_swap(
+        swap,
+        role="alice",
+    )
     clear_funding_intent(
         swap.swap_id,
         "blake",
@@ -1696,13 +1702,19 @@ def command_show(args):
 
 
 def command_advance(args):
-    swap = load_swap(args.swap_id)
+    swap = load_swap(
+        args.swap_id,
+        role=args.role,
+    )
 
     old_state = swap.state
 
     swap.transition(args.state)
 
-    save_swap(swap)
+    save_swap(
+        swap,
+        role=args.role,
+    )
 
     print(
         f"{old_state} -> {swap.state}"
@@ -11511,6 +11523,13 @@ def main():
     p.add_argument(
         "state",
         choices=[x.value for x in State],
+    )
+
+    p.add_argument(
+        "--role",
+        choices=["alice", "bob"],
+        required=True,
+        help="Protocol role whose local state is advanced",
     )
 
     p.set_defaults(func=command_advance)

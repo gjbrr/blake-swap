@@ -5466,7 +5466,10 @@ def command_claim_btc(args):
         State.BTC_CLAIMED
     )
 
-    save_swap(swap)
+    save_swap(
+        swap,
+        role="alice",
+    )
 
     print("BTC CLAIMED")
     print("===========")

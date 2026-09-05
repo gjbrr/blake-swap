@@ -1,17 +1,139 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-source "$HOME/.config/blake-swap/env"
+PROJECT_DIR="$(
+    cd "$(dirname "${BASH_SOURCE[0]}")/.." &&
+    pwd
+)"
 
-if [[ -z "${BLAKE_SWAP_ROLE:-}" ]]; then
-    echo "ERROR: set BLAKE_SWAP_ROLE=alice or bob" >&2
-    exit 2
+SWAP_V2="$PROJECT_DIR/src/swap_v2.py"
+VENDOR="$PROJECT_DIR/vendor"
+
+if [[ -x "$HOME/blake-swap-venv/bin/python3" ]]; then
+    PYTHON="$HOME/blake-swap-venv/bin/python3"
+else
+    PYTHON="$(command -v python3)"
 fi
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-export PYTHONPATH="$ROOT/src${PYTHONPATH:+:$PYTHONPATH}"
+die() {
+    echo
+    echo "SWAP LAUNCH ABORTED"
+    echo "==================="
+    echo "ERROR: $*" >&2
+    exit 1
+}
 
-exec python3 \
-    "$ROOT/src/swap_v2.py" \
+
+#
+# Development participant profile guard.
+#
+# Eventually the single participant client will derive the
+# per-swap protocol role automatically.  For now we require
+# an explicit Alice/Bob development profile so stale shell
+# state cannot silently select another identity.
+#
+ROLE="${BLAKE_SWAP_ROLE:-}"
+STATE_DIR="${BLAKE_SWAP_STATE_DIR:-}"
+KEY_DIR="${BLAKE_SWAP_NOSTR_KEY_DIR:-}"
+TRANSPORT="${BLAKE_SWAP_TRANSPORT:-}"
+
+
+[[ -n "$ROLE" ]] || die \
+    "No participant profile loaded. Run: source scripts/alice-env or source scripts/bob-env"
+
+case "$ROLE" in
+    alice|bob)
+        ;;
+    *)
+        die "Invalid BLAKE_SWAP_ROLE: $ROLE"
+        ;;
+esac
+
+
+[[ -n "$STATE_DIR" ]] || die \
+    "BLAKE_SWAP_STATE_DIR is unset"
+
+[[ -n "$KEY_DIR" ]] || die \
+    "BLAKE_SWAP_NOSTR_KEY_DIR is unset"
+
+[[ -n "$TRANSPORT" ]] || die \
+    "BLAKE_SWAP_TRANSPORT is unset"
+
+
+#
+# During this development stage we deliberately prohibit the
+# legacy single-file override.  It has higher precedence than
+# KEY_DIR and can silently select the wrong participant key.
+#
+if [[ -n "${BLAKE_SWAP_NOSTR_KEY_FILE:-}" ]]; then
+    die \
+        "BLAKE_SWAP_NOSTR_KEY_FILE is set. Unset it and use the participant key directory."
+fi
+
+
+KEY_FILE="$KEY_DIR/$ROLE.key"
+
+[[ -f "$KEY_FILE" ]] || die \
+    "Expected Nostr key does not exist: $KEY_FILE"
+
+
+#
+# Catch the exact class of Alice/Bob shell mixup encountered
+# during the public two-host smoke test.
+#
+case "$ROLE" in
+    alice)
+        if [[ "$STATE_DIR" == *".blake-swap-bob"* ]]; then
+            die \
+                "role=alice but state directory looks like Bob: $STATE_DIR"
+        fi
+
+        if [[ "$KEY_DIR" == *".blake-swap-bob"* ]]; then
+            die \
+                "role=alice but key directory looks like Bob: $KEY_DIR"
+        fi
+        ;;
+
+    bob)
+        if [[ "$STATE_DIR" == *".blake-swap-alice"* ]]; then
+            die \
+                "role=bob but state directory looks like Alice: $STATE_DIR"
+        fi
+
+        if [[ "$KEY_DIR" == *".blake-swap-alice"* ]]; then
+            die \
+                "role=bob but key directory looks like Alice: $KEY_DIR"
+        fi
+        ;;
+esac
+
+
+#
+# Derive the actual signing identity before executing the
+# requested command.  Never print the private key itself.
+#
+NOSTR_PUB="$(
+    PYTHONPATH="$PROJECT_DIR/src:$VENDOR${PYTHONPATH:+:$PYTHONPATH}" \
+    "$PYTHON" - <<'PY'
+import swap_v2
+print(swap_v2.current_nostr_pubkey())
+PY
+)"
+
+
+echo
+echo "BLAKE SWAP PARTICIPANT"
+echo "======================"
+echo "role:      $ROLE"
+echo "nostr:     $NOSTR_PUB"
+echo "state:     $STATE_DIR"
+echo "transport: $TRANSPORT"
+echo
+
+
+exec env \
+    PYTHONPATH="$PROJECT_DIR/src:$VENDOR${PYTHONPATH:+:$PYTHONPATH}" \
+    "$PYTHON" \
+    "$SWAP_V2" \
     "$@"

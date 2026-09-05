@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+echo "BLAKE SWAP ENVIRONMENT"
+echo "======================"
+echo "role:        ${BLAKE_SWAP_ROLE:-<unset>}"
+echo "state dir:   ${BLAKE_SWAP_STATE_DIR:-<unset>}"
+echo "key dir:     ${BLAKE_SWAP_NOSTR_KEY_DIR:-<unset>}"
+echo "transport:   ${BLAKE_SWAP_TRANSPORT:-<unset>}"
+echo "relays:      ${BLAKE_SWAP_NOSTR_RELAYS:-<unset>}"
+echo "btc cli:     ${BLAKE_SWAP_BTC_CLI:-<default>}"
+echo "blake cli:   ${BLAKE_SWAP_BLAKE_CLI:-<default>}"
+echo
+
+if [[ -z "${BLAKE_SWAP_ROLE:-}" ]]; then
+    echo "ERROR: BLAKE_SWAP_ROLE is unset"
+    exit 1
+fi
+
+if [[ "${BLAKE_SWAP_ROLE}" != "alice" && "${BLAKE_SWAP_ROLE}" != "bob" ]]; then
+    echo "ERROR: invalid role: ${BLAKE_SWAP_ROLE}"
+    exit 1
+fi
+
+PYTHONPATH="${PYTHONPATH:-}:$HOME/blake-swap/src:$HOME/blake-swap/vendor" \
+python3 - <<'PY'
+import swap_v2
+
+print(
+    "nostr pub:   ",
+    swap_v2.current_nostr_pubkey(),
+)
+PY

@@ -15095,11 +15095,6 @@ def command_resume(args):
             None,
         )
 
-    if requested_prefix is None:
-        raise RuntimeError(
-            "resume received no swap identifier"
-        )
-
     import contextlib
     import io
     from types import SimpleNamespace
@@ -15190,7 +15185,8 @@ def command_resume(args):
 
                 if (
                     isinstance(swap_id, str)
-                    and swap_id.startswith(requested_prefix)
+                    and requested_prefix is not None
+                and swap_id.startswith(requested_prefix)
                     and state in (
                         State.COMPLETE.value,
                         State.BLAKE_REFUNDED.value,

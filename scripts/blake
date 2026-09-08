@@ -67,6 +67,9 @@ Maker:
       --minutes 30
 
   blake next
+
+  blake run [seconds]
+      Foreground supervisor: safe coordination + post-funding settlement
   blake fund
   blake resume [swap-prefix]
 
@@ -180,6 +183,92 @@ case "$cmd" in
       exit 2
     fi
     engine fund
+    ;;
+
+  run)
+    if [ "$#" -gt 1 ]; then
+      echo "Usage: blake run [seconds]" >&2
+      exit 2
+    fi
+
+    interval="${1:-15}"
+
+    case "$interval" in
+      ''|*[!0-9]*)
+        echo "ERROR: run interval must be a positive integer number of seconds" >&2
+        exit 2
+        ;;
+    esac
+
+    if [ "$interval" -lt 2 ]; then
+      echo "ERROR: run interval must be at least 2 seconds" >&2
+      exit 2
+    fi
+
+    echo
+    echo "BLAKE SWAP FOREGROUND RUNNER"
+    echo "============================"
+    echo "poll interval: ${interval}s"
+    echo
+    echo "POLICY:"
+    echo "  * safe coordination may run automatically"
+    echo "  * post-funding recovery/settlement may run automatically"
+    echo "  * initial BLAKE funding is NEVER automatic"
+    echo "  * Ctrl-C stops this foreground runner"
+    echo
+
+    while :; do
+      if next_output="$(engine next 2>&1)"; then
+        next_status=0
+      else
+        next_status=$?
+      fi
+
+      printf '%s\n' "$next_output"
+
+      if [ "$next_status" -ne 0 ]; then
+        echo
+        echo "RUN PAUSED"
+        echo "=========="
+        echo "next returned an error; refusing to guess."
+        echo "Fix the issue, then restart \`blake run\`."
+        exit "$next_status"
+      fi
+
+      if printf '%s\n' "$next_output" | grep -q '^READY TO FUND$'; then
+        echo
+        echo "ACTION REQUIRED"
+        echo "==============="
+        echo "Initial BLAKE funding requires an explicit:"
+        echo "  scripts/blake fund"
+        echo
+        echo "Runner will continue watching without funding."
+        sleep "$interval"
+        continue
+      fi
+
+      if resume_output="$(engine resume 2>&1)"; then
+        resume_status=0
+      else
+        resume_status=$?
+      fi
+
+      if [ "$resume_status" -eq 0 ]; then
+        printf '%s\n' "$resume_output"
+      else
+        if printf '%s\n' "$resume_output" | grep -Eq \
+          'SECURITY FAILURE|Traceback|ambiguous|manual attention|MANUAL ATTENTION'; then
+          printf '%s\n' "$resume_output"
+          echo
+          echo "RUN PAUSED"
+          echo "=========="
+          echo "resume encountered a condition requiring human attention."
+          exit "$resume_status"
+        fi
+      fi
+
+      sleep "$interval"
+    done
     ;;
 
   resume)

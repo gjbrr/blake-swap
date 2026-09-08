@@ -373,6 +373,14 @@ def swap_path(swap_id, role="alice"):
     return role_dir(role) / f"{swap_id}.json"
 
 
+def archived_swap_path(swap_id):
+    return BASE_SWAP_DIR / "archive" / f"{swap_id}.json"
+
+
+def swap_id_is_locally_retired(swap_id):
+    return archived_swap_path(swap_id).exists()
+
+
 def save_swap(swap, role="alice"):
     directory = role_dir(role)
 
@@ -10584,7 +10592,10 @@ def command_accept_only_match(args):
         if (
             isinstance(swap_id, str)
             and len(swap_id) == 12
-            and swap_path(swap_id).exists()
+            and (
+                swap_path(swap_id).exists()
+                or swap_id_is_locally_retired(swap_id)
+            )
         ):
             continue
         candidates.append(item)
@@ -14149,6 +14160,9 @@ def command_next(args):
             ):
                 continue
 
+            if swap_id_is_locally_retired(swap_id):
+                continue
+
             # Durable selections survive restarts, but they must not
             # resurrect ancient market negotiations into today's
             # automatic work queue. Re-open and verify the exact
@@ -15079,6 +15093,120 @@ def command_dismiss(args):
     print(
         "PASS: original JSON preserved intact"
     )
+
+
+
+def command_resume_all(args):
+    """
+    Service-mode settlement supervisor.
+
+    Each local swap is classified independently using the existing
+    reconciliation report. Safe automatic paths are driven explicitly
+    by swap ID, so unrelated live swaps never compete with each other.
+
+    Initial BLAKE funding is not performed here.
+    """
+    import json as _json
+    from types import SimpleNamespace
+
+    candidates = []
+    attention = []
+
+    for path in sorted(BASE_SWAP_DIR.glob("*.json")):
+        try:
+            with open(path) as f:
+                data = _json.load(f)
+        except Exception as e:
+            attention.append(
+                (path.name, f"unreadable state: {type(e).__name__}: {e}")
+            )
+            continue
+
+        swap_id = data.get("swap_id")
+        if not isinstance(swap_id, str):
+            continue
+
+        try:
+            swap = load_swap(swap_id, role="alice")
+            report = build_reconcile_report(swap)
+        except Exception as e:
+            attention.append(
+                (swap_id, f"{type(e).__name__}: {e}")
+            )
+            continue
+
+        decision = report.get("decision_class")
+        action = report.get("next_action")
+
+        if decision == "settled":
+            continue
+
+        if decision == "manual-attention":
+            attention.append(
+                (swap_id, report.get("reason", "manual attention required"))
+            )
+            continue
+
+        if action == "fund-blake":
+            # Initial BLAKE funding is an explicit human commitment.
+            # Do not send this swap through the autonomous settlement
+            # driver merely to have it refuse the action again.
+            continue
+
+        if decision in {"recovery-needed", "actionable"}:
+            candidates.append((swap_id, decision, action))
+            continue
+
+    print()
+    print("MULTI-SWAP SETTLEMENT PASS")
+    print("==========================")
+
+    if not candidates:
+        print("No automatic settlement/recovery actions are ready.")
+    else:
+        for swap_id, decision, action in candidates:
+            print()
+            print(
+                f"Driving {swap_id}: "
+                f"{decision} / {action}"
+            )
+
+            try:
+                command_resume(
+                    SimpleNamespace(
+                        swap_id=swap_id,
+                    )
+                )
+            except Exception as e:
+                print()
+                print("SWAP PAUSED")
+                print("===========")
+                print("swap: ", swap_id)
+                print(
+                    "reason:",
+                    f"{type(e).__name__}: {e}",
+                )
+                attention.append(
+                    (
+                        swap_id,
+                        f"{type(e).__name__}: {e}",
+                    )
+                )
+
+    if attention:
+        print()
+        print("ATTENTION")
+        print("---------")
+        for swap_id, reason in attention:
+            print(f"{swap_id}: {reason}")
+        print()
+        print(
+            "PASS: attention on one swap did not block "
+            "independent safe swaps"
+        )
+
+    print()
+    print("PASS: initial BLAKE funding was not performed")
 
 
 def command_resume(args):
@@ -16403,6 +16531,18 @@ def main():
     )
 
     p.set_defaults(func=command_run)
+
+
+    p = sub.add_parser(
+        "resume-all",
+        help=(
+            "Drive every independently safe local "
+            "post-funding settlement/recovery path"
+        ),
+    )
+    p.set_defaults(
+        func=command_resume_all,
+    )
 
     # Parse only AFTER every command has been registered.
     args = parser.parse_args()

@@ -212,7 +212,8 @@ case "$cmd" in
     echo
     echo "POLICY:"
     echo "  * safe coordination may run automatically"
-    echo "  * post-funding recovery/settlement may run automatically"
+    echo "  * every independently safe funded swap may advance"
+    echo "  * one broken/ambiguous swap does not block other swaps"
     echo "  * initial BLAKE funding is NEVER automatic"
     echo "  * Ctrl-C stops this foreground runner"
     echo
@@ -228,11 +229,9 @@ case "$cmd" in
 
       if [ "$next_status" -ne 0 ]; then
         echo
-        echo "RUN PAUSED"
-        echo "=========="
-        echo "next returned an error; refusing to guess."
-        echo "Fix the issue, then restart \`blake run\`."
-        exit "$next_status"
+        echo "COORDINATION PAUSED"
+        echo "==================="
+        echo "next returned an error; settlement supervision will still run."
       fi
 
       if printf '%s\n' "$next_output" | grep -q '^READY TO FUND$'; then
@@ -241,30 +240,21 @@ case "$cmd" in
         echo "==============="
         echo "Initial BLAKE funding requires an explicit:"
         echo "  scripts/blake fund"
+      fi
+
+      if settle_output="$(engine resume-all 2>&1)"; then
+        settle_status=0
+      else
+        settle_status=$?
+      fi
+
+      printf '%s\n' "$settle_output"
+
+      if [ "$settle_status" -ne 0 ]; then
         echo
-        echo "Runner will continue watching without funding."
-        sleep "$interval"
-        continue
-      fi
-
-      if resume_output="$(engine resume 2>&1)"; then
-        resume_status=0
-      else
-        resume_status=$?
-      fi
-
-      if [ "$resume_status" -eq 0 ]; then
-        printf '%s\n' "$resume_output"
-      else
-        if printf '%s\n' "$resume_output" | grep -Eq \
-          'SECURITY FAILURE|Traceback|ambiguous|manual attention|MANUAL ATTENTION'; then
-          printf '%s\n' "$resume_output"
-          echo
-          echo "RUN PAUSED"
-          echo "=========="
-          echo "resume encountered a condition requiring human attention."
-          exit "$resume_status"
-        fi
+        echo "SETTLEMENT PASS ERROR"
+        echo "====================="
+        echo "The runner will continue polling; inspect the output above."
       fi
 
       sleep "$interval"

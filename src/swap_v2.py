@@ -1664,6 +1664,38 @@ def command_fund_blake(args):
             "will not fund it again"
         )
     else:
+        # Friendly balance preflight. Keep this AFTER crash recovery:
+        # an already-funded HTLC must remain recoverable even if the
+        # wallet's present balance is now below the original amount.
+        balances = blake_cli(
+            "getbalances",
+            wallet=LOCAL_WALLET,
+        )
+        trusted = Decimal(
+            str(
+                balances
+                .get("mine", {})
+                .get("trusted", 0)
+            )
+        )
+        required = Decimal(str(swap.blake_amount))
+
+        if trusted < required:
+            print()
+            print("INSUFFICIENT BLAKE BALANCE")
+            print("==========================")
+            print("wallet:   ", LOCAL_WALLET)
+            print("trusted:  ", trusted)
+            print("required: ", required)
+            print()
+            print(
+                "STOP: the BLAKE HTLC was NOT funded and "
+                "no funding intent was written."
+            )
+            raise RuntimeError(
+                "Insufficient trusted BLAKE balance for HTLC funding"
+            )
+
         # Persist intent before funds may move.
         write_funding_intent(
             swap,
@@ -5813,7 +5845,17 @@ def command_claim_btc(args):
         verbose=True,
     )
 
-    fee_sats = 1000
+    fee_sats = int(
+        os.environ.get(
+            "BLAKE_SWAP_BTC_SPEND_FEE_SATS",
+            "1000",
+        )
+    )
+
+    if fee_sats < 1:
+        raise ValueError(
+            "BLAKE_SWAP_BTC_SPEND_FEE_SATS must be >= 1"
+        )
 
     if swap.btc_sats <= fee_sats:
         raise ValueError(
@@ -6014,7 +6056,17 @@ def command_refund_btc(args):
             wallet=LOCAL_WALLET,
         )
 
-        fee_sats = 1000
+        fee_sats = int(
+            os.environ.get(
+                "BLAKE_SWAP_BTC_SPEND_FEE_SATS",
+                "1000",
+            )
+        )
+
+        if fee_sats < 1:
+            raise ValueError(
+                "BLAKE_SWAP_BTC_SPEND_FEE_SATS must be >= 1"
+            )
 
         if swap.btc_sats <= fee_sats:
             raise ValueError(
@@ -10703,6 +10755,37 @@ def command_accept_only_match(args):
                 match_id=item["event_id"]
             )
         )
+
+        # Explicit accept-match must finish the same safe coordination
+        # step as `blake next`: publish protocol Alice's ordinary offer
+        # if it is not already available. This moves no funds.
+        offer_exists = False
+
+        try:
+            import contextlib
+            import io
+
+            with contextlib.redirect_stdout(io.StringIO()):
+                asyncio.run(
+                    nostr_fetch_message(
+                        item["swap_id"],
+                        "offer",
+                        expected_pubkey=me,
+                    )
+                )
+            offer_exists = True
+        except Exception:
+            pass
+
+        if not offer_exists:
+            print()
+            print("Publishing reverse protocol offer...")
+            command_publish_offer(
+                SimpleNamespace(
+                    swap_id=item["swap_id"]
+                )
+            )
+
         return
 
     raise RuntimeError(

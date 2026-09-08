@@ -1,0 +1,130 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+PROJECT_DIR="$(
+    cd "$(dirname "${BASH_SOURCE[0]}")/.." &&
+    pwd
+)"
+
+SWAP="$PROJECT_DIR/scripts/swap"
+
+
+usage() {
+    cat <<'EOF'
+BLAKE / BTC SWAP
+
+Usage:
+
+  blake-swap market
+
+  blake-swap offer btc-for-blake \
+      --sats 25000 \
+      --blake 10 \
+      --minutes 30
+
+  blake-swap offer blake-for-btc \
+      --blake 10 \
+      --sats 25000 \
+      --minutes 30
+
+  blake-swap take <offer-id>
+
+  blake-swap my-swaps
+
+Development note:
+  A local participant profile must currently be loaded first.
+
+      source scripts/alice-env
+
+  or
+
+      source scripts/bob-env
+
+The eventual application will absorb this configuration.
+EOF
+}
+
+
+[[ $# -gt 0 ]] || {
+    usage
+    exit 0
+}
+
+
+COMMAND="$1"
+shift
+
+
+case "$COMMAND" in
+
+    market)
+        exec env \
+            PYTHONPATH="$PROJECT_DIR/src:$PROJECT_DIR/vendor${PYTHONPATH:+:$PYTHONPATH}" \
+            python3 \
+            "$PROJECT_DIR/scripts/market-view" \
+            "${@:-all}"
+        ;;
+
+
+    offer)
+        [[ $# -gt 0 ]] || {
+            echo "ERROR: missing offer direction"
+            echo
+            usage
+            exit 1
+        }
+
+        DIRECTION="$1"
+        shift
+
+        case "$DIRECTION" in
+            btc-for-blake|blake-for-btc)
+                ;;
+            *)
+                echo "ERROR: unknown direction: $DIRECTION"
+                echo
+                echo "Choose:"
+                echo "  btc-for-blake"
+                echo "  blake-for-btc"
+                exit 1
+                ;;
+        esac
+
+        exec "$SWAP" \
+            publish-market-offer \
+            --direction "$DIRECTION" \
+            "$@"
+        ;;
+
+
+    take)
+        [[ $# -eq 1 ]] || {
+            echo "ERROR: take requires exactly one full offer ID"
+            exit 1
+        }
+
+        exec "$SWAP" \
+            take-market-offer \
+            "$1"
+        ;;
+
+
+    my-swaps)
+        exec "$SWAP" \
+            list
+        ;;
+
+
+    help|-h|--help)
+        usage
+        ;;
+
+
+    *)
+        echo "ERROR: unknown command: $COMMAND"
+        echo
+        usage
+        exit 1
+        ;;
+
+esac

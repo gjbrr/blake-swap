@@ -31,8 +31,6 @@ BASE_SWAP_DIR = Path(
     )
 ).expanduser()
 
-ALICE_SWAP_DIR = BASE_SWAP_DIR / "alice"
-BOB_SWAP_DIR = BASE_SWAP_DIR / "bob"
 MESSAGE_DIR = Path(
     os.environ.get(
         "BLAKE_SWAP_MESSAGE_DIR",
@@ -41,8 +39,7 @@ MESSAGE_DIR = Path(
 ).expanduser()
 
 for directory in (
-    ALICE_SWAP_DIR,
-    BOB_SWAP_DIR,
+    BASE_SWAP_DIR,
     MESSAGE_DIR,
 ):
     directory.mkdir(parents=True, exist_ok=True)
@@ -87,6 +84,18 @@ BTC_RPC_ARGS = tuple(
 
 ALICE_WALLET = "alice"
 BOB_WALLET = "bob"
+
+PARTICIPANT_ROLE = os.environ.get(
+    "BLAKE_SWAP_ROLE",
+    "alice",
+)
+
+LOCAL_WALLET = os.environ.get(
+    "BLAKE_SWAP_CHAIN_WALLET",
+    ALICE_WALLET
+    if PARTICIPANT_ROLE == "alice"
+    else BOB_WALLET,
+)
 
 # BLAKE-side keys
 ALICE_PUB = "03c2b0716765cce0ad45843be950aba370feecd46d127c8888d3c69dd653606356"
@@ -341,15 +350,23 @@ class Swap:
 
 
 def role_dir(role):
-    if role == "alice":
-        return ALICE_SWAP_DIR
+    """
+    Return this participant's local swap-state directory.
 
-    if role == "bob":
-        return BOB_SWAP_DIR
+    `role` is the participant's protocol role in a particular
+    swap.  It is NOT a filesystem identity.
 
-    raise ValueError(
-        f"Unknown swap role: {role}"
-    )
+    BASE_SWAP_DIR is already participant-local via
+    BLAKE_SWAP_STATE_DIR, so protocol Alice and protocol Bob
+    records owned by this participant belong in the same
+    local state tree.
+    """
+    if role not in ("alice", "bob"):
+        raise ValueError(
+            f"Unknown swap role: {role}"
+        )
+
+    return BASE_SWAP_DIR
 
 
 def swap_path(swap_id, role="alice"):
@@ -1048,16 +1065,7 @@ def command_extract_secret(args):
     )
 
 def mine_btc(blocks=1):
-    role = os.environ.get(
-        "BLAKE_SWAP_ROLE",
-        "alice",
-    )
-
-    wallet = (
-        ALICE_WALLET
-        if role == "alice"
-        else BOB_WALLET
-    )
+    wallet = LOCAL_WALLET
 
     addr = btc_cli(
         "getnewaddress",
@@ -1098,16 +1106,7 @@ def get_wallet_pubkey(chain_cli, wallet):
 
 
 def mine_blake(blocks=1):
-    role = os.environ.get(
-        "BLAKE_SWAP_ROLE",
-        "alice",
-    )
-
-    wallet = (
-        ALICE_WALLET
-        if role == "alice"
-        else BOB_WALLET
-    )
+    wallet = LOCAL_WALLET
 
     addr = blake_cli(
         "getnewaddress",
@@ -1358,7 +1357,7 @@ def find_wallet_payment(
 def recover_blake_funding(swap, address):
     found = find_wallet_payment(
         blake_cli,
-        ALICE_WALLET,
+        LOCAL_WALLET,
         address,
         swap.blake_amount,
     )
@@ -1373,7 +1372,7 @@ def recover_blake_funding(swap, address):
         tx = blake_cli(
             "gettransaction",
             txid,
-            wallet=ALICE_WALLET,
+            wallet=LOCAL_WALLET,
         )
         blockhash = tx.get("blockhash")
 
@@ -1389,7 +1388,7 @@ def recover_blake_funding(swap, address):
 def recover_btc_funding(swap, address):
     found = find_wallet_payment(
         btc_cli,
-        BOB_WALLET,
+        LOCAL_WALLET,
         address,
         swap.btc_sats,
         sats=True,
@@ -1405,7 +1404,7 @@ def recover_btc_funding(swap, address):
         tx = btc_cli(
             "gettransaction",
             txid,
-            wallet=BOB_WALLET,
+            wallet=LOCAL_WALLET,
         )
         blockhash = tx.get("blockhash")
 
@@ -1416,6 +1415,199 @@ def recover_btc_funding(swap, address):
         )
 
     return txid, vout, blockhash
+
+
+def command_fund_ready_swap(args):
+    """
+    Fund the only local protocol-Alice swap whose authenticated
+    Bob acceptance is currently available.
+
+    This is an explicit economic command: when exactly one candidate
+    exists, it imports Bob's acceptance and then calls the existing
+    fund-blake implementation. The underlying funding command retains
+    all of its normal validation, serialization, and crash recovery.
+    """
+    import asyncio
+    import json
+    from types import SimpleNamespace
+
+    me = current_nostr_pubkey()
+    candidates = []
+
+    for path in sorted(BASE_SWAP_DIR.glob("*.json")):
+        # Exclude non-swap JSON files that may live in the state root.
+        if len(path.stem) != 12:
+            continue
+
+        try:
+            with open(path) as f:
+                data = json.load(f)
+        except Exception:
+            continue
+
+        if data.get("swap_id") != path.stem:
+            continue
+
+        if data.get("state") != State.OFFERED.value:
+            continue
+
+        if data.get("nostr_alice_pub") != me:
+            continue
+
+        bob_pub = data.get("nostr_bob_pub")
+        if not bob_pub:
+            continue
+
+        # If Bob's settlement keys are already imported, this swap is
+        # immediately funding-ready.
+        if (
+            data.get("blake_bob_pub")
+            and data.get("btc_bob_pub")
+        ):
+            candidates.append(
+                {
+                    "swap_id": path.stem,
+                    "accept_available": True,
+                    "already_imported": True,
+                    "accept_event_id": None,
+                }
+            )
+            continue
+
+        # Otherwise look for the exact authenticated acceptance from the
+        # already-pinned Bob identity. Discovery itself is read-only.
+        try:
+            message, event_id, signer = asyncio.run(
+                nostr_fetch_message(
+                    path.stem,
+                    "accept",
+                    expected_pubkey=bob_pub,
+                )
+            )
+        except Exception:
+            continue
+
+        if signer != bob_pub:
+            continue
+
+        if message.get("type") != "accept":
+            continue
+
+        if message.get("swap_id") != path.stem:
+            continue
+
+        if message.get("secret_hash") != data.get("secret_hash"):
+            continue
+
+        if not message.get("blake_bob_pub"):
+            continue
+
+        if not message.get("btc_bob_pub"):
+            continue
+
+        candidates.append(
+            {
+                "swap_id": path.stem,
+                "accept_available": True,
+                "already_imported": False,
+                "accept_event_id": event_id,
+            }
+        )
+
+    if not candidates:
+        print()
+        print("NO FUNDING-READY SWAP")
+        print("=====================")
+        print(
+            "No local protocol-Alice OFFERED swap has an "
+            "authenticated Bob acceptance ready."
+        )
+        print()
+        print(
+            "The taker may still need to run `accept-match`."
+        )
+        return
+
+    if len(candidates) > 1:
+        print()
+        print("MULTIPLE FUNDING-READY SWAPS")
+        print("============================")
+        print(
+            "Refusing to choose which trade receives funds."
+        )
+        print()
+
+        for index, candidate in enumerate(
+            candidates,
+            start=1,
+        ):
+            swap = load_swap(
+                candidate["swap_id"],
+                role="alice",
+            )
+            print(
+                f"{index}. {swap.swap_id}  "
+                f"{swap.blake_amount} BLAKE / "
+                f"{swap.btc_sats:,} sats"
+            )
+
+        print()
+        print(
+            "Use `fund-blake <swap-id>` for the one "
+            "you intend to commit."
+        )
+        return
+
+    candidate = candidates[0]
+    swap_id = candidate["swap_id"]
+
+    swap = load_swap(
+        swap_id,
+        role="alice",
+    )
+
+    print()
+    print("FUNDING-READY SWAP")
+    print("==================")
+    print("swap: ", swap.swap_id)
+    print("BLAKE:", swap.blake_amount)
+    print("sats: ", f"{swap.btc_sats:,}")
+    print()
+
+    ns = SimpleNamespace(
+        swap_id=swap_id
+    )
+
+    if not candidate["already_imported"]:
+        print(
+            "Importing Bob's authenticated acceptance..."
+        )
+        command_receive_accept(ns)
+
+    swap = load_swap(
+        swap_id,
+        role="alice",
+    )
+
+    if not (
+        swap.blake_bob_pub
+        and swap.btc_bob_pub
+        and swap.nostr_bob_pub
+    ):
+        raise RuntimeError(
+            "SECURITY FAILURE: Bob acceptance is not fully pinned"
+        )
+
+    print()
+    print("EXPLICIT COMMITMENT")
+    print("===================")
+    print(
+        "Funding the BLAKE HTLC now. This moves funds."
+    )
+    print()
+
+    command_fund_blake(ns)
+
 
 @serialized_funding("blake")
 def command_fund_blake(args):
@@ -1476,7 +1668,7 @@ def command_fund_blake(args):
             "sendtoaddress",
             address,
             swap.blake_amount,
-            wallet=ALICE_WALLET,
+            wallet=LOCAL_WALLET,
         )
 
         blockhash = mine_blake(1)[0]
@@ -2234,16 +2426,54 @@ def build_nostr_event(
                 "expected_role must be alice or bob"
             )
 
-        current_role = os.environ.get(
-            "BLAKE_SWAP_ROLE"
+        #
+        # Participant identity and protocol role are
+        # intentionally independent.
+        #
+        # Prefer the cryptographically pinned identity in
+        # this swap over the participant-profile name.
+        #
+        swap = load_swap(
+            swap_id,
+            role=expected_role,
         )
 
-        if current_role != expected_role:
-            raise RuntimeError(
-                "SECURITY FAILURE: refusing to sign "
-                f"{message_type} as {current_role!r}; "
-                f"protocol requires {expected_role!r}"
+        expected_field = (
+            "nostr_alice_pub"
+            if expected_role == "alice"
+            else "nostr_bob_pub"
+        )
+
+        expected_pubkey = getattr(
+            swap,
+            expected_field,
+        )
+
+        if expected_pubkey:
+            actual_pubkey = current_nostr_pubkey()
+
+            if actual_pubkey != expected_pubkey:
+                raise RuntimeError(
+                    "SECURITY FAILURE: refusing to sign "
+                    f"{message_type}; current participant "
+                    f"is not pinned protocol {expected_role}"
+                )
+
+        else:
+            #
+            # Legacy compatibility for old swaps created
+            # before protocol Nostr identities were pinned.
+            #
+            current_role = os.environ.get(
+                "BLAKE_SWAP_ROLE"
             )
+
+            if current_role != expected_role:
+                raise RuntimeError(
+                    "SECURITY FAILURE: refusing to sign "
+                    f"{message_type} as {current_role!r}; "
+                    f"protocol requires {expected_role!r}"
+                )
 
     private_key = PrivateKey(
         bytes.fromhex(
@@ -2832,13 +3062,13 @@ def command_publish_offer(args):
     if not swap.blake_alice_pub:
         swap.blake_alice_pub = get_wallet_pubkey(
             blake_cli,
-            ALICE_WALLET,
+            LOCAL_WALLET,
         )
 
     if not swap.btc_alice_pub:
         swap.btc_alice_pub = get_wallet_pubkey(
             btc_cli,
-            ALICE_WALLET,
+            LOCAL_WALLET,
         )
 
     save_swap(
@@ -3148,6 +3378,12 @@ def command_accept_offer(args):
         None,
     )
 
+    expected_bob_pub = getattr(
+        args,
+        "expected_bob_pub",
+        None,
+    )
+
     # A market match has already authenticated Alice.
     # In that case, constrain the Nostr query itself
     # to that exact signer instead of accepting an
@@ -3288,13 +3524,24 @@ def command_accept_offer(args):
     # Bob creates only Bob-owned keys.
     swap.blake_bob_pub = get_wallet_pubkey(
         blake_cli,
-        BOB_WALLET,
+        LOCAL_WALLET,
     )
 
     swap.btc_bob_pub = get_wallet_pubkey(
         btc_cli,
-        BOB_WALLET,
+        LOCAL_WALLET,
     )
+
+    if expected_bob_pub is not None:
+        actual_bob_pub = current_nostr_pubkey()
+
+        if actual_bob_pub != expected_bob_pub:
+            raise RuntimeError(
+                "SECURITY FAILURE: current participant "
+                "does not match authenticated market taker"
+            )
+
+        swap.nostr_bob_pub = expected_bob_pub
 
     save_swap(
         swap,
@@ -4054,7 +4301,7 @@ def command_fund_btc(args):
             "sendtoaddress",
             address,
             f"{amount_btc:.8f}",
-            wallet=BOB_WALLET,
+            wallet=LOCAL_WALLET,
         )
 
         blockhash = mine_btc(1)[0]
@@ -4383,7 +4630,7 @@ def command_publish_blake_claimed(args):
         wallet_tx = blake_cli(
             "gettransaction",
             swap.blake_claim_txid,
-            wallet=BOB_WALLET,
+            wallet=LOCAL_WALLET,
         )
 
         recovered_blockhash = wallet_tx.get("blockhash")
@@ -4727,7 +4974,7 @@ def command_claim_blake(args):
         "getnewaddress",
         "",
         "bech32",
-        wallet=BOB_WALLET,
+        wallet=LOCAL_WALLET,
     )
 
     fee = Decimal("0.00010000")
@@ -4773,7 +5020,7 @@ def command_claim_blake(args):
         "ALL",
         True,
         False,
-        wallet=BOB_WALLET,
+        wallet=LOCAL_WALLET,
     )
 
     signed_psbt = signed["psbt"]
@@ -5016,7 +5263,7 @@ def command_refund_blake(args):
         )
 
     refund_path = (
-        ALICE_SWAP_DIR
+        BASE_SWAP_DIR
         / f"{swap.swap_id}.blake-refund.hex"
     )
 
@@ -5038,7 +5285,7 @@ def command_refund_blake(args):
             "getnewaddress",
             "",
             "bech32",
-            wallet=ALICE_WALLET,
+            wallet=LOCAL_WALLET,
         )
 
         inputs = [
@@ -5078,7 +5325,7 @@ def command_refund_blake(args):
             "ALL",
             True,
             False,
-            wallet=ALICE_WALLET,
+            wallet=LOCAL_WALLET,
         )
 
         finalized = blake_cli(
@@ -5556,7 +5803,7 @@ def command_claim_btc(args):
         "getnewaddress",
         "",
         "bech32",
-        wallet=ALICE_WALLET,
+        wallet=LOCAL_WALLET,
     )
 
     output_sats = swap.btc_sats - fee_sats
@@ -5597,7 +5844,7 @@ def command_claim_btc(args):
         "ALL",
         True,
         False,
-        wallet=ALICE_WALLET,
+        wallet=LOCAL_WALLET,
     )
 
     signed_psbt = signed["psbt"]
@@ -5719,7 +5966,7 @@ def command_refund_btc(args):
     )
 
     refund_path = (
-        BOB_SWAP_DIR
+        BASE_SWAP_DIR
         / f"{swap.swap_id}.btc-refund.hex"
     )
 
@@ -5741,7 +5988,7 @@ def command_refund_btc(args):
             "getnewaddress",
             "",
             "bech32",
-            wallet=BOB_WALLET,
+            wallet=LOCAL_WALLET,
         )
 
         fee_sats = 1000
@@ -5795,7 +6042,7 @@ def command_refund_btc(args):
             "ALL",
             True,
             False,
-            wallet=BOB_WALLET,
+            wallet=LOCAL_WALLET,
         )
 
         finalized = btc_cli(
@@ -6615,6 +6862,85 @@ def nostr_cached_market_events():
     )
 
     return events
+
+
+
+def resolve_cached_nostr_prefix(value, expected_type=None, label="Nostr event"):
+    import json
+
+    if not isinstance(value, str):
+        raise ValueError(f"{label} ID must be text")
+
+    value = value.strip().lower()
+
+    if len(value) == 64:
+        try:
+            int(value, 16)
+        except ValueError as e:
+            raise ValueError(f"{label} ID is not hexadecimal") from e
+        return value
+
+    if len(value) < 8:
+        raise ValueError(
+            f"{label} ID prefix is too short; use at least 8 hex characters"
+        )
+
+    try:
+        int(value, 16)
+    except ValueError as e:
+        raise ValueError(
+            f"{label} ID prefix is not hexadecimal"
+        ) from e
+
+    matches = []
+
+    for event in nostr_cached_market_events():
+        event_id = event.get("id")
+        if (
+            not isinstance(event_id, str)
+            or not event_id.startswith(value)
+        ):
+            continue
+
+        if expected_type is not None:
+            try:
+                message = json.loads(event.get("content", ""))
+            except Exception:
+                continue
+            if message.get("type") != expected_type:
+                continue
+
+        matches.append(event_id)
+
+    matches = sorted(set(matches))
+
+    if not matches:
+        hints = {
+            "market-offer": "run `blake-swap market` first",
+            "market-take": "run `market-takes <offer>` first",
+            "market-match": "run `market-matches` first",
+        }
+        raise RuntimeError(
+            f"No verified cached {label.lower()} matches prefix {value!r}; "
+            + hints.get(expected_type, "refresh the relevant Nostr view first")
+        )
+
+    if len(matches) > 1:
+        print()
+        print("AMBIGUOUS ID PREFIX")
+        print("===================")
+        print(value)
+        print()
+        for event_id in matches:
+            print(event_id)
+        raise RuntimeError(
+            f"{label} ID prefix matches more than one verified event; "
+            "use a longer prefix"
+        )
+
+    resolved = matches[0]
+    print(f"Resolved {label.lower()} prefix {value} -> {resolved}")
+    return resolved
 
 
 async def nostr_fetch_event_by_id(event_id):
@@ -8757,6 +9083,20 @@ def command_publish_market_match(args):
             "a market offer"
         )
 
+    # A market match must itself be created while the
+    # advertised offer is still live.  A durable local
+    # selection may allow recovery/inspection of an old
+    # negotiation, but it must not create a newly signed
+    # post-expiry match that counterparties will reject.
+    if (
+        int(offer_message["expires_at"])
+        <= int(time.time())
+    ):
+        raise RuntimeError(
+            "Market offer expired before match publication; "
+            "publish a fresh offer instead"
+        )
+
     alice_pub = current_nostr_pubkey()
     bob_pub = take_event["pubkey"]
 
@@ -10133,7 +10473,147 @@ def command_accept_reverse_swap_offer(args):
     )
 
 
+
+def command_accept_only_match(args):
+    import asyncio
+    from types import SimpleNamespace
+
+    me = current_nostr_pubkey()
+    matches = asyncio.run(
+        nostr_fetch_market_matches(
+            me,
+            limit=200,
+        )
+    )
+
+    candidates = []
+    for item in matches:
+        swap_id = item.get("swap_id")
+        if (
+            isinstance(swap_id, str)
+            and len(swap_id) == 12
+            and swap_path(swap_id).exists()
+        ):
+            continue
+        candidates.append(item)
+
+    requested = getattr(args, "match_id", None)
+
+    if requested:
+        requested = requested.strip().lower()
+        if len(requested) < 8:
+            raise ValueError(
+                "match ID prefix is too short; use at least 8 characters"
+            )
+
+        filtered = [
+            item for item in candidates
+            if item["event_id"].startswith(requested)
+        ]
+
+        if not filtered:
+            raise RuntimeError(
+                f"No pending valid match begins with {requested!r}"
+            )
+
+        if len(filtered) > 1:
+            print()
+            print("AMBIGUOUS MATCH PREFIX")
+            print("======================")
+            for item in filtered:
+                print(
+                    item["event_id"],
+                    "swap=" + str(item.get("swap_id")),
+                )
+            raise RuntimeError(
+                "Match prefix is ambiguous; use more characters"
+            )
+
+        candidates = filtered
+
+    if not candidates:
+        print()
+        print("NO PENDING MATCH")
+        print("================")
+        print(
+            "No unimported valid market match for "
+            "this participant was found."
+        )
+        return
+
+    if len(candidates) > 1:
+        print()
+        print("MULTIPLE PENDING MATCHES")
+        print("========================")
+        print(
+            "More than one valid unimported match "
+            "belongs to this participant."
+        )
+        print("Refusing to choose automatically.")
+        print()
+
+        for index, item in enumerate(candidates, start=1):
+            print(
+                f"{index}. "
+                f"match={item['event_id'][:12]}  "
+                f"swap={item.get('swap_id', '-')}"
+            )
+
+        print()
+        print(
+            "Use `accept-match <match-prefix>` "
+            "for the one you want."
+        )
+        return
+
+    item = candidates[0]
+
+    print()
+    print("ONE PENDING MATCH FOUND")
+    print("=======================")
+    print("match:", item["event_id"])
+    print("swap: ", item["swap_id"])
+    print(
+        "trade:",
+        item["blake_amount"],
+        "BLAKE /",
+        f"{int(item['btc_sats']):,}",
+        "sats",
+    )
+    print()
+
+    direction = item.get("direction")
+
+    if direction == MARKET_DIRECTION_BLAKE_FOR_BTC:
+        print("Importing match as protocol Bob.")
+        command_accept_market_match(
+            SimpleNamespace(
+                match_id=item["event_id"]
+            )
+        )
+        return
+
+    if direction == MARKET_DIRECTION_BTC_FOR_BLAKE:
+        print("Importing reverse-direction match as protocol Alice.")
+        command_accept_reverse_market_match(
+            SimpleNamespace(
+                match_id=item["event_id"]
+            )
+        )
+        return
+
+    raise RuntimeError(
+        f"Unsupported market direction: {direction!r}"
+    )
+
+
+
 def command_accept_market_match(args):
+    args.match_id = resolve_cached_nostr_prefix(
+        args.match_id,
+        expected_type="market-match",
+        label="market match",
+    )
     import asyncio
     import json
     import os
@@ -10326,7 +10806,15 @@ def command_accept_market_match(args):
                 "swap has different Alice identity"
             )
 
-        if (
+        if existing.nostr_bob_pub is None:
+            existing.nostr_bob_pub = bob_pubkey
+
+            save_swap(
+                existing,
+                role="bob",
+            )
+
+        elif (
             existing.nostr_bob_pub
             != bob_pubkey
         ):
@@ -10409,6 +10897,7 @@ def command_accept_market_match(args):
             expected_btc_sats=item[
                 "btc_sats"
             ],
+            expected_bob_pub=bob_pubkey,
         )
     )
 
@@ -10758,6 +11247,72 @@ def accept_reverse_market_take(
     return selection
 
 
+
+def command_accept_only_take(args):
+    import asyncio
+    from types import SimpleNamespace
+
+    offer_id = resolve_cached_nostr_prefix(
+        args.offer_id,
+        expected_type="market-offer",
+        label="market offer",
+    )
+
+    original, offer_message, valid_takes = asyncio.run(
+        nostr_fetch_market_takes(
+            offer_id,
+            limit=200,
+        )
+    )
+
+    if not valid_takes:
+        raise RuntimeError(
+            "No valid takes currently exist for this offer"
+        )
+
+    if len(valid_takes) > 1:
+        print()
+        print("MULTIPLE VALID TAKES")
+        print("====================")
+        print("offer:", offer_id)
+        print()
+        print(
+            "More than one counterparty wants this offer. "
+            "Refusing to choose automatically."
+        )
+        print()
+
+        for index, candidate in enumerate(valid_takes, start=1):
+            print(
+                f"{index}. "
+                f"{candidate['event_id'][:12]}  "
+                f"taker={candidate['taker'][:12]}"
+            )
+
+        print()
+        print(
+            "Use accept-market-take with the chosen "
+            "take ID/prefix."
+        )
+        return
+
+    take_id = valid_takes[0]["event_id"]
+
+    print()
+    print("ONE VALID TAKE FOUND")
+    print("====================")
+    print("offer:", offer_id)
+    print("take: ", take_id)
+    print()
+    print("Accepting the only valid take.")
+
+    command_accept_market_take(
+        SimpleNamespace(
+            take_id=take_id
+        )
+    )
+
+
 def command_accept_market_take(args):
     import asyncio
     import json
@@ -10765,11 +11320,11 @@ def command_accept_market_take(args):
     from types import SimpleNamespace
     from coincurve import PrivateKey
 
-    if len(args.take_id) != 64:
-        raise ValueError(
-            "take_id must be the full "
-            "64-character Nostr event ID"
-        )
+    args.take_id = resolve_cached_nostr_prefix(
+        args.take_id,
+        expected_type="market-take",
+        label="market take",
+    )
 
     #
     # Step 1:
@@ -11394,11 +11949,11 @@ def command_take_market_offer(args):
     import asyncio
     import time
 
-    if len(args.offer_id) != 64:
-        raise ValueError(
-            "offer_id must be the full "
-            "64-character Nostr event ID"
-        )
+    args.offer_id = resolve_cached_nostr_prefix(
+        args.offer_id,
+        expected_type="market-offer",
+        label="market offer",
+    )
 
     # First ask our normal market scanner what is
     # actually open right now. This automatically
@@ -12307,6 +12862,2443 @@ def _test_crash_after_broadcast(point):
     _os._exit(86)
 
 
+
+def _reconcile_local_role(swap):
+    """Derive protocol role from identities pinned into this swap."""
+    me = current_nostr_pubkey()
+    alice = bool(swap.nostr_alice_pub) and me == swap.nostr_alice_pub
+    bob = bool(swap.nostr_bob_pub) and me == swap.nostr_bob_pub
+
+    if alice and bob:
+        raise RuntimeError(
+            "SECURITY FAILURE: current participant is pinned as both protocol roles"
+        )
+    if alice:
+        return "alice", me, swap.nostr_bob_pub
+    if bob:
+        return "bob", me, swap.nostr_alice_pub
+
+    raise RuntimeError(
+        "SECURITY FAILURE: current Nostr identity is not pinned to this swap"
+    )
+
+
+def _reconcile_quiet(fn, *args, **kwargs):
+    import contextlib
+    import io
+    with contextlib.redirect_stdout(io.StringIO()):
+        return fn(*args, **kwargs)
+
+
+def _reconcile_observe_htlc(swap, chain):
+    """Observe funding/spend truth without mutating durable swap state."""
+    import copy
+
+    work = copy.copy(swap)
+
+    if chain == "blake":
+        cli = blake_cli
+        tx_field = "blake_funding_txid"
+        vout_field = "blake_funding_vout"
+        block_field = "blake_funding_blockhash"
+        verifier = verify_blake_contract
+    elif chain == "btc":
+        cli = btc_cli
+        tx_field = "btc_funding_txid"
+        vout_field = "btc_funding_vout"
+        block_field = "btc_funding_blockhash"
+        verifier = verify_btc_contract
+    else:
+        raise ValueError(f"Unknown chain: {chain}")
+
+    txid = getattr(work, tx_field)
+    vout = getattr(work, vout_field)
+    blockhash = getattr(work, block_field)
+
+    if (txid is None) != (vout is None):
+        raise RuntimeError(
+            f"SECURITY FAILURE: incomplete recorded {chain.upper()} funding outpoint"
+        )
+
+    discovered = False
+
+    if txid is None:
+        # Direct-chain recovery is deliberately allowed in this read-only
+        # report.  It updates only this temporary in-memory copy.
+        try:
+            match = _reconcile_quiet(
+                scan_chain_for_expected_funding,
+                work,
+                chain,
+            )
+        except Exception as e:
+            return {
+                "status": "unknown",
+                "reason": f"{type(e).__name__}: {e}",
+            }
+
+        if match is None:
+            return {"status": "absent"}
+
+        discovered = True
+        txid = match["txid"]
+        vout = match["vout"]
+        blockhash = match["blockhash"]
+        setattr(work, tx_field, txid)
+        setattr(work, vout_field, vout)
+        setattr(work, block_field, blockhash)
+
+    utxo = cli("gettxout", txid, vout)
+
+    if utxo:
+        try:
+            _reconcile_quiet(verifier, work, verbose=False)
+        except Exception as e:
+            return {
+                "status": "invalid",
+                "txid": txid,
+                "vout": vout,
+                "reason": f"{type(e).__name__}: {e}",
+            }
+
+        return {
+            "status": "funded",
+            "txid": txid,
+            "vout": vout,
+            "blockhash": blockhash,
+            "confirmations": int(utxo.get("confirmations", 0) or 0),
+            "discovered": discovered,
+        }
+
+    if not blockhash:
+        return {
+            "status": "unknown",
+            "txid": txid,
+            "vout": vout,
+            "reason": "outpoint unavailable and funding blockhash is unknown",
+        }
+
+    try:
+        spend = _reconcile_quiet(
+            find_confirmed_htlc_spend,
+            work,
+            chain,
+        )
+    except Exception as e:
+        return {
+            "status": "pending-or-ambiguous",
+            "txid": txid,
+            "vout": vout,
+            "reason": f"{type(e).__name__}: {e}",
+        }
+
+    if spend is None:
+        return {
+            "status": "unknown",
+            "txid": txid,
+            "vout": vout,
+            "reason": "outpoint unavailable but no confirmed spender was found",
+        }
+
+    return {
+        "status": "spent",
+        "txid": txid,
+        "vout": vout,
+        "spend_txid": spend["txid"],
+        "spend_blockhash": spend["blockhash"],
+        "branch": spend["branch"],
+        "discovered": discovered,
+    }
+
+
+def _reconcile_next_action(swap, role, blake, btc, blake_height, btc_height):
+    """Return one conservative recommendation.  Never execute it here."""
+    state = State(swap.state)
+
+    if state == State.COMPLETE:
+        if (
+            blake.get("status") == "spent"
+            and blake.get("branch") == "claim"
+            and btc.get("status") == "spent"
+            and btc.get("branch") == "claim"
+        ):
+            return (
+                "none",
+                "swap is COMPLETE and both confirmed "
+                "claim branches remain active",
+            )
+
+        return (
+            "manual-attention",
+            "local checkpoint is COMPLETE but current "
+            "chain reality does not prove both claim branches",
+        )
+
+    unsafe = {"unknown", "invalid", "pending-or-ambiguous"}
+    if blake.get("status") in unsafe:
+        return "manual-attention", f"BLAKE observation is {blake['status']}"
+    if btc.get("status") in unsafe:
+        return "manual-attention", f"Bitcoin observation is {btc['status']}"
+
+    # Chain truth outranks a stale checkpoint.
+
+    # Confirmed funding may also be ahead of the durable checkpoint.
+    #
+    # Never recommend an action whose command requires a newer local
+    # state than we have persisted. First synchronize the checkpoint
+    # from confirmed chain truth, then reconcile again.
+    if (
+        blake.get("status") == "funded"
+        and state == State.OFFERED
+    ):
+        return (
+            "sync-funding",
+            "confirmed BLAKE funding is ahead of local checkpoint",
+        )
+
+    if (
+        btc.get("status") == "funded"
+        and state in {
+            State.OFFERED,
+            State.BLAKE_FUNDED,
+        }
+    ):
+        return (
+            "sync-funding",
+            "confirmed Bitcoin funding is ahead of local checkpoint",
+        )
+
+
+    # A confirmed Bitcoin spend necessarily proves that Bitcoin funding
+    # happened first. If durable state has not yet imported BTC funding,
+    # restore that checkpoint before attempting settlement reconciliation.
+    if (
+        btc.get("status") == "spent"
+        and state in {
+            State.OFFERED,
+            State.BLAKE_FUNDED,
+        }
+    ):
+        return (
+            "sync-funding",
+            "confirmed Bitcoin settlement exists but Bitcoin funding "
+            "is ahead of local checkpoint",
+        )
+
+    if blake.get("status") == "spent":
+        if blake.get("branch") == "claim":
+            if state == State.BLAKE_CLAIMED:
+                return "complete", "final BLAKE claim is confirmed"
+            return "sync-settlement", "confirmed BLAKE claim is ahead of local checkpoint"
+        if blake.get("branch") == "refund":
+            if state == State.BLAKE_REFUNDED:
+                return "none", "final BLAKE refund is confirmed"
+            return "sync-settlement", "confirmed BLAKE refund is ahead of local checkpoint"
+
+    if btc.get("status") == "spent":
+        if btc.get("branch") == "claim":
+            if state not in {State.BTC_CLAIMED, State.BLAKE_CLAIMED}:
+                return "sync-settlement", "confirmed Bitcoin claim is ahead of local checkpoint"
+            if role == "bob":
+                if not swap.revealed_secret_hex:
+                    return "sync-settlement", "Bitcoin claim reveals S but local Bob state has not recovered it"
+                if blake.get("status") == "funded":
+                    return "claim-blake", "S is known and the BLAKE HTLC remains unspent"
+            return "wait", "Bitcoin claim is confirmed; protocol Bob must claim BLAKE"
+
+        if btc.get("branch") == "refund":
+            if state != State.BTC_REFUNDED:
+                return "sync-settlement", "confirmed Bitcoin refund is ahead of local checkpoint"
+            if role == "alice" and blake.get("status") == "funded":
+                if blake_height >= int(swap.blake_timeout):
+                    return "refund-blake", "Bitcoin was refunded and BLAKE refund is mature"
+                return "wait", "Bitcoin was refunded; BLAKE refund is not mature"
+            return "wait", "Bitcoin refund is confirmed; protocol Alice controls BLAKE refund"
+
+    if role == "alice":
+        if blake.get("status") == "absent":
+            if not (swap.blake_bob_pub and swap.btc_bob_pub and swap.nostr_bob_pub):
+                return "wait", "protocol Bob acceptance/public keys are not fully pinned"
+            if blake_height >= int(swap.blake_timeout):
+                return "manual-attention", "BLAKE timeout has already been reached"
+            return "fund-blake", "counterparty is pinned and no BLAKE funding exists"
+
+        if blake.get("status") == "funded" and btc.get("status") == "absent":
+            return "wait", "BLAKE is funded; protocol Bob must fund Bitcoin"
+
+        if btc.get("status") == "funded":
+            if not swap.secret_hex:
+                return "manual-attention", "protocol Alice has no local secret S"
+            if btc_height >= int(swap.btc_timeout):
+                return "manual-attention", "Bitcoin refund timelock is mature; claim may race a refund"
+            return "claim-btc", "Bitcoin HTLC is confirmed/unspent and protocol Alice possesses S"
+
+    if role == "bob":
+        if blake.get("status") == "absent":
+            return "wait", "protocol Alice must fund BLAKE first"
+
+        if blake.get("status") == "funded" and btc.get("status") == "absent":
+            if btc_height >= int(swap.btc_timeout):
+                return "manual-attention", "Bitcoin timeout has already been reached"
+            return "fund-btc", "BLAKE HTLC is confirmed/unspent and Bitcoin is not yet funded"
+
+        if btc.get("status") == "funded":
+            if btc_height >= int(swap.btc_timeout):
+                return "refund-btc", "Bitcoin HTLC is unspent and its refund timelock is mature"
+            return "wait", "Bitcoin is funded; protocol Alice must claim and reveal S"
+
+    return "manual-attention", f"no conservative rule matched checkpoint {state.value}"
+
+
+def _reconcile_negotiation_status(swap):
+    """
+    Classify whether enough authenticated negotiation state
+    exists to derive HTLCs and safely inspect chain reality.
+
+    This is deliberately separate from blockchain state.
+    """
+
+    if not swap.nostr_alice_pub or not swap.nostr_bob_pub:
+        return (
+            "identity-unbound",
+            "both protocol Nostr identities are not pinned",
+        )
+
+    alice_keys = (
+        bool(swap.blake_alice_pub)
+        and bool(swap.btc_alice_pub)
+    )
+
+    bob_keys = (
+        bool(swap.blake_bob_pub)
+        and bool(swap.btc_bob_pub)
+    )
+
+    if not alice_keys:
+        return (
+            "negotiation-incomplete",
+            "protocol Alice settlement pubkeys were never created or imported",
+        )
+
+    if not bob_keys:
+        return (
+            "negotiation-incomplete",
+            "protocol Bob settlement pubkeys were never created or imported",
+        )
+
+    return (
+        "ready",
+        "all protocol identities and settlement pubkeys are pinned",
+    )
+
+
+
+def _reconcile_execution_readiness(
+    swap,
+    role,
+    action,
+    blake_height,
+    btc_height,
+):
+    result = {
+        "checked": False,
+        "action": action,
+        "ready": None,
+        "wallet": LOCAL_WALLET,
+        "wallet_loaded": None,
+        "trusted_balance": None,
+        "required_balance": None,
+        "fee_reserve": None,
+        "balance_unit": None,
+        "timeout_blocks_remaining": None,
+        "minimum_timeout_blocks": None,
+        "reasons": [],
+    }
+
+    if action not in {"fund-blake", "fund-btc"}:
+        return result
+
+    result["checked"] = True
+
+    if action == "fund-blake":
+        if role != "alice":
+            result["ready"] = False
+            result["reasons"].append("fund-blake requires protocol Alice")
+            return result
+
+        cli = blake_cli
+        chain_name = "BLAKE"
+        balance_unit = "BLAKE"
+
+        fee_reserve = Decimal(
+            os.environ.get(
+                "BLAKE_SWAP_RUN_BLAKE_FEE_RESERVE",
+                "0.001",
+            )
+        )
+
+        if fee_reserve < 0:
+            raise ValueError(
+                "BLAKE_SWAP_RUN_BLAKE_FEE_RESERVE must be >= 0"
+            )
+
+        required = Decimal(str(swap.blake_amount)) + fee_reserve
+        remaining = int(swap.blake_timeout) - int(blake_height)
+
+        minimum_blocks = int(
+            os.environ.get(
+                "BLAKE_SWAP_RUN_MIN_BLAKE_FUND_BLOCKS",
+                "2",
+            )
+        )
+
+    else:
+        if role != "bob":
+            result["ready"] = False
+            result["reasons"].append("fund-btc requires protocol Bob")
+            return result
+
+        cli = btc_cli
+        chain_name = "Bitcoin"
+        balance_unit = "BTC"
+
+        fee_reserve_sats = int(
+            os.environ.get(
+                "BLAKE_SWAP_RUN_BTC_FEE_RESERVE_SATS",
+                "5000",
+            )
+        )
+
+        if fee_reserve_sats < 0:
+            raise ValueError(
+                "BLAKE_SWAP_RUN_BTC_FEE_RESERVE_SATS must be >= 0"
+            )
+
+        fee_reserve = (
+            Decimal(fee_reserve_sats)
+            / Decimal(100_000_000)
+        )
+
+        required = (
+            Decimal(swap.btc_sats)
+            / Decimal(100_000_000)
+            + fee_reserve
+        )
+
+        remaining = int(swap.btc_timeout) - int(btc_height)
+
+        minimum_blocks = int(
+            os.environ.get(
+                "BLAKE_SWAP_RUN_MIN_BTC_FUND_BLOCKS",
+                "2",
+            )
+        )
+
+    if minimum_blocks < 1:
+        raise ValueError(
+            "funding minimum timeout blocks must be >= 1"
+        )
+
+    result["fee_reserve"] = str(fee_reserve)
+    result["required_balance"] = str(required)
+    result["balance_unit"] = balance_unit
+    result["timeout_blocks_remaining"] = remaining
+    result["minimum_timeout_blocks"] = minimum_blocks
+
+    try:
+        loaded = cli("listwallets")
+    except Exception as e:
+        result["ready"] = False
+        result["reasons"].append(
+            f"{chain_name} wallet service unavailable: "
+            f"{type(e).__name__}: {e}"
+        )
+        return result
+
+    wallet_loaded = isinstance(loaded, list) and LOCAL_WALLET in loaded
+    result["wallet_loaded"] = wallet_loaded
+
+    if not wallet_loaded:
+        result["reasons"].append(
+            f"local wallet {LOCAL_WALLET!r} is not loaded"
+        )
+
+    trusted = None
+
+    if wallet_loaded:
+        try:
+            balances = cli(
+                "getbalances",
+                wallet=LOCAL_WALLET,
+            )
+
+            trusted = Decimal(
+                str(
+                    balances
+                    .get("mine", {})
+                    .get("trusted", 0)
+                )
+            )
+
+            result["trusted_balance"] = str(trusted)
+
+        except Exception as e:
+            result["reasons"].append(
+                "could not read trusted wallet balance: "
+                f"{type(e).__name__}: {e}"
+            )
+
+    if trusted is not None and trusted < required:
+        result["reasons"].append(
+            "trusted wallet balance is below amount plus configured fee reserve"
+        )
+
+    if remaining < minimum_blocks:
+        result["reasons"].append(
+            "timeout margin is below configured funding minimum"
+        )
+
+    result["ready"] = (
+        wallet_loaded
+        and trusted is not None
+        and trusted >= required
+        and remaining >= minimum_blocks
+    )
+
+    if result["ready"]:
+        result["reasons"].append(
+            "wallet, balance, fee reserve, and timeout margin are ready"
+        )
+
+    return result
+
+
+def build_reconcile_report(swap):
+    """Build a machine-readable, read-only protocol report."""
+    negotiation_status, negotiation_reason = (
+        _reconcile_negotiation_status(swap)
+    )
+
+    try:
+        role, me, counterparty = _reconcile_local_role(swap)
+    except RuntimeError as e:
+        return {
+            "swap_id": swap.swap_id,
+            "participant_pubkey": current_nostr_pubkey(),
+            "protocol_role": None,
+            "counterparty_pubkey": None,
+            "checkpoint_state": swap.state,
+            "decision_class": "manual-attention",
+            "negotiation_status": "identity-unbound",
+            "negotiation_reason": str(e),
+            "blake": {"status": "not-evaluated"},
+            "btc": {"status": "not-evaluated"},
+            "secret": {
+                "known": False,
+                "source": "not-evaluated",
+                "hash_matches": None,
+            },
+            "next_action": "manual-attention",
+            "reason": (
+                "current participant cannot be securely mapped "
+                "to a protocol role"
+            ),
+            "read_only": True,
+        }
+
+    if negotiation_status != "ready":
+        secret_value = None
+        secret_source = "none"
+
+        if role == "alice" and swap.secret_hex:
+            secret_value = swap.secret_hex
+            secret_source = "locally-generated"
+
+        elif role == "bob" and swap.revealed_secret_hex:
+            secret_value = swap.revealed_secret_hex
+            secret_source = "recovered-from-bitcoin"
+
+        secret_matches = None
+
+        if secret_value:
+            secret_matches = (
+                hashlib.sha256(
+                    bytes.fromhex(secret_value)
+                ).hexdigest()
+                == swap.secret_hash
+            )
+
+        return {
+            "swap_id": swap.swap_id,
+            "participant_pubkey": me,
+            "protocol_role": role,
+            "counterparty_pubkey": counterparty,
+            "checkpoint_state": swap.state,
+            "decision_class": "manual-attention",
+            "negotiation_status": negotiation_status,
+            "negotiation_reason": negotiation_reason,
+            "blake": {"status": "not-evaluated"},
+            "btc": {"status": "not-evaluated"},
+            "secret": {
+                "known": bool(secret_value),
+                "source": secret_source,
+                "hash_matches": secret_matches,
+            },
+            "next_action": "manual-attention",
+            "reason": negotiation_reason,
+            "read_only": True,
+        }
+
+    blake_height = int(blake_cli("getblockcount"))
+    btc_height = int(btc_cli("getblockcount"))
+
+    blake = _reconcile_observe_htlc(swap, "blake")
+    btc = _reconcile_observe_htlc(swap, "btc")
+
+    secret_value = None
+    secret_source = "none"
+
+    if role == "alice" and swap.secret_hex:
+        secret_value = swap.secret_hex
+        secret_source = "locally-generated"
+    elif role == "bob" and swap.revealed_secret_hex:
+        secret_value = swap.revealed_secret_hex
+        secret_source = "recovered-from-bitcoin"
+
+    secret_matches = None
+    if secret_value:
+        secret_matches = (
+            hashlib.sha256(bytes.fromhex(secret_value)).hexdigest()
+            == swap.secret_hash
+        )
+        if not secret_matches:
+            raise RuntimeError(
+                "SECURITY FAILURE: locally known secret does not match swap hash"
+            )
+
+    action, reason = _reconcile_next_action(
+        swap,
+        role,
+        blake,
+        btc,
+        blake_height,
+        btc_height,
+    )
+
+    readiness = _reconcile_execution_readiness(
+        swap,
+        role,
+        action,
+        blake_height,
+        btc_height,
+    )
+
+    return {
+        "swap_id": swap.swap_id,
+        "participant_pubkey": me,
+        "protocol_role": role,
+        "counterparty_pubkey": counterparty,
+        "checkpoint_state": swap.state,
+        "decision_class": (
+            "settled"
+            if action == "none"
+            else "waiting"
+            if action == "wait"
+            else "recovery-needed"
+            if action in {"sync-funding", "sync-settlement"}
+            else "manual-attention"
+            if action == "manual-attention"
+            else "actionable"
+        ),
+        "negotiation_status": negotiation_status,
+        "negotiation_reason": negotiation_reason,
+        "secret": {
+            "known": bool(secret_value),
+            "source": secret_source,
+            "hash_matches": secret_matches,
+        },
+        "heights": {
+            "blake": blake_height,
+            "btc": btc_height,
+        },
+        "timeouts": {
+            "blake": int(swap.blake_timeout),
+            "btc": int(swap.btc_timeout),
+            "blake_blocks_remaining": int(swap.blake_timeout) - blake_height,
+            "btc_blocks_remaining": int(swap.btc_timeout) - btc_height,
+        },
+        "blake": blake,
+        "btc": btc,
+        "next_action": action,
+        "reason": reason,
+        "readiness": readiness,
+        "read_only": True,
+    }
+
+
+def command_reconcile(args):
+    """Read-only protocol brain: observe, derive, recommend; never act."""
+    import json
+
+    # role_dir() is participant-local, so protocol label does not choose
+    # a different filesystem tree anymore.
+    swap = load_swap(args.swap_id, role="alice")
+    report = build_reconcile_report(swap)
+
+    if args.json:
+        print(json.dumps(report, indent=2, sort_keys=True))
+        return
+
+    print()
+    print("BLAKE SWAP RECONCILIATION")
+    print("=========================")
+    print("swap id:          ", report["swap_id"])
+    print("participant:      ", report["participant_pubkey"])
+    print("protocol role:    ", report["protocol_role"])
+    print("counterparty:     ", report["counterparty_pubkey"])
+    print("checkpoint state: ", report["checkpoint_state"])
+
+    print()
+    print("CHAIN REALITY")
+    print("-------------")
+    b = report["blake"]
+    t = report["btc"]
+    print("BLAKE:", b["status"] + (f" / {b['branch']}" if b.get("branch") else ""))
+    print("BTC:  ", t["status"] + (f" / {t['branch']}" if t.get("branch") else ""))
+
+    print()
+    print("SECRET")
+    print("------")
+    print("known: ", "yes" if report["secret"]["known"] else "no")
+    print("source:", report["secret"]["source"])
+
+    print()
+    print("TIMEOUT DISTANCE")
+    print("----------------")
+    print("BTC blocks:  ", report["timeouts"]["btc_blocks_remaining"])
+    print("BLAKE blocks:", report["timeouts"]["blake_blocks_remaining"])
+
+
+    readiness = report.get("readiness", {})
+
+    if readiness.get("checked"):
+        print()
+        print("EXECUTION READINESS")
+        print("-------------------")
+        print(
+            "ready:",
+            "yes" if readiness.get("ready") else "no",
+        )
+        print("wallet:", readiness.get("wallet"))
+        print("loaded:", readiness.get("wallet_loaded"))
+        print(
+            "trusted balance:",
+            readiness.get("trusted_balance"),
+            readiness.get("balance_unit", ""),
+        )
+        print(
+            "required balance:",
+            readiness.get("required_balance"),
+            readiness.get("balance_unit", ""),
+        )
+        print(
+            "fee reserve:",
+            readiness.get("fee_reserve"),
+            readiness.get("balance_unit", ""),
+        )
+        print(
+            "timeout blocks:",
+            readiness.get("timeout_blocks_remaining"),
+        )
+
+        for item in readiness.get("reasons", []):
+            print(" -", item)
+
+    print()
+    print("NEXT SAFE ACTION")
+    print("----------------")
+    print(report["next_action"])
+    print()
+    print("reason:")
+    print(report["reason"])
+
+    print()
+    print("PASS: reconciliation was read-only; no funds or messages were sent")
+
+
+def _run_print_decision(report):
+    print()
+    print("BLAKE SWAP RUNNER")
+    print("=================")
+    print("swap id:         ", report.get("swap_id"))
+    print("protocol role:   ", report.get("protocol_role"))
+    print("checkpoint:      ", report.get("checkpoint_state"))
+    print("decision class:  ", report.get("decision_class"))
+    print("next action:     ", report.get("next_action"))
+    print()
+    print("reason:")
+    print(report.get("reason"))
+
+
+
+def _ignored_market_match_ids():
+    import json
+    ignore_dir = BASE_SWAP_DIR / "ignored-market-matches"
+    if not ignore_dir.exists():
+        return set()
+    ignored = set()
+    for path in ignore_dir.glob("*.json"):
+        if len(path.stem) != 64:
+            continue
+        try:
+            with open(path) as f:
+                data = json.load(f)
+        except Exception:
+            continue
+        match_id = data.get("match_id")
+        if match_id == path.stem:
+            ignored.add(match_id)
+    return ignored
+
+
+def command_ignore_match(args):
+    import asyncio
+    import json
+    import time
+
+    me = current_nostr_pubkey()
+    requested = args.match_id.strip().lower()
+
+    if len(requested) < 8:
+        raise ValueError(
+            "match ID prefix is too short; use at least 8 characters"
+        )
+
+    matches = asyncio.run(
+        nostr_fetch_market_matches(
+            me,
+            limit=200,
+        )
+    )
+
+    candidates = [
+        item
+        for item in matches
+        if item["event_id"].startswith(requested)
+    ]
+
+    if not candidates:
+        raise RuntimeError(
+            f"No valid market match begins with {requested!r}"
+        )
+
+    if len(candidates) > 1:
+        print()
+        print("AMBIGUOUS MATCH PREFIX")
+        print("======================")
+        for item in candidates:
+            print(
+                item["event_id"],
+                "swap=" + str(item.get("swap_id")),
+            )
+        raise RuntimeError(
+            "Match prefix is ambiguous; use more characters"
+        )
+
+    item = candidates[0]
+    match_id = item["event_id"]
+    swap_id = item.get("swap_id")
+
+    if (
+        isinstance(swap_id, str)
+        and len(swap_id) == 12
+        and swap_path(swap_id).exists()
+    ):
+        raise RuntimeError(
+            "Refusing to ignore: this match already has local swap state"
+        )
+
+    ignore_dir = BASE_SWAP_DIR / "ignored-market-matches"
+    ignore_dir.mkdir(parents=True, exist_ok=True)
+
+    path = ignore_dir / f"{match_id}.json"
+
+    if path.exists():
+        print()
+        print("MATCH ALREADY IGNORED")
+        print("=====================")
+        print("match:", match_id)
+        return
+
+    record = {
+        "match_id": match_id,
+        "swap_id": swap_id,
+        "offer_id": item.get("offer_id"),
+        "take_id": item.get("take_id"),
+        "maker": item.get("maker"),
+        "taker": item.get("taker"),
+        "direction": item.get("direction"),
+        "blake_amount": item.get("blake_amount"),
+        "btc_sats": item.get("btc_sats"),
+        "ignored_at": int(time.time()),
+        "local_only": True,
+    }
+
+    tmp = path.with_suffix(".tmp")
+    with open(tmp, "w") as f:
+        json.dump(record, f, indent=2, sort_keys=True)
+        f.write("\n")
+        f.flush()
+        os.fsync(f.fileno())
+
+    os.replace(tmp, path)
+
+    print()
+    print("MARKET MATCH IGNORED")
+    print("====================")
+    print("match:", match_id)
+    print("swap: ", swap_id)
+    print()
+    print("PASS: local tombstone created")
+    print("PASS: no Nostr event was deleted or modified")
+    print("PASS: no swap state was created")
+    print("PASS: no funds moved")
+
+
+def command_next(args):
+    import asyncio
+    import contextlib
+    import io
+    import time
+    from types import SimpleNamespace
+
+    me = current_nostr_pubkey()
+    actions = []
+
+    freshness_seconds = int(
+        os.environ.get(
+            "BLAKE_SWAP_NEXT_FRESH_SECONDS",
+            "3600",
+        )
+    )
+
+    if freshness_seconds < 60:
+        raise RuntimeError(
+            "BLAKE_SWAP_NEXT_FRESH_SECONDS must be at least 60"
+        )
+
+    now = int(time.time())
+    historical_matches = []
+
+    # --------------------------------------------------------------
+    # 0. A unique current market offer from another participant may
+    #    be TAKEN automatically. Taking publishes only a signed
+    #    coordination event and moves no funds.
+    # --------------------------------------------------------------
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            open_offers = asyncio.run(
+                nostr_fetch_market_offers(
+                    limit=100,
+                )
+            )
+    except Exception:
+        open_offers = []
+
+    eligible_offers = [
+        offer
+        for offer in open_offers
+        if offer.get("maker") != me
+    ]
+
+    # Do not create another take for an offer we have already taken.
+    # Search authenticated cached market-take events signed by us.
+    prior_take_offer_ids = set()
+
+    try:
+        cached_events = nostr_cached_market_events()
+    except Exception:
+        cached_events = []
+
+    for event in cached_events:
+        try:
+            verify_nostr_event(event)
+        except Exception:
+            continue
+
+        if event.get("pubkey") != me:
+            continue
+
+        tags = event.get("tags", [])
+
+        if not any(
+            len(tag) >= 2
+            and tag[0] == "t"
+            and tag[1] == "blake-swap-market-take"
+            for tag in tags
+        ):
+            continue
+
+        try:
+            import json as _json
+            message = _json.loads(event.get("content", "{}"))
+        except Exception:
+            continue
+
+        if message.get("type") != "market-take":
+            continue
+
+        offer_id = message.get("offer_id")
+
+        if (
+            isinstance(offer_id, str)
+            and len(offer_id) == 64
+        ):
+            prior_take_offer_ids.add(offer_id)
+
+    for offer in eligible_offers:
+        if offer["event_id"] in prior_take_offer_ids:
+            continue
+
+        actions.append(
+            {
+                "kind": "take-offer",
+                "offer_id": offer["event_id"],
+                "label": (
+                    f"Take open offer {offer['event_id'][:12]} "
+                    f"for {offer['blake_amount']} BLAKE / "
+                    f"{int(offer['btc_sats']):,} sats"
+                ),
+            }
+        )
+
+    # --------------------------------------------------------------
+    # A. Authenticated Bob accept messages waiting to be imported.
+    #    This is coordination only: no funds move.
+    # --------------------------------------------------------------
+    for path in sorted(BASE_SWAP_DIR.glob("*.json")):
+        if len(path.stem) != 12:
+            continue
+
+        try:
+            swap = load_swap(
+                path.stem,
+                role=os.environ.get(
+                    "BLAKE_SWAP_ROLE",
+                    "alice",
+                ),
+            )
+        except Exception:
+            continue
+
+        if swap.state != State.OFFERED.value:
+            continue
+
+        if swap.nostr_alice_pub != me:
+            continue
+
+        if not swap.nostr_bob_pub:
+            continue
+
+        if swap.blake_bob_pub and swap.btc_bob_pub:
+            # Already imported; this belongs in READY TO FUND below.
+            continue
+
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                message, event_id, signer = asyncio.run(
+                    nostr_fetch_message(
+                        swap.swap_id,
+                        "accept",
+                        expected_pubkey=swap.nostr_bob_pub,
+                    )
+                )
+        except Exception:
+            continue
+
+        if signer != swap.nostr_bob_pub:
+            continue
+
+        if message.get("swap_id") != swap.swap_id:
+            continue
+
+        if not message.get("blake_bob_pub"):
+            continue
+
+        if not message.get("btc_bob_pub"):
+            continue
+
+        actions.append(
+            {
+                "kind": "receive-accept",
+                "swap_id": swap.swap_id,
+                "event_id": event_id,
+                "label": (
+                    f"Import Bob acceptance for swap {swap.swap_id}"
+                ),
+            }
+        )
+
+    # --------------------------------------------------------------
+    # B. Pending validated market matches for the current taker.
+    #    Importing a match creates/binds local protocol state only.
+    # --------------------------------------------------------------
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            matches = asyncio.run(
+                nostr_fetch_market_matches(
+                    me,
+                    limit=200,
+                )
+            )
+    except Exception:
+        matches = []
+
+    ignored_match_ids = _ignored_market_match_ids()
+
+    for item in matches:
+        if item["event_id"] in ignored_match_ids:
+            continue
+
+        swap_id = item.get("swap_id")
+
+        if (
+            isinstance(swap_id, str)
+            and len(swap_id) == 12
+            and swap_path(swap_id).exists()
+        ):
+            continue
+
+        age = now - int(item.get("created_at", 0))
+
+        if age < 0:
+            historical_matches.append(
+                {
+                    "item": item,
+                    "age": age,
+                    "reason": "future-dated",
+                }
+            )
+            continue
+
+        if age > freshness_seconds:
+            historical_matches.append(
+                {
+                    "item": item,
+                    "age": age,
+                    "reason": "older-than-auto-window",
+                }
+            )
+            continue
+
+        actions.append(
+            {
+                "kind": "accept-match",
+                "match_id": item["event_id"],
+                "swap_id": swap_id,
+                "label": (
+                    f"Import fresh market match {item['event_id'][:12]} "
+                    f"for swap {swap_id}"
+                ),
+            }
+        )
+
+    # --------------------------------------------------------------
+    # C. Valid takes on the current participant's still-open offers.
+    #    Accepting a take binds negotiation but moves no funds.
+    # --------------------------------------------------------------
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            offers = asyncio.run(
+                nostr_fetch_market_offers(
+                    limit=100,
+                )
+            )
+    except Exception:
+        offers = []
+
+    for offer in offers:
+        if offer.get("maker") != me:
+            continue
+
+        offer_id = offer.get("event_id")
+        if not isinstance(offer_id, str):
+            continue
+
+        selection_path = (
+            BASE_SWAP_DIR
+            / "market-selections"
+            / f"offer-{offer_id}.json"
+        )
+
+        if selection_path.exists():
+            continue
+
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                (
+                    original,
+                    offer_message,
+                    valid_takes,
+                ) = asyncio.run(
+                    nostr_fetch_market_takes(
+                        offer_id,
+                        limit=200,
+                    )
+                )
+        except Exception:
+            continue
+
+        for take in valid_takes:
+            actions.append(
+                {
+                    "kind": "accept-take",
+                    "offer_id": offer_id,
+                    "take_id": take["event_id"],
+                    "label": (
+                        f"Accept take {take['event_id'][:12]} "
+                        f"on offer {offer_id[:12]}"
+                    ),
+                }
+            )
+
+    # --------------------------------------------------------------
+    # If there is exactly one coordination action, perform it.
+    # --------------------------------------------------------------
+    if len(actions) == 1:
+        action = actions[0]
+
+        print()
+        print("NEXT SAFE STEP")
+        print("==============")
+        print(action["label"])
+        print()
+        print(
+            "PASS: this coordination step does not itself "
+            "fund, claim, or refund an HTLC"
+        )
+        print()
+
+        if action["kind"] == "receive-accept":
+            command_receive_accept(
+                SimpleNamespace(
+                    swap_id=action["swap_id"]
+                )
+            )
+
+        elif action["kind"] == "accept-match":
+            command_accept_only_match(
+                SimpleNamespace(
+                    match_id=action["match_id"]
+                )
+            )
+
+        elif action["kind"] == "accept-take":
+            command_accept_market_take(
+                SimpleNamespace(
+                    take_id=action["take_id"]
+                )
+            )
+
+        elif action["kind"] == "take-offer":
+            command_take_market_offer(
+                SimpleNamespace(
+                    offer_id=action["offer_id"]
+                )
+            )
+
+        else:
+            raise RuntimeError(
+                f"Unknown next-step action: {action['kind']}"
+            )
+
+        print()
+        print("PASS: coordination step completed")
+        print()
+        print(
+            "Run `blake next` again to see what is safe now."
+        )
+        return
+
+    if len(actions) > 1:
+        print()
+        print("MULTIPLE SAFE COORDINATION STEPS")
+        print("================================")
+        print(
+            "More than one authenticated negotiation needs "
+            "attention. Refusing to choose automatically."
+        )
+        print()
+
+        for index, action in enumerate(actions, start=1):
+            print(f"{index}. {action['label']}")
+
+        print()
+        print("Resolve the intended trade explicitly:")
+        print("  take <offer-prefix>")
+        print("  accept-take <offer-prefix>")
+        print("  accept-match <match-prefix>")
+        print()
+        print(
+            "PASS: no funds moved and no ambiguous choice was made"
+        )
+        return
+
+    # --------------------------------------------------------------
+    # D. No coordination action exists. Check whether an Alice swap
+    #    is now fully authenticated and ready for explicit funding.
+    # --------------------------------------------------------------
+    funding_ready = []
+
+    for path in sorted(BASE_SWAP_DIR.glob("*.json")):
+        if len(path.stem) != 12:
+            continue
+
+        try:
+            swap = load_swap(
+                path.stem,
+                role=os.environ.get(
+                    "BLAKE_SWAP_ROLE",
+                    "alice",
+                ),
+            )
+        except Exception:
+            continue
+
+        if swap.state != State.OFFERED.value:
+            continue
+
+        if swap.nostr_alice_pub != me:
+            continue
+
+        if not (
+            swap.nostr_bob_pub
+            and swap.blake_bob_pub
+            and swap.btc_bob_pub
+        ):
+            continue
+
+        funding_ready.append(swap)
+
+    if len(funding_ready) == 1:
+        swap = funding_ready[0]
+
+        print()
+        print("READY TO FUND")
+        print("=============")
+        print("swap: ", swap.swap_id)
+        print("trade:", swap.blake_amount, "BLAKE /", f"{swap.btc_sats:,}", "sats")
+        print()
+        print(
+            "All authenticated negotiation and settlement "
+            "keys are in place."
+        )
+        print()
+        print(
+            "STOP: funding is an explicit economic commitment."
+        )
+        print("Run:")
+        print("  scripts/blake fund")
+        print()
+        print("PASS: next did not move funds")
+        return
+
+    if len(funding_ready) > 1:
+        print()
+        print("MULTIPLE FUNDING-READY SWAPS")
+        print("============================")
+        print(
+            "More than one trade is ready for an explicit "
+            "BLAKE commitment. Refusing to choose."
+        )
+        print()
+
+        for swap in funding_ready:
+            print(
+                f"{swap.swap_id}  "
+                f"{swap.blake_amount} BLAKE / "
+                f"{swap.btc_sats:,} sats"
+            )
+
+        print()
+        print(
+            "Use `fund-blake <swap-id>` for an explicit choice."
+        )
+        print("PASS: no funds moved")
+        return
+
+    # --------------------------------------------------------------
+    # E. Finally, report live post-funding work. `next` does not
+    #    execute settlement economics; the existing resume policy does.
+    # --------------------------------------------------------------
+    resumable = []
+
+    for path in sorted(BASE_SWAP_DIR.glob("*.json")):
+        if len(path.stem) != 12:
+            continue
+
+        try:
+            swap = load_swap(
+                path.stem,
+                role=os.environ.get(
+                    "BLAKE_SWAP_ROLE",
+                    "alice",
+                ),
+            )
+        except Exception:
+            continue
+
+        if me not in {
+            swap.nostr_alice_pub,
+            swap.nostr_bob_pub,
+        }:
+            continue
+
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                report = build_reconcile_report(swap)
+        except Exception:
+            continue
+
+        if report.get("decision_class") in {
+            "settled",
+            "manual-attention",
+        }:
+            continue
+
+        # `next` must never classify an unfunded OFFERED negotiation
+        # as post-funding settlement work. At OFFERED, chain reality
+        # must prove a funding output exists before we surface `resume`.
+        if swap.state == State.OFFERED.value:
+            blake_status = report.get("blake", {}).get("status")
+            btc_status = report.get("btc", {}).get("status")
+
+            funded_evidence = (
+                blake_status in {"unspent", "spent"}
+                or btc_status in {"unspent", "spent"}
+            )
+
+            if not funded_evidence:
+                continue
+
+        resumable.append(
+            {
+                "swap": swap,
+                "report": report,
+            }
+        )
+
+    if len(resumable) == 1:
+        item = resumable[0]
+        swap = item["swap"]
+        report = item["report"]
+
+        print()
+        print("SETTLEMENT WORK AVAILABLE")
+        print("=========================")
+        print("swap: ", swap.swap_id)
+        print("state:", swap.state)
+        print("next: ", report.get("next_action"))
+        print("why:  ", report.get("reason"))
+        print()
+        print(
+            "On-chain funding or settlement evidence exists. "
+            "Use the existing autonomous recovery/settlement policy:"
+        )
+        print("  scripts/blake resume", swap.swap_id)
+        print()
+        print("PASS: next did not execute settlement economics")
+        return
+
+    if len(resumable) > 1:
+        print()
+        print("MULTIPLE ACTIVE SWAPS")
+        print("=====================")
+
+        for item in resumable:
+            print(
+                f"{item['swap'].swap_id}  "
+                f"{item['swap'].state}  "
+                f"{item['report'].get('next_action')}"
+            )
+
+        print()
+        print(
+            "Use `scripts/blake swaps` or "
+            "`scripts/blake resume <swap-prefix>`."
+        )
+        return
+
+    print()
+    print("NOTHING TO DO")
+    print("=============")
+    print(
+        "No unambiguous current coordination, funding-ready trade, "
+        "or resumable settlement was found."
+    )
+
+    if historical_matches:
+        print()
+        print("HISTORICAL MATCHES IGNORED")
+        print("==========================")
+        print(
+            f"{len(historical_matches)} valid unimported match(es) "
+            f"were outside the automatic {freshness_seconds // 60}-minute window."
+        )
+        print(
+            "They remain available explicitly with "
+            "`scripts/blake accept-match <prefix>`."
+        )
+
+    print()
+    print(
+        "Use `scripts/blake market` to browse offers or "
+        "`scripts/blake swaps` for the dashboard."
+    )
+
+
+def command_dashboard(args):
+    import contextlib
+    import io
+    import json
+
+    me = current_nostr_pubkey()
+
+    active = []
+    attention = []
+    settled = []
+    archived = []
+
+    def outcome_label(swap, report):
+        decision = report.get("decision_class")
+        action = report.get("next_action")
+
+        if decision == "settled":
+            if swap.state == State.COMPLETE.value:
+                return "COMPLETED"
+            if swap.state in {
+                State.BTC_REFUNDED.value,
+                State.BLAKE_REFUNDED.value,
+            }:
+                return "REFUNDED"
+            return "SETTLED"
+
+        if decision == "manual-attention":
+            return "NEEDS ATTENTION"
+
+        if action == "wait":
+            if swap.state == State.BLAKE_FUNDED.value:
+                return "WAITING FOR BTC"
+            if swap.state == State.BTC_FUNDED.value:
+                return "WAITING FOR ALICE"
+            if swap.state == State.BTC_CLAIMED.value:
+                return "WAITING FOR BOB"
+            if swap.state == State.BTC_REFUNDED.value:
+                return "WAITING FOR BLAKE REFUND"
+            return "WAITING"
+
+        if action in {
+            "sync-funding",
+            "sync-settlement",
+            "complete",
+        }:
+            return "READY TO RESUME"
+        if action == "fund-btc":
+            return "READY TO FUND BTC"
+        if action == "claim-btc":
+            return "READY TO CLAIM BTC"
+        if action == "claim-blake":
+            return "READY TO CLAIM BLAKE"
+        if action == "refund-btc":
+            return "READY TO REFUND BTC"
+        if action == "refund-blake":
+            return "READY TO REFUND BLAKE"
+        if action == "fund-blake":
+            return "READY TO FUND BLAKE"
+
+        return str(action or decision or swap.state)
+
+    def action_text(report):
+        action = report.get("next_action")
+        mapping = {
+            "sync-funding": "run resume",
+            "sync-settlement": "run resume",
+            "complete": "run resume",
+            "fund-btc": "run resume",
+            "claim-btc": "run resume",
+            "claim-blake": "run resume",
+            "refund-btc": "run resume",
+            "refund-blake": "run resume",
+            "fund-blake": "run fund",
+            "wait": "wait",
+            "manual-attention": "inspect",
+            "none": "-",
+            None: "-",
+        }
+        return mapping.get(action, str(action))
+
+    for path in sorted(BASE_SWAP_DIR.glob("*.json")):
+        if len(path.stem) != 12:
+            continue
+
+        try:
+            swap = load_swap(
+                path.stem,
+                role=os.environ.get(
+                    "BLAKE_SWAP_ROLE",
+                    "alice",
+                ),
+            )
+        except Exception:
+            continue
+
+        if me not in {
+            swap.nostr_alice_pub,
+            swap.nostr_bob_pub,
+        }:
+            continue
+
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                report = build_reconcile_report(swap)
+        except Exception:
+            attention.append(
+                {
+                    "swap": swap,
+                    "report": {
+                        "decision_class": "manual-attention",
+                        "next_action": "manual-attention",
+                        "reason": "reconciliation failed during dashboard scan",
+                    },
+                }
+            )
+            continue
+
+        item = {"swap": swap, "report": report}
+        decision_class = report.get("decision_class")
+
+        if decision_class == "settled":
+            settled.append(item)
+        elif decision_class == "manual-attention":
+            attention.append(item)
+        else:
+            active.append(item)
+
+    archive_dir = BASE_SWAP_DIR / "archive"
+
+    if archive_dir.exists():
+        for path in sorted(archive_dir.glob("*.json")):
+            if len(path.stem) != 12:
+                continue
+
+            try:
+                with open(path) as f:
+                    data = json.load(f)
+            except Exception:
+                continue
+
+            archived.append(
+                {
+                    "swap_id": data.get("swap_id", path.stem),
+                    "state": data.get("state", "-"),
+                    "blake_amount": data.get("blake_amount"),
+                    "btc_sats": data.get("btc_sats"),
+                }
+            )
+
+    def trade_text(swap):
+        try:
+            return (
+                f"{swap.blake_amount:g} BLAKE / "
+                f"{int(swap.btc_sats):,} sats"
+            )
+        except Exception:
+            return "-"
+
+    print()
+    print("BLAKE SWAP DASHBOARD")
+    print("====================")
+
+    print()
+    print("ACTIVE")
+    print("------")
+
+    if not active:
+        print("No active swaps.")
+    else:
+        print("Swap          Status                    Action       Trade")
+        print("------------  ------------------------  -----------  -------------------------")
+        for item in active:
+            swap = item["swap"]
+            report = item["report"]
+            print(
+                f"{swap.swap_id:<12}  "
+                f"{outcome_label(swap, report):<24}  "
+                f"{action_text(report):<11}  "
+                f"{trade_text(swap)}"
+            )
+
+    print()
+    print("NEEDS ATTENTION")
+    print("---------------")
+
+    if not attention:
+        print("No swaps need manual attention.")
+    else:
+        for item in attention:
+            swap = item["swap"]
+            report = item["report"]
+            print(
+                f"{swap.swap_id}  "
+                f"{outcome_label(swap, report)}  "
+                f"{report.get('reason')}"
+            )
+
+    print()
+    print("SETTLED")
+    print("-------")
+
+    if not settled:
+        print("No settled swaps.")
+    else:
+        print("Swap          Outcome     Trade")
+        print("------------  ----------  -------------------------")
+        for item in settled:
+            swap = item["swap"]
+            report = item["report"]
+            print(
+                f"{swap.swap_id:<12}  "
+                f"{outcome_label(swap, report):<10}  "
+                f"{trade_text(swap)}"
+            )
+
+    print()
+    print("ARCHIVED")
+    print("--------")
+
+    if not archived:
+        print("No archived swaps.")
+    else:
+        for item in archived:
+            trade = "-"
+            if (
+                item.get("blake_amount") is not None
+                and item.get("btc_sats") is not None
+            ):
+                try:
+                    trade = (
+                        f"{float(item['blake_amount']):g} BLAKE / "
+                        f"{int(item['btc_sats']):,} sats"
+                    )
+                except Exception:
+                    pass
+
+            print(
+                f"{item['swap_id']}  "
+                f"ABANDONED  "
+                f"{trade}"
+            )
+
+    print()
+    print("SUMMARY")
+    print("-------")
+    print("active:    ", len(active))
+    print("attention: ", len(attention))
+    print("settled:   ", len(settled))
+    print("archived:  ", len(archived))
+
+
+
+def command_dismiss(args):
+    import contextlib
+    import io
+    import json
+    import shutil
+
+    prefix = args.swap_id.strip().lower()
+
+    if len(prefix) < 4:
+        raise ValueError(
+            "swap ID prefix is too short; use at least 4 characters"
+        )
+
+    matches = []
+
+    for path in sorted(BASE_SWAP_DIR.glob("*.json")):
+        if len(path.stem) != 12:
+            continue
+        if path.stem.startswith(prefix):
+            matches.append(path)
+
+    if not matches:
+        raise RuntimeError(
+            f"No local swap matches prefix {prefix!r}"
+        )
+
+    if len(matches) > 1:
+        print()
+        print("AMBIGUOUS SWAP PREFIX")
+        print("=====================")
+        for path in matches:
+            print(path.stem)
+        raise RuntimeError(
+            "Swap prefix is ambiguous; use more characters"
+        )
+
+    path = matches[0]
+
+    swap = load_swap(
+        path.stem,
+        role=os.environ.get(
+            "BLAKE_SWAP_ROLE",
+            "alice",
+        ),
+    )
+
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            report = build_reconcile_report(swap)
+    except Exception as e:
+        raise RuntimeError(
+            "Cannot safely dismiss because read-only reconciliation failed"
+        ) from e
+
+    blake = report.get("blake", {})
+    btc = report.get("btc", {})
+
+    blake_status = blake.get("status")
+    btc_status = btc.get("status")
+
+    negotiation_incomplete_unfundable = (
+        swap.state == State.OFFERED.value
+        and report.get("negotiation_status") == "negotiation-incomplete"
+        and not getattr(swap, "blake_alice_pub", None)
+        and not getattr(swap, "btc_alice_pub", None)
+    )
+
+    always_unsafe = {
+        "unspent",
+        "spent",
+        "unknown",
+    }
+
+    if blake_status in always_unsafe:
+        raise RuntimeError(
+            f"Refusing to dismiss: BLAKE status is {blake_status!r}"
+        )
+
+    if btc_status in always_unsafe:
+        raise RuntimeError(
+            f"Refusing to dismiss: Bitcoin status is {btc_status!r}"
+        )
+
+    allowed_statuses = {"absent", None}
+
+    if negotiation_incomplete_unfundable:
+        allowed_statuses = allowed_statuses | {"not-evaluated"}
+
+    if blake_status not in allowed_statuses:
+        raise RuntimeError(
+            f"Refusing to dismiss: BLAKE status is {blake_status!r}"
+        )
+
+    if btc_status not in allowed_statuses:
+        raise RuntimeError(
+            f"Refusing to dismiss: Bitcoin status is {btc_status!r}"
+        )
+
+    settlement_fields = [
+        "blake_funding_txid",
+        "btc_funding_txid",
+        "btc_claim_txid",
+        "blake_claim_txid",
+        "btc_refund_txid",
+        "blake_refund_txid",
+    ]
+
+    populated = [
+        name
+        for name in settlement_fields
+        if getattr(swap, name, None)
+    ]
+
+    if populated:
+        raise RuntimeError(
+            "Refusing to dismiss: durable settlement/funding fields exist: "
+            + ", ".join(populated)
+        )
+
+    archive_dir = BASE_SWAP_DIR / "archive"
+    archive_dir.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    archive_path = archive_dir / path.name
+
+    if archive_path.exists():
+        raise RuntimeError(
+            f"Archive already contains {archive_path.name}"
+        )
+
+    print()
+    print("SAFE TO ARCHIVE")
+    print("===============")
+    print("swap:   ", swap.swap_id)
+    print("state:  ", swap.state)
+    print("BLAKE:  ", blake_status or "absent")
+    print("BTC:    ", btc_status or "absent")
+    print("reason: ", report.get("reason"))
+    print()
+    if negotiation_incomplete_unfundable:
+        print(
+            "PASS: negotiation never became settlement-capable"
+        )
+        print(
+            "PASS: missing Alice settlement pubkeys make HTLC evaluation inapplicable"
+        )
+    else:
+        print(
+            "PASS: no funded HTLCs were found"
+        )
+    print(
+        "PASS: no settlement transaction is recorded"
+    )
+    print(
+        "PASS: archive is local-only; nothing is published or spent"
+    )
+
+    shutil.move(
+        str(path),
+        str(archive_path),
+    )
+
+    print()
+    print("SWAP ARCHIVED")
+    print("=============")
+    print("from:", path)
+    print("to:  ", archive_path)
+    print()
+    print(
+        "PASS: original JSON preserved intact"
+    )
+
+
+def command_resume(args):
+    import contextlib
+    import io
+    from types import SimpleNamespace
+
+    me = current_nostr_pubkey()
+    resumable = []
+    attention = []
+    explicit = getattr(args, "swap_id", None)
+
+    for path in sorted(BASE_SWAP_DIR.glob("*.json")):
+        if len(path.stem) != 12:
+            continue
+
+        if explicit is not None:
+            prefix = explicit.strip().lower()
+            if len(prefix) < 4:
+                raise ValueError(
+                    "swap ID prefix is too short; use at least 4 characters"
+                )
+            if not path.stem.startswith(prefix):
+                continue
+
+        try:
+            swap = load_swap(
+                path.stem,
+                role=os.environ.get(
+                    "BLAKE_SWAP_ROLE",
+                    "alice",
+                ),
+            )
+        except Exception:
+            continue
+
+        if me not in {
+            swap.nostr_alice_pub,
+            swap.nostr_bob_pub,
+        }:
+            continue
+
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                report = build_reconcile_report(swap)
+        except Exception:
+            attention.append(
+                {
+                    "swap": swap,
+                    "decision_class": "manual-attention",
+                    "next_action": "manual-attention",
+                    "reason": "reconciliation failed during discovery",
+                }
+            )
+            continue
+
+        decision_class = report.get("decision_class")
+        if decision_class == "settled":
+            continue
+
+        item = {
+            "swap": swap,
+            "decision_class": decision_class,
+            "next_action": report.get("next_action"),
+            "reason": report.get("reason"),
+        }
+
+        if decision_class == "manual-attention":
+            attention.append(item)
+        else:
+            resumable.append(item)
+
+    if explicit is not None:
+        all_matches = resumable + attention
+
+        if not all_matches:
+            raise RuntimeError(
+                f"No live local swap matches prefix {explicit!r}"
+            )
+
+        if len(all_matches) > 1:
+            print()
+            print("AMBIGUOUS SWAP PREFIX")
+            print("=====================")
+            for item in all_matches:
+                print(
+                    item["swap"].swap_id,
+                    item["decision_class"],
+                    item["next_action"],
+                )
+            raise RuntimeError(
+                "Swap prefix is ambiguous; use more characters"
+            )
+
+        item = all_matches[0]
+
+        if item["decision_class"] == "manual-attention":
+            print()
+            print("MANUAL ATTENTION REQUIRED")
+            print("=========================")
+            print("swap:  ", item["swap"].swap_id)
+            print("state: ", item["swap"].state)
+            print("reason:", item["reason"])
+            print()
+            print(
+                "Refusing to hand a manual-attention swap "
+                "to the autonomous runner."
+            )
+            return
+
+        resumable = [item]
+        attention = []
+
+    if not resumable:
+        print()
+        print("NO RESUMABLE SWAPS")
+        print("==================")
+        print(
+            "No swap currently has an automatic recovery, "
+            "settlement, or waiting path."
+        )
+
+        if attention:
+            print()
+            print("NEEDS MANUAL ATTENTION")
+            print("======================")
+            for item in attention:
+                print(
+                    f"{item['swap'].swap_id}  "
+                    f"{item['swap'].state}  "
+                    f"{item['reason']}"
+                )
+        return
+
+    if len(resumable) > 1:
+        print()
+        print("MULTIPLE ACTIVE SWAPS")
+        print("=====================")
+        print(
+            "More than one swap has a live automatic path."
+        )
+        print(
+            "Refusing to guess which one you intend to resume."
+        )
+        print()
+        print("Swap          State             Next")
+        print("------------  ----------------  ----------------")
+
+        for item in resumable:
+            swap = item["swap"]
+            print(
+                f"{swap.swap_id:<12}  "
+                f"{swap.state:<16}  "
+                f"{str(item['next_action']):<16}"
+            )
+
+        if attention:
+            print()
+            print("Other records needing manual attention:")
+            for item in attention:
+                print(
+                    f"  {item['swap'].swap_id}  "
+                    f"{item['swap'].state}"
+                )
+
+        print()
+        print(
+            "Run `resume <short-swap-prefix>` for the "
+            "active swap you want."
+        )
+        return
+
+    item = resumable[0]
+    swap = item["swap"]
+
+    print()
+    print("RESUMING SWAP")
+    print("=============")
+    print("swap:       ", swap.swap_id)
+    print("checkpoint: ", swap.state)
+    print("next:       ", item["next_action"])
+
+    if attention:
+        print()
+        print(
+            f"NOTE: {len(attention)} unrelated record(s) "
+            "need manual attention but do not block this swap."
+        )
+
+    print()
+    print(
+        "Handing this swap to the existing autonomous driver."
+    )
+    print()
+
+    command_run(
+        SimpleNamespace(
+            swap_id=swap.swap_id
+        )
+    )
+
+
+
+def command_run(args):
+    from types import SimpleNamespace
+
+    safe_actions = {
+        "sync-funding",
+        "sync-settlement",
+        "complete",
+        "claim-blake",
+        "claim-btc",
+        "fund-btc",
+        "refund-blake",
+        "refund-btc",
+    }
+
+    economic_actions = {
+        "fund-blake",
+    }
+
+    max_steps = int(getattr(args, "max_steps", 6))
+
+    if max_steps < 1 or max_steps > 20:
+        raise ValueError("--max-steps must be between 1 and 20")
+
+    print()
+    print("BLAKE SWAP AUTONOMOUS DRIVER")
+    print("============================")
+    print("swap id:", args.swap_id)
+    print()
+    print(
+        "POLICY: recovery, local completion, protocol-Alice "
+        "Bitcoin claim, and protocol-Bob BLAKE claim may execute automatically"
+    )
+    print(
+        "POLICY: BLAKE funding and Nostr publication are disabled"
+    )
+
+    for step in range(1, max_steps + 1):
+        swap = load_swap(args.swap_id, role="alice")
+        report = build_reconcile_report(swap)
+
+        print()
+        print(f"RECONCILIATION {step}")
+        print("----------------")
+        _run_print_decision(report)
+
+        action = report.get("next_action")
+        decision_class = report.get("decision_class")
+        role = report.get("protocol_role")
+
+        if decision_class == "settled":
+            print()
+            print("RUN RESULT: settled; no action required")
+            return
+
+        if decision_class == "waiting":
+            print()
+            print("RUN RESULT: waiting for counterparty or chain condition")
+            return
+
+        if decision_class == "manual-attention":
+            print()
+            print("RUN RESULT: manual attention required")
+            print("PASS: runner refused to guess or mutate state")
+            return
+
+        if action in economic_actions:
+            print()
+            print("ACTION REQUIRED")
+            print("===============")
+            print(f"{action} is currently recommended by the reconciler")
+            print()
+            print("Automatic economic actions are disabled in this runner version.")
+            print("PASS: no funds were moved")
+            return
+
+
+        # Funding remains manual in this phase, but expose
+        # whether the local machine is actually capable of it.
+        if (
+            action in economic_actions
+            and report.get("readiness", {}).get("checked")
+        ):
+            readiness = report["readiness"]
+
+            print()
+            print("EXECUTION READINESS")
+            print("-------------------")
+            print(
+                "ready:",
+                "yes" if readiness.get("ready") else "no",
+            )
+
+            for item in readiness.get("reasons", []):
+                print(" -", item)
+
+        if action not in safe_actions:
+            print()
+            print(
+                "RUN RESULT: refusing unrecognized or "
+                f"non-allowlisted action: {action!r}"
+            )
+            print("PASS: no automatic action was executed")
+            return
+
+        if role not in ("alice", "bob"):
+            print()
+            print(
+                "RUN RESULT: protocol role is not securely known; "
+                "refusing automatic action"
+            )
+            return
+
+        if action == "claim-btc":
+            if role != "alice":
+                raise RuntimeError(
+                    "SECURITY FAILURE: automatic claim-btc "
+                    "requires current participant to be protocol Alice"
+                )
+
+            if report.get("blake", {}).get("status") != "funded":
+                print()
+                print("RUN RESULT: refusing automatic claim-btc")
+                print("reason: BLAKE HTLC is not confirmed and unspent")
+                return
+
+            if report.get("btc", {}).get("status") != "funded":
+                print()
+                print("RUN RESULT: refusing automatic claim-btc")
+                print("reason: Bitcoin HTLC is not confirmed and unspent")
+                return
+
+            secret = report.get("secret", {})
+            if not (
+                secret.get("known")
+                and secret.get("source") == "locally-generated"
+                and secret.get("hash_matches") is True
+            ):
+                print()
+                print("RUN RESULT: refusing automatic claim-btc")
+                print("reason: protocol Alice secret preconditions are not proven")
+                return
+
+            min_blocks = int(
+                os.environ.get(
+                    "BLAKE_SWAP_RUN_MIN_BTC_CLAIM_BLOCKS",
+                    "2",
+                )
+            )
+
+            if min_blocks < 1:
+                raise ValueError(
+                    "BLAKE_SWAP_RUN_MIN_BTC_CLAIM_BLOCKS must be >= 1"
+                )
+
+            remaining = int(
+                report.get("timeouts", {}).get(
+                    "btc_blocks_remaining",
+                    -1,
+                )
+            )
+
+            if remaining < min_blocks:
+                print()
+                print("RUN RESULT: refusing automatic claim-btc")
+                print(
+                    "reason: Bitcoin timeout margin is too small "
+                    f"({remaining} blocks remaining; minimum {min_blocks})"
+                )
+                return
+
+
+        if action == "fund-btc":
+            if role != "bob":
+                raise RuntimeError(
+                    "SECURITY FAILURE: automatic fund-btc "
+                    "requires current participant to be protocol Bob"
+                )
+
+            readiness = report.get("readiness", {})
+
+            if not readiness.get("checked"):
+                print()
+                print("RUN RESULT: refusing automatic fund-btc")
+                print("reason: funding readiness was not evaluated")
+                return
+
+            if readiness.get("ready") is not True:
+                print()
+                print("RUN RESULT: refusing automatic fund-btc")
+                print("reason: local funding readiness did not pass")
+
+                for item in readiness.get("reasons", []):
+                    print(" -", item)
+
+                return
+
+            if report.get("blake", {}).get("status") != "funded":
+                print()
+                print("RUN RESULT: refusing automatic fund-btc")
+                print("reason: BLAKE HTLC is not confirmed and unspent")
+                return
+
+            if report.get("btc", {}).get("status") != "absent":
+                print()
+                print("RUN RESULT: refusing automatic fund-btc")
+                print("reason: Bitcoin funding is no longer absent")
+                return
+
+
+        if action == "refund-btc":
+            if role != "bob":
+                raise RuntimeError(
+                    "SECURITY FAILURE: automatic refund-btc "
+                    "requires current participant to be protocol Bob"
+                )
+
+            if report.get("checkpoint_state") != State.BTC_FUNDED.value:
+                print()
+                print("RUN RESULT: refusing automatic refund-btc")
+                print("reason: local checkpoint is not BTC_FUNDED")
+                return
+
+            if report.get("btc", {}).get("status") != "funded":
+                print()
+                print("RUN RESULT: refusing automatic refund-btc")
+                print("reason: Bitcoin HTLC is not confirmed and unspent")
+                return
+
+            if int(report.get("timeouts", {}).get("btc_blocks_remaining", 1)) > 0:
+                print()
+                print("RUN RESULT: refusing automatic refund-btc")
+                print("reason: Bitcoin refund timelock is not mature")
+                return
+
+        if action == "refund-blake":
+            if role != "alice":
+                raise RuntimeError(
+                    "SECURITY FAILURE: automatic refund-blake "
+                    "requires current participant to be protocol Alice"
+                )
+
+            if report.get("checkpoint_state") not in {
+                State.BLAKE_FUNDED.value,
+                State.BTC_REFUNDED.value,
+            }:
+                print()
+                print("RUN RESULT: refusing automatic refund-blake")
+                print("reason: local checkpoint is not refund-eligible")
+                return
+
+            if report.get("blake", {}).get("status") != "funded":
+                print()
+                print("RUN RESULT: refusing automatic refund-blake")
+                print("reason: BLAKE HTLC is not confirmed and unspent")
+                return
+
+            if int(report.get("timeouts", {}).get("blake_blocks_remaining", 1)) > 0:
+                print()
+                print("RUN RESULT: refusing automatic refund-blake")
+                print("reason: BLAKE refund timelock is not mature")
+                return
+
+        print()
+        print("AUTOMATIC ACTION")
+        print("================")
+        print(action)
+        print()
+
+        ns = SimpleNamespace(
+            swap_id=args.swap_id,
+            role=role,
+        )
+
+        if action == "sync-funding":
+            command_sync_funding(ns)
+        elif action == "sync-settlement":
+            command_sync_settlement(ns)
+        elif action == "complete":
+            command_complete(ns)
+
+        elif action == "claim-blake":
+            if role != "bob":
+                raise RuntimeError(
+                    "SECURITY FAILURE: automatic claim-blake "
+                    "requires current participant to be protocol Bob"
+                )
+
+            command_claim_blake(ns)
+
+        elif action == "claim-btc":
+            command_claim_btc(ns)
+
+        elif action == "fund-btc":
+            command_fund_btc(ns)
+
+        elif action == "refund-btc":
+            command_refund_btc(ns)
+
+        elif action == "refund-blake":
+            command_refund_blake(ns)
+
+        else:
+            raise RuntimeError("Internal runner allowlist mismatch")
+
+        print()
+        print("PASS: automatic action completed; reconciling again")
+
+    print()
+    print("RUN RESULT")
+    print("==========")
+    print("maximum reconciliation steps reached")
+    print("Manual attention required before any further action.")
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="BTC/BLAKE atomic swap prototype"
@@ -12397,6 +15389,18 @@ def main():
     )
 
     p.set_defaults(func=command_list)
+
+    p = sub.add_parser(
+        "fund",
+        help=(
+            "Import the only ready Bob acceptance and "
+            "fund that protocol-Alice BLAKE HTLC"
+        ),
+    )
+
+    p.set_defaults(
+        func=command_fund_ready_swap
+    )
 
     # fund-blake
     p = sub.add_parser(
@@ -12591,6 +15595,20 @@ def main():
     )
 
     p = sub.add_parser(
+        "accept-take",
+        help=(
+            "Accept the only valid take for an offer; "
+            "offer ID prefixes are allowed"
+        ),
+    )
+
+    p.add_argument("offer_id")
+
+    p.set_defaults(
+        func=command_accept_only_take
+    )
+
+    p = sub.add_parser(
         "accept-market-take",
         help="Select a market take and bind it to a swap"
     )
@@ -12653,6 +15671,25 @@ def main():
 
     p.set_defaults(
         func=command_accept_reverse_swap_offer
+    )
+
+    p = sub.add_parser(
+        "accept-match",
+        help=(
+            "Discover and import the only pending "
+            "valid market match for this participant"
+        ),
+    )
+
+    p.add_argument(
+        "match_id",
+        nargs="?",
+        default=None,
+        help=("Optional short match-ID prefix when more than one pending match exists"),
+    )
+
+    p.set_defaults(
+        func=command_accept_only_match
     )
 
     p = sub.add_parser(
@@ -12881,6 +15918,126 @@ def main():
     p.set_defaults(
         func=command_sync_funding,
     )
+
+    p = sub.add_parser(
+        "reconcile",
+        help=(
+            "Read-only reconciliation of local state, both chains, "
+            "protocol role, and next safe action"
+        ),
+    )
+
+    p.add_argument("swap_id")
+
+    p.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit machine-readable JSON",
+    )
+
+    p.set_defaults(func=command_reconcile)
+
+    p = sub.add_parser(
+        "ignore-match",
+        help=(
+            "Locally acknowledge a valid unimported market match "
+            "so `next` will not surface it automatically"
+        ),
+    )
+
+    p.add_argument(
+        "match_id",
+        help="Short or full market match ID",
+    )
+
+    p.set_defaults(
+        func=command_ignore_match
+    )
+
+    p = sub.add_parser(
+        "next",
+        help=(
+            "Perform the only unambiguous non-economic "
+            "coordination step, or show the next required action"
+        ),
+    )
+
+    p.set_defaults(
+        func=command_next
+    )
+
+    p = sub.add_parser(
+        "dashboard",
+        help=(
+            "Show active, attention, settled, and archived "
+            "swaps using read-only reconciliation"
+        ),
+    )
+
+    p.set_defaults(
+        func=command_dashboard
+    )
+
+    p = sub.add_parser(
+        "dismiss",
+        help=(
+            "Archive an abandoned local swap only when "
+            "read-only reconciliation proves no funds exist"
+        ),
+    )
+
+    p.add_argument(
+        "swap_id",
+        help="Short or full local swap ID",
+    )
+
+    p.set_defaults(
+        func=command_dismiss
+    )
+
+    p = sub.add_parser(
+        "resume",
+        help=(
+            "Resume the only live local swap, or an "
+            "explicit short swap-ID prefix"
+        ),
+    )
+
+    p.add_argument(
+        "swap_id",
+        nargs="?",
+        default=None,
+        help=(
+            "Optional short swap-ID prefix when more "
+            "than one live swap exists"
+        ),
+    )
+
+    p.set_defaults(
+        func=command_resume
+    )
+
+    p = sub.add_parser(
+        "run",
+        help=(
+            "Conservative autonomous driver: automatically "
+            "repairs confirmed state and completes settled swaps"
+        ),
+    )
+
+    p.add_argument("swap_id")
+
+    p.add_argument(
+        "--max-steps",
+        type=int,
+        default=6,
+        help=(
+            "Maximum reconcile/action cycles before stopping "
+            "(default: 6)"
+        ),
+    )
+
+    p.set_defaults(func=command_run)
 
     # Parse only AFTER every command has been registered.
     args = parser.parse_args()

@@ -1,0 +1,139 @@
+#!/usr/bin/env python3
+
+import argparse
+import asyncio
+import time
+
+import swap_v2
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Participant-facing BLAKE/BTC market"
+    )
+
+    parser.add_argument(
+        "asset",
+        nargs="?",
+        choices=("all", "blake", "btc"),
+        default="all",
+    )
+
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=100,
+    )
+
+    args = parser.parse_args()
+
+    offers = asyncio.run(
+        swap_v2.nostr_fetch_market_offers(
+            limit=args.limit
+        )
+    )
+
+    if args.asset == "blake":
+        offers = [
+            offer
+            for offer in offers
+            if offer["direction"] == "btc-for-blake"
+        ]
+
+    elif args.asset == "btc":
+        offers = [
+            offer
+            for offer in offers
+            if offer["direction"] == "blake-for-btc"
+        ]
+
+    print()
+    print("BLAKE / BTC MARKET")
+    print("==================")
+    print()
+
+    if args.asset == "blake":
+        print("Showing offers to BUY BLAKE")
+        print()
+
+    elif args.asset == "btc":
+        print("Showing offers to BUY BTC")
+        print()
+
+    else:
+        print("Showing all open offers")
+        print()
+
+    if not offers:
+        print("No matching open offers.")
+        return
+
+    print(
+        f'{"Offer":14} '
+        f'{"Maker":14} '
+        f'{"You give":18} '
+        f'{"You receive":18} '
+        f'{"Expires"}'
+    )
+
+    print(
+        f'{"-" * 12:14} '
+        f'{"-" * 12:14} '
+        f'{"-" * 16:18} '
+        f'{"-" * 16:18} '
+        f'{"-" * 8}'
+    )
+
+    now = int(time.time())
+
+    for offer in offers:
+        direction = offer["direction"]
+
+        if direction == "btc-for-blake":
+            # Maker gives BTC and wants BLAKE.
+            # Taker therefore gives BLAKE and receives BTC.
+            you_give = (
+                f'{offer["blake_amount"]:g} BLAKE'
+            )
+            you_receive = (
+                f'{offer["btc_sats"]:,} sats'
+            )
+
+        else:
+            # Maker gives BLAKE and wants BTC.
+            # Taker therefore gives BTC and receives BLAKE.
+            you_give = (
+                f'{offer["btc_sats"]:,} sats'
+            )
+            you_receive = (
+                f'{offer["blake_amount"]:g} BLAKE'
+            )
+
+        remaining = max(
+            0,
+            offer["expires_at"] - now,
+        )
+
+        if remaining < 60:
+            ttl = f"{remaining}s"
+        elif remaining < 3600:
+            ttl = f"{remaining // 60}m"
+        elif remaining < 86400:
+            ttl = f"{remaining // 3600}h"
+        else:
+            ttl = f"{remaining // 86400}d"
+
+        print(
+            f'{offer["event_id"][:12]:14} '
+            f'{offer["maker"][:12]:14} '
+            f'{you_give:18} '
+            f'{you_receive:18} '
+            f'{ttl}'
+        )
+
+    print()
+    print(f"{len(offers)} matching offer(s)")
+
+
+if __name__ == "__main__":
+    main()

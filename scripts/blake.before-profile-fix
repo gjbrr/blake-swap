@@ -1,0 +1,177 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ENGINE="$ROOT/src/swap_v2.py"
+
+if [[ -x "$HOME/blake-swap-venv/bin/python3" ]]; then
+  PY="$HOME/blake-swap-venv/bin/python3"
+else
+  PY="${PYTHON:-python3}"
+fi
+
+export PYTHONPATH="$ROOT/src:$ROOT/vendor${PYTHONPATH:+:$PYTHONPATH}"
+
+need_profile() {
+  if [[ -z "${BLAKE_SWAP_STATE_DIR:-}" || -z "${BLAKE_SWAP_NOSTR_NSEC:-${BLAKE_SWAP_NOSTR_PRIVKEY:-}}" ]]; then
+    cat >&2 <<'EOF'
+ERROR: no participant profile is loaded.
+
+On the laptop:
+  source scripts/alice-env
+
+On Start9:
+  source scripts/bob-env
+EOF
+    exit 2
+  fi
+}
+
+engine() {
+  "$PY" "$ENGINE" "$@"
+}
+
+usage() {
+  cat <<'EOF'
+BLAKE SWAP
+
+Simple workflow:
+
+  blake market
+
+  blake offer blake-for-btc \
+      --blake 1 \
+      --sats 488000 \
+      --minutes 30
+
+  blake offer btc-for-blake \
+      --sats 488000 \
+      --blake 1 \
+      --minutes 30
+
+  blake take <offer-prefix>
+
+  blake accept-take <offer-prefix>
+
+  blake accept-match
+
+  blake fund
+
+  blake resume [swap-prefix]
+
+  blake swaps
+
+Advanced / diagnostic:
+
+  blake show <swap-id>
+  blake reconcile <swap-id>
+  blake status
+  blake engine <raw swap_v2.py arguments...>
+
+Safety model:
+  * market negotiation is automatic where unambiguous
+  * BLAKE funding remains an explicit commitment
+  * post-funding settlement/recovery is handled by resume
+  * ambiguous IDs or multiple candidates fail closed
+EOF
+}
+
+cmd="${1:-help}"
+shift || true
+
+case "$cmd" in
+  help|-h|--help)
+    usage
+    ;;
+
+  market)
+    need_profile
+    "$ROOT/scripts/blake-swap" market "$@"
+    ;;
+
+  offer)
+    need_profile
+    "$ROOT/scripts/blake-swap" offer "$@"
+    ;;
+
+  take)
+    need_profile
+    if [[ $# -ne 1 ]]; then
+      echo "Usage: blake take <offer-prefix>" >&2
+      exit 2
+    fi
+    "$ROOT/scripts/blake-swap" take "$1"
+    ;;
+
+  accept-take)
+    need_profile
+    if [[ $# -ne 1 ]]; then
+      echo "Usage: blake accept-take <offer-prefix>" >&2
+      exit 2
+    fi
+    engine accept-take "$1"
+    ;;
+
+  accept-match)
+    need_profile
+    if [[ $# -ne 0 ]]; then
+      echo "Usage: blake accept-match" >&2
+      exit 2
+    fi
+
+    # Refresh authenticated match discovery first so accept-match
+    # does not depend on stale cache availability.
+    engine market-matches >/dev/null || true
+    engine accept-match
+    ;;
+
+  fund)
+    need_profile
+    if [[ $# -ne 0 ]]; then
+      echo "Usage: blake fund" >&2
+      exit 2
+    fi
+    engine fund
+    ;;
+
+  resume)
+    need_profile
+    if [[ $# -gt 1 ]]; then
+      echo "Usage: blake resume [swap-prefix]" >&2
+      exit 2
+    fi
+    engine resume "$@"
+    ;;
+
+  swaps|my-swaps)
+    need_profile
+    "$ROOT/scripts/blake-swap" my-swaps
+    ;;
+
+  show)
+    need_profile
+    engine show "$@"
+    ;;
+
+  reconcile)
+    need_profile
+    engine reconcile "$@"
+    ;;
+
+  status)
+    need_profile
+    engine status "$@"
+    ;;
+
+  engine)
+    need_profile
+    engine "$@"
+    ;;
+
+  *)
+    echo "ERROR: unknown command: $cmd" >&2
+    echo >&2
+    usage >&2
+    exit 2
+    ;;
+esac

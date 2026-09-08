@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+
+unset BLAKE_SWAP_NOSTR_KEY_FILE
+
+export BLAKE_SWAP_ROLE=alice
+export BLAKE_SWAP_CHAIN_WALLET=alice
+export BLAKE_SWAP_TRANSPORT=nostr
+export BLAKE_SWAP_STATE_DIR="$HOME/.blake-swap-alice"
+export BLAKE_SWAP_NOSTR_KEY_DIR="$HOME/.blake-swap-alice/nostr-keys"
+
+export BLAKE_SWAP_NOSTR_RELAYS="wss://TheForest.nostr1.com,wss://nos.lol"
+
+export BLAKE_SWAP_BTC_CLI="$HOME/bitcoin-core/build/bin/bitcoin-cli"
+export BLAKE_SWAP_BTC_DATADIR="$HOME/bitcoin-swap-regtest"
+
+export BLAKE_SWAP_BLAKE_CLI="$HOME/bitcoin-blake-rc2/build-rc2/bin/bitcoin-cli"
+export BLAKE_SWAP_BLAKE_DATADIR="$HOME/blake-swap-regtest"
+
+echo "Loaded Alice swap environment"

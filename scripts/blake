@@ -57,50 +57,56 @@ usage() {
   cat <<'EOF'
 BLAKE SWAP
 
-Simple workflow:
+Typical workflow
+================
 
-  blake market
-
+Maker:
   blake offer blake-for-btc \
       --blake 1 \
-      --sats 488000 \
+      --sats 370000 \
       --minutes 30
-
-  blake offer btc-for-blake \
-      --sats 488000 \
-      --blake 1 \
-      --minutes 30
-
-  blake take <offer-prefix>
-
-  blake accept-take <offer-prefix>
-
-  blake accept-match [match-prefix]
 
   blake next
-
-  blake ignore-match <match-prefix>
-
   blake fund
-
   blake resume [swap-prefix]
 
+Taker:
+  blake next
+  blake resume [swap-prefix]
+
+Market / work queue
+===================
+
+  blake market
+  blake swaps
+  blake next
+
+Explicit coordination / cleanup
+===============================
+
+  blake take <offer-prefix>
+  blake accept-take <offer-prefix>
+  blake accept-match [match-prefix]
+  blake ignore-match <match-prefix>
   blake dismiss <swap-prefix>
 
-  blake swaps
-
-Advanced / diagnostic:
+Advanced / diagnostic
+=====================
 
   blake show <swap-id>
   blake reconcile <swap-id>
   blake status
   blake engine <raw swap_v2.py arguments...>
 
-Safety model:
-  * market negotiation is automatic where unambiguous
-  * BLAKE funding remains an explicit commitment
-  * post-funding settlement/recovery is handled by resume
-  * ambiguous IDs or multiple candidates fail closed
+Safety model
+============
+
+  * `next` may perform only unambiguous non-economic coordination.
+  * initial BLAKE funding is always an explicit `fund` commitment.
+  * after funding, `resume` handles configured settlement/recovery actions.
+  * ambiguous IDs or multiple live choices fail closed.
+  * `dismiss` is local archival and refuses funded/unsafe state.
+  * `ignore-match` is a local tombstone only; it does not alter Nostr.
 EOF
 }
 

@@ -6918,7 +6918,7 @@ def resolve_cached_nostr_prefix(value, expected_type=None, label="Nostr event"):
         hints = {
             "market-offer": "run `blake-swap market` first",
             "market-take": "run `market-takes <offer>` first",
-            "market-match": "run `market-matches` first",
+            "market-match": "use a full match ID or refresh match discovery",
         }
         raise RuntimeError(
             f"No verified cached {label.lower()} matches prefix {value!r}; "

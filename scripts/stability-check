@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT"
+
+echo "BLAKE SWAP STABILITY CHECK"
+echo "=========================="
+
+echo
+echo "[1/6] Python syntax"
+python3 -m py_compile src/swap_v2.py
+echo "PASS"
+
+echo
+echo "[2/6] Shell syntax"
+bash -n scripts/blake
+echo "PASS"
+
+echo
+echo "[3/6] Required simple-client commands"
+for token in "market)" "accept-match)" "next)" "ignore-match)" "fund)" "resume)" "dismiss)" "swaps|my-swaps)"; do
+  grep -Fq "$token" scripts/blake || {
+    echo "FAIL: missing wrapper command: $token" >&2
+    exit 1
+  }
+done
+echo "PASS"
+
+echo
+echo "[4/6] Required engine commands"
+for fn in command_fund_ready_swap command_accept_only_match command_ignore_match command_next command_dashboard command_dismiss command_resume; do
+  count="$(grep -c "^def ${fn}(" src/swap_v2.py || true)"
+  if [[ "$count" != "1" ]]; then
+    echo "FAIL: expected exactly one ${fn}, found ${count}" >&2
+    exit 1
+  fi
+done
+echo "PASS"
+
+echo
+echo "[5/6] Safety-boundary source checks"
+grep -Fq 'STOP: funding is an explicit economic commitment.' src/swap_v2.py || {
+  echo "FAIL: explicit funding boundary text missing" >&2
+  exit 1
+}
+grep -Fq 'PASS: next did not move funds' src/swap_v2.py || {
+  echo "FAIL: next no-funds assertion missing" >&2
+  exit 1
+}
+grep -Fq 'Refusing to dismiss:' src/swap_v2.py || {
+  echo "FAIL: dismiss refusal guards missing" >&2
+  exit 1
+}
+echo "PASS"
+
+echo
+echo "[6/6] Git working tree"
+git status --short
+if [[ -n "$(git status --short)" ]]; then
+  echo "NOTE: working tree has changes (expected during stabilization)."
+else
+  echo "PASS: working tree clean"
+fi
+
+echo
+echo "STABILITY CHECK COMPLETE"
+echo "No blockchain transactions or Nostr messages were sent."

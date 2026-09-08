@@ -2426,54 +2426,52 @@ def build_nostr_event(
                 "expected_role must be alice or bob"
             )
 
-        #
-        # Participant identity and protocol role are
-        # intentionally independent.
-        #
-        # Prefer the cryptographically pinned identity in
-        # this swap over the participant-profile name.
-        #
-        swap = load_swap(
-            swap_id,
-            role=expected_role,
-        )
+        # BLAKE_SWAP_ROLE identifies the local participant profile.
+        # For a reverse-direction swap that participant may occupy
+        # the opposite protocol role. Once durable swap state exists,
+        # derive the role from identities pinned into that swap.
+        current_role = None
 
-        expected_field = (
-            "nostr_alice_pub"
-            if expected_role == "alice"
-            else "nostr_bob_pub"
-        )
+        for candidate_role in ("alice", "bob"):
+            try:
+                candidate = load_swap(
+                    swap_id,
+                    role=candidate_role,
+                )
+            except Exception:
+                continue
 
-        expected_pubkey = getattr(
-            swap,
-            expected_field,
-        )
+            try:
+                derived_role, _, _ = _reconcile_local_role(
+                    candidate
+                )
+            except Exception:
+                continue
 
-        if expected_pubkey:
-            actual_pubkey = current_nostr_pubkey()
-
-            if actual_pubkey != expected_pubkey:
+            if (
+                current_role is not None
+                and current_role != derived_role
+            ):
                 raise RuntimeError(
-                    "SECURITY FAILURE: refusing to sign "
-                    f"{message_type}; current participant "
-                    f"is not pinned protocol {expected_role}"
+                    "SECURITY FAILURE: conflicting local "
+                    "protocol-role derivations for Nostr signing"
                 )
 
-        else:
-            #
-            # Legacy compatibility for old swaps created
-            # before protocol Nostr identities were pinned.
-            #
+            current_role = derived_role
+
+        # Before a swap exists there is no durable role binding,
+        # so retain the existing participant-profile guard.
+        if current_role is None:
             current_role = os.environ.get(
                 "BLAKE_SWAP_ROLE"
             )
 
-            if current_role != expected_role:
-                raise RuntimeError(
-                    "SECURITY FAILURE: refusing to sign "
-                    f"{message_type} as {current_role!r}; "
-                    f"protocol requires {expected_role!r}"
-                )
+        if current_role != expected_role:
+            raise RuntimeError(
+                "SECURITY FAILURE: refusing to sign "
+                f"{message_type} as protocol {current_role!r}; "
+                f"protocol requires {expected_role!r}"
+            )
 
     private_key = PrivateKey(
         bytes.fromhex(
@@ -10347,14 +10345,90 @@ def command_accept_reverse_swap_offer(args):
                 "state has different Alice identity"
             )
 
-        if (
-            existing.nostr_bob_pub
-            != bob_pubkey
-        ):
+        if existing.nostr_bob_pub not in (None, bob_pubkey):
             raise RuntimeError(
                 "SECURITY FAILURE: existing Bob "
                 "state has different Bob identity"
             )
+
+        if existing.nostr_bob_pub is None:
+            # Narrow crash-recovery case:
+            # command_accept_offer() may have durably created Bob's
+            # settlement keys before Nostr accept publication failed.
+            # Resume only if the record is still completely unfunded
+            # and otherwise matches the authenticated reverse match.
+            if existing.state != State.OFFERED.value:
+                raise RuntimeError(
+                    "SECURITY FAILURE: partial reverse Bob state "
+                    "is not OFFERED"
+                )
+
+            if existing.secret_hex is not None:
+                raise RuntimeError(
+                    "SECURITY FAILURE: protocol Bob unexpectedly "
+                    "possesses secret S"
+                )
+
+            tx_fields = (
+                "blake_funding_txid",
+                "btc_funding_txid",
+                "btc_claim_txid",
+                "blake_claim_txid",
+                "btc_refund_txid",
+                "blake_refund_txid",
+            )
+
+            if any(
+                getattr(existing, field) is not None
+                for field in tx_fields
+            ):
+                raise RuntimeError(
+                    "SECURITY FAILURE: refusing partial-handshake "
+                    "recovery after settlement activity"
+                )
+
+            if not (
+                existing.blake_bob_pub
+                and existing.btc_bob_pub
+            ):
+                raise RuntimeError(
+                    "SECURITY FAILURE: partial reverse Bob state "
+                    "does not contain Bob settlement keys"
+                )
+
+            existing.nostr_bob_pub = bob_pubkey
+
+            save_swap(
+                existing,
+                role="bob",
+            )
+
+            accept_message = {
+                "type": "accept",
+                "swap_id": existing.swap_id,
+                "secret_hash": existing.secret_hash,
+                "blake_bob_pub": existing.blake_bob_pub,
+                "btc_bob_pub": existing.btc_bob_pub,
+            }
+
+            accept_path = send_message(
+                existing.swap_id,
+                "accept",
+                accept_message,
+                expected_role="bob",
+            )
+
+            print()
+            print("REVERSE BOB HANDSHAKE RECOVERED")
+            print("===============================")
+            print("swap id:       ", existing.swap_id)
+            print("accept message:", accept_path)
+            print()
+            print("PASS: existing Bob settlement keys reused")
+            print("PASS: authenticated Bob identity pinned")
+            print("PASS: Bob still does NOT know secret S")
+            print("PASS: no funds moved")
+            return
 
         if (
             float(existing.blake_amount)
@@ -14168,7 +14242,15 @@ def command_next(args):
         if swap.state != State.OFFERED.value:
             continue
 
-        if swap.nostr_alice_pub != me:
+        try:
+            protocol_role, _, _ = _reconcile_local_role(swap)
+        except Exception:
+            continue
+
+        # BLAKE funding is always the protocol-Alice commitment,
+        # regardless of which local participant profile created or
+        # imported the swap.
+        if protocol_role != "alice":
             continue
 
         if not (

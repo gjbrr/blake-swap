@@ -3370,6 +3370,22 @@ def command_accept_offer(args):
         None,
     )
 
+    expected_bob_pub = getattr(
+        args,
+        "expected_bob_pub",
+        None,
+    )
+
+    if (
+        expected_bob_pub is not None
+        and expected_bob_pub != current_nostr_pubkey()
+    ):
+        raise RuntimeError(
+            "SECURITY FAILURE: expected Bob identity "
+            "is not the current participant"
+        )
+
+
     expected_btc_sats = getattr(
         args,
         "expected_btc_sats",
@@ -3506,6 +3522,7 @@ def command_accept_offer(args):
         nostr_alice_pub=message.get(
             "_nostr_pubkey"
         ),
+        nostr_bob_pub=expected_bob_pub,
     )
     
     # Bob independently records his own local recovery anchors.
@@ -10474,6 +10491,7 @@ def command_accept_reverse_swap_offer(args):
         SimpleNamespace(
             swap_id=item["swap_id"],
             expected_alice_pub=alice_pubkey,
+            expected_bob_pub=bob_pubkey,
             expected_blake_amount=item[
                 "blake_amount"
             ],
@@ -14070,12 +14088,172 @@ def command_next(args):
                 "kind": "accept-match",
                 "match_id": item["event_id"],
                 "swap_id": swap_id,
+                "direction": item.get("direction"),
+                "maker": item.get("maker"),
+                "taker": item.get("taker"),
                 "label": (
                     f"Import fresh market match {item['event_id'][:12]} "
                     f"for swap {swap_id}"
                 ),
             }
         )
+
+    # --------------------------------------------------------------
+    # B2. Reverse-direction maker may import protocol Alice's
+    #     ordinary swap offer and publish Bob's acceptance.
+    #
+    # IMPORTANT: nostr_fetch_market_matches(me) is taker-oriented
+    # because market matches are tagged #p with the taker identity.
+    # The reverse maker therefore discovers this work from the
+    # durable market selection it created when accepting the take.
+    # --------------------------------------------------------------
+    selection_dir = BASE_SWAP_DIR / "market-selections"
+
+    if selection_dir.exists():
+        for selection_path in selection_dir.glob("*.json"):
+            if selection_path.name.startswith("offer-"):
+                continue
+
+            try:
+                with open(selection_path) as f:
+                    selection = json.load(f)
+            except Exception:
+                continue
+
+            if (
+                selection.get("direction")
+                != MARKET_DIRECTION_BTC_FOR_BLAKE
+            ):
+                continue
+
+            maker = selection.get("nostr_bob_pub")
+            if maker is None:
+                maker = selection.get("maker")
+
+            if maker != me:
+                continue
+
+            swap_id = selection.get("swap_id")
+            match_id = selection.get("market_match_id")
+            expected_alice = selection.get("nostr_alice_pub")
+            if expected_alice is None:
+                expected_alice = selection.get("taker")
+
+            if not (
+                isinstance(swap_id, str)
+                and len(swap_id) == 12
+                and isinstance(match_id, str)
+                and len(match_id) == 64
+                and isinstance(expected_alice, str)
+                and len(expected_alice) == 64
+            ):
+                continue
+
+            # Durable selections survive restarts, but they must not
+            # resurrect ancient market negotiations into today's
+            # automatic work queue. Re-open and verify the exact
+            # referenced match, then enforce the same 60-minute
+            # automatic-coordination window used elsewhere by next.
+            try:
+                with contextlib.redirect_stdout(io.StringIO()):
+                    match_event = asyncio.run(
+                        nostr_fetch_event_by_id(
+                            match_id
+                        )
+                    )
+
+                verify_nostr_event(match_event)
+
+                match_message = json.loads(
+                    match_event["content"]
+                )
+
+                if (
+                    match_message.get("type") != "market-match"
+                    or match_message.get("direction")
+                    != MARKET_DIRECTION_BTC_FOR_BLAKE
+                    or match_message.get("swap_id") != swap_id
+                    or match_message.get("maker") != me
+                    or match_message.get("taker")
+                    != expected_alice
+                ):
+                    continue
+
+                match_created_at = int(
+                    match_message.get(
+                        "created_at",
+                        match_event.get("created_at", 0),
+                    )
+                )
+
+                now = int(time.time())
+
+                if (
+                    match_created_at <= 0
+                    or match_created_at > now + 300
+                    or now - match_created_at > 3600
+                ):
+                    continue
+
+            except Exception:
+                continue
+
+            existing_complete = False
+
+            for candidate_role in ("alice", "bob"):
+                try:
+                    existing = load_swap(
+                        swap_id,
+                        role=candidate_role,
+                    )
+                except Exception:
+                    continue
+
+                try:
+                    derived_role, _, _ = _reconcile_local_role(
+                        existing
+                    )
+                except Exception:
+                    continue
+
+                if (
+                    derived_role == "bob"
+                    and existing.nostr_bob_pub == me
+                    and existing.blake_bob_pub
+                    and existing.btc_bob_pub
+                ):
+                    existing_complete = True
+                    break
+
+            if existing_complete:
+                continue
+
+            # Do not surface this coordination step until protocol
+            # Alice's ordinary swap offer is actually available.
+            try:
+                with contextlib.redirect_stdout(io.StringIO()):
+                    asyncio.run(
+                        nostr_fetch_message(
+                            swap_id,
+                            "offer",
+                            expected_pubkey=expected_alice,
+                        )
+                    )
+            except Exception:
+                continue
+
+            actions.append(
+                {
+                    "kind": "accept-reverse-offer",
+                    "match_id": match_id,
+                    "swap_id": swap_id,
+                    "label": (
+                        f"Accept reverse swap offer for "
+                        f"{swap_id} from match "
+                        f"{match_id[:12]}"
+                    ),
+                }
+            )
 
     # --------------------------------------------------------------
     # C. Valid takes on the current participant's still-open offers.
@@ -14167,6 +14345,42 @@ def command_next(args):
                 )
             )
 
+            if (
+                action.get("direction")
+                == MARKET_DIRECTION_BTC_FOR_BLAKE
+            ):
+                swap_id = action["swap_id"]
+                offer_exists = False
+
+                try:
+                    with contextlib.redirect_stdout(io.StringIO()):
+                        asyncio.run(
+                            nostr_fetch_message(
+                                swap_id,
+                                "offer",
+                                expected_pubkey=me,
+                            )
+                        )
+                    offer_exists = True
+                except Exception:
+                    pass
+
+                if not offer_exists:
+                    print()
+                    print("Publishing reverse protocol offer...")
+                    command_publish_offer(
+                        SimpleNamespace(
+                            swap_id=swap_id
+                        )
+                    )
+
+        elif action["kind"] == "accept-reverse-offer":
+            command_accept_reverse_swap_offer(
+                SimpleNamespace(
+                    match_id=action["match_id"]
+                )
+            )
+
         elif action["kind"] == "accept-take":
             command_accept_market_take(
                 SimpleNamespace(
@@ -14212,6 +14426,7 @@ def command_next(args):
         print("  take <offer-prefix>")
         print("  accept-take <offer-prefix>")
         print("  accept-match <match-prefix>")
+        print("  engine accept-reverse-swap-offer <match-id>")
         print()
         print(
             "PASS: no funds moved and no ambiguous choice was made"

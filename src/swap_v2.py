@@ -15082,6 +15082,24 @@ def command_dismiss(args):
 
 
 def command_resume(args):
+    requested_prefix = getattr(
+        args,
+        "swap_id",
+        None,
+    )
+
+    if requested_prefix is None:
+        requested_prefix = getattr(
+            args,
+            "swap_prefix",
+            None,
+        )
+
+    if requested_prefix is None:
+        raise RuntimeError(
+            "resume received no swap identifier"
+        )
+
     import contextlib
     import io
     from types import SimpleNamespace
@@ -15155,8 +15173,62 @@ def command_resume(args):
         all_matches = resumable + attention
 
         if not all_matches:
+                        # A terminal swap is deliberately excluded from the live
+            # resume queue, but an explicit prefix should still return
+            # a friendly terminal result.
+            terminal_matches = []
+
+            for path in sorted(BASE_SWAP_DIR.glob("*.json")):
+                try:
+                    with open(path) as f:
+                        data = json.load(f)
+                except Exception:
+                    continue
+
+                swap_id = data.get("swap_id")
+                state = data.get("state")
+
+                if (
+                    isinstance(swap_id, str)
+                    and swap_id.startswith(requested_prefix)
+                    and state in (
+                        State.COMPLETE.value,
+                        State.BLAKE_REFUNDED.value,
+                    )
+                ):
+                    terminal_matches.append((swap_id, state))
+
+            if len(terminal_matches) == 1:
+                swap_id, state = terminal_matches[0]
+
+                if state == State.COMPLETE.value:
+                    print()
+                    print("SWAP ALREADY SETTLED")
+                    print("====================")
+                    print("swap: ", swap_id)
+                    print("state:", state)
+                    print()
+                    print("No action required.")
+                    return
+
+                if state == State.BLAKE_REFUNDED.value:
+                    print()
+                    print("SWAP ALREADY REFUNDED")
+                    print("=====================")
+                    print("swap: ", swap_id)
+                    print("state:", state)
+                    print()
+                    print("No action required.")
+                    return
+
+            if len(terminal_matches) > 1:
+                raise RuntimeError(
+                    f"More than one terminal local swap matches "
+                    f"prefix {requested_prefix!r}; use a longer prefix"
+                )
+
             raise RuntimeError(
-                f"No live local swap matches prefix {explicit!r}"
+                f"No live local swap matches prefix {requested_prefix!r}"
             )
 
         if len(all_matches) > 1:

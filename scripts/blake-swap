@@ -8,6 +8,12 @@ PROJECT_DIR="$(
 
 SWAP="$PROJECT_DIR/scripts/swap"
 
+if [[ -x "$HOME/blake-swap-venv/bin/python3" ]]; then
+    PY="$HOME/blake-swap-venv/bin/python3"
+else
+    PY="${PYTHON:-python3}"
+fi
+
 
 usage() {
     cat <<'EOF'
@@ -34,11 +40,7 @@ Usage:
 Development note:
   A local participant profile must currently be loaded first.
 
-      source scripts/alice-env
-
-  or
-
-      source scripts/bob-env
+      source scripts/participant-env
 
 The eventual application will absorb this configuration.
 EOF
@@ -60,7 +62,7 @@ case "$COMMAND" in
     market)
         exec env \
             PYTHONPATH="$PROJECT_DIR/src:$PROJECT_DIR/vendor${PYTHONPATH:+:$PYTHONPATH}" \
-            python3 \
+            "$PY" \
             "$PROJECT_DIR/scripts/market-view" \
             "${@:-all}"
         ;;

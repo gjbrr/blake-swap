@@ -17,3 +17,5 @@ export BLAKE_SWAP_BLAKE_CLI="$HOME/bitcoin-blake-rc2/build-rc2/bin/bitcoin-cli"
 export BLAKE_SWAP_BLAKE_DATADIR="$HOME/blake-swap-regtest"
 
 echo "Loaded Alice swap environment"
+
+export BLAKE_SWAP_RUNNER_UNIT="blake-swap-alice.service"

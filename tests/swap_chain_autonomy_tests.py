@@ -115,6 +115,35 @@ def test_idle_funding_poll():
         "funding reconciliation is a safe no-op before funding"
     )
 
+    proc = h.swap_cmd(
+        "next",
+        role="bob",
+    )
+
+    output = (
+        (proc.stdout or "")
+        + "\n"
+        + (proc.stderr or "")
+    )
+
+    h.require(
+        "SETTLEMENT WORK AVAILABLE" not in output,
+        (
+            "unfunded OFFERED swap was incorrectly "
+            "surfaced as resumable settlement work"
+        ),
+    )
+
+    h.assert_state(
+        swap_id,
+        "bob",
+        "OFFERED",
+    )
+
+    h.ok(
+        "next does not surface resume before chain funding exists"
+    )
+
     print(
         "swap:",
         swap_id,
@@ -152,6 +181,43 @@ def test_no_funding_announcements():
         swap_id,
         "bob",
         "OFFERED",
+    )
+
+    proc = h.swap_cmd(
+        "next",
+        role="bob",
+    )
+
+    output = (
+        (proc.stdout or "")
+        + "\n"
+        + (proc.stderr or "")
+    )
+
+    h.require(
+        "SETTLEMENT WORK AVAILABLE" in output,
+        (
+            "funded-ahead OFFERED swap was not "
+            "surfaced as resumable settlement work"
+        ),
+    )
+
+    h.require(
+        "sync-funding" in output,
+        (
+            "funded-ahead OFFERED swap did not "
+            "surface sync-funding as the next action"
+        ),
+    )
+
+    h.assert_state(
+        swap_id,
+        "bob",
+        "OFFERED",
+    )
+
+    h.ok(
+        "next surfaces safe funding reconciliation without changing state"
     )
 
     require_no_message(

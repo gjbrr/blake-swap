@@ -1574,6 +1574,11 @@ def command_fund_ready_swap(args):
         role="alice",
     )
 
+    validate_btc_trade_amount(
+        swap.btc_sats,
+        context=f"swap {swap.swap_id}",
+    )
+
     print()
     print("FUNDING-READY SWAP")
     print("==================")
@@ -2239,9 +2244,23 @@ def file_send_message(
         message_type,
     )
 
+    #
+    # FILE transport is a local/regtest testing backend, not a
+    # cryptographically authenticated network transport.
+    #
+    # Still, preserve the participant identity selected by the
+    # sending process so black-box FILE tests exercise the same
+    # identity-binding paths used by Nostr transport.
+    #
+    envelope = {
+        "_file_transport_version": 2,
+        "sender_pubkey": current_nostr_pubkey(),
+        "message": message,
+    }
+
     with open(path, "w") as f:
         json.dump(
-            message,
+            envelope,
             f,
             indent=2,
             sort_keys=True,
@@ -2265,9 +2284,50 @@ def file_receive_message(
         )
 
     with open(path) as f:
-        message = json.load(f)
+        data = json.load(f)
 
-    return message, path
+    #
+    # v2 FILE envelope: restore sender identity as local transport
+    # metadata. This mirrors the `_nostr_pubkey` metadata attached
+    # after Nostr signature verification.
+    #
+    if (
+        isinstance(data, dict)
+        and data.get("_file_transport_version") == 2
+        and isinstance(data.get("message"), dict)
+    ):
+        sender_pubkey = data.get("sender_pubkey")
+
+        if (
+            not isinstance(sender_pubkey, str)
+            or len(sender_pubkey) != 64
+        ):
+            raise RuntimeError(
+                "Invalid FILE transport sender identity"
+            )
+
+        try:
+            bytes.fromhex(sender_pubkey)
+        except ValueError as e:
+            raise RuntimeError(
+                "Invalid FILE transport sender identity"
+            ) from e
+
+        message = dict(data["message"])
+        message["_nostr_pubkey"] = sender_pubkey
+
+        return message, path
+
+    #
+    # Backward compatibility for old FILE messages written before
+    # participant identity metadata was added.
+    #
+    if isinstance(data, dict):
+        return data, path
+
+    raise RuntimeError(
+        "Invalid FILE transport message"
+    )
 
 
 _nostr_relays_raw = os.environ.get(
@@ -3587,16 +3647,25 @@ def command_accept_offer(args):
         LOCAL_WALLET,
     )
 
-    if expected_bob_pub is not None:
-        actual_bob_pub = current_nostr_pubkey()
+    actual_bob_pub = current_nostr_pubkey()
 
-        if actual_bob_pub != expected_bob_pub:
-            raise RuntimeError(
-                "SECURITY FAILURE: current participant "
-                "does not match authenticated market taker"
-            )
+    if (
+        expected_bob_pub is not None
+        and actual_bob_pub != expected_bob_pub
+    ):
+        raise RuntimeError(
+            "SECURITY FAILURE: current participant "
+            "does not match authenticated market taker"
+        )
 
-        swap.nostr_bob_pub = expected_bob_pub
+    #
+    # Bob always binds his own participant identity locally.
+    # When a market match supplied expected_bob_pub, the check
+    # above proves the current participant is that authenticated
+    # taker. FILE-transport tests have no market match, but Bob's
+    # own identity is still known and should not remain unset.
+    #
+    swap.nostr_bob_pub = actual_bob_pub
 
     save_swap(
         swap,
@@ -7777,6 +7846,39 @@ def build_market_offer_event(
 
 
 
+def btc_trade_minimum_sats():
+    """
+    Local settlement-feasibility floor for the BTC leg.
+    """
+    fee_sats = int(
+        os.environ.get(
+            "BLAKE_SWAP_BTC_SPEND_FEE_SATS",
+            "1000",
+        )
+    )
+
+    if fee_sats < 1:
+        raise ValueError(
+            "BLAKE_SWAP_BTC_SPEND_FEE_SATS must be >= 1"
+        )
+
+    return fee_sats + 1
+
+
+def validate_btc_trade_amount(btc_sats, context="trade"):
+    minimum = btc_trade_minimum_sats()
+    btc_sats = int(btc_sats)
+
+    if btc_sats < minimum:
+        raise ValueError(
+            f"{context} BTC amount {btc_sats} sats is too small; "
+            f"minimum settlement-feasible amount is {minimum} sats "
+            f"with BLAKE_SWAP_BTC_SPEND_FEE_SATS={minimum - 1}"
+        )
+
+    return True
+
+
 def command_publish_market_offer(args):
     import asyncio
 
@@ -7789,6 +7891,11 @@ def command_publish_market_offer(args):
         raise ValueError(
             "BTC sat amount must be positive"
         )
+
+    validate_btc_trade_amount(
+        args.sats,
+        context="market offer",
+    )
 
     if args.minutes <= 0:
         raise ValueError(
@@ -12164,6 +12271,11 @@ def command_take_market_offer(args):
             "or unavailable from this relay."
         )
 
+    validate_btc_trade_amount(
+        selected["btc_sats"],
+        context="selected market offer",
+    )
+
     original = asyncio.run(
         nostr_fetch_event_by_id(
             args.offer_id
@@ -14660,19 +14772,17 @@ def command_next(args):
         }:
             continue
 
-        # `next` must never classify an unfunded OFFERED negotiation
-        # as post-funding settlement work. At OFFERED, chain reality
-        # must prove a funding output exists before we surface `resume`.
+        # `next` must never classify a normal unfunded OFFERED negotiation
+        # as post-funding work.
+        #
+        # The one safe OFFERED exception is reconciliation of funding that
+        # is already confirmed on-chain. `build_reconcile_report()` reports
+        # that condition as recovery-needed -> sync-funding.
         if swap.state == State.OFFERED.value:
-            blake_status = report.get("blake", {}).get("status")
-            btc_status = report.get("btc", {}).get("status")
-
-            funded_evidence = (
-                blake_status in {"unspent", "spent"}
-                or btc_status in {"unspent", "spent"}
-            )
-
-            if not funded_evidence:
+            if not (
+                report.get("decision_class") == "recovery-needed"
+                and report.get("next_action") == "sync-funding"
+            ):
                 continue
 
         resumable.append(

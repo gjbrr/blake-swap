@@ -1,0 +1,256 @@
+#!/usr/bin/env bash
+set -u
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+if [[ -x "$HOME/blake-swap-venv/bin/python3" ]]; then
+  PY="$HOME/blake-swap-venv/bin/python3"
+else
+  PY="${PYTHON:-python3}"
+fi
+
+profile="${1:-}"
+
+if [[ -n "$profile" ]]; then
+  if [[ ! -f "$profile" && -f "$ROOT/$profile" ]]; then
+    profile="$ROOT/$profile"
+  fi
+
+  if [[ ! -f "$profile" ]]; then
+    echo "ERROR: profile script not found: $profile" >&2
+    exit 2
+  fi
+
+  # shellcheck disable=SC1090
+  source "$profile"
+fi
+
+failures=0
+warnings=0
+
+pass() { printf 'PASS  %s\n' "$*"; }
+fail() { printf 'FAIL  %s\n' "$*"; failures=$((failures + 1)); }
+warn() { printf 'WARN  %s\n' "$*"; warnings=$((warnings + 1)); }
+
+printf '\nBLAKE SWAP HEALTH\n'
+printf '=================\n'
+
+role="${BLAKE_SWAP_ROLE:-}"
+state_dir="${BLAKE_SWAP_STATE_DIR:-}"
+
+if [[ -n "$role" ]]; then
+  printf 'development role: %s\n' "$role"
+else
+  printf 'development role: UNKNOWN\n'
+fi
+
+printf '\nLOCAL PROFILE\n'
+printf '%s\n' '-------------'
+
+if [[ -n "$role" ]]; then
+  pass "development protocol role loaded: $role"
+else
+  fail "BLAKE_SWAP_ROLE is not set"
+fi
+
+if [[ -n "$state_dir" ]]; then
+  if [[ -d "$state_dir" ]]; then
+    pass "state directory exists: $state_dir"
+    if [[ -w "$state_dir" ]]; then
+      pass "state directory is writable"
+    else
+      fail "state directory is not writable"
+    fi
+  else
+    fail "state directory does not exist: $state_dir"
+  fi
+else
+  fail "BLAKE_SWAP_STATE_DIR is not set"
+fi
+
+if [[ -n "${BLAKE_SWAP_PARTICIPANT_KEY_FILE:-}" ]]; then
+  key_file="$BLAKE_SWAP_PARTICIPANT_KEY_FILE"
+
+  if [[ ! -f "$key_file" ]]; then
+    fail "participant key file missing: $key_file"
+  else
+    pass "participant key file exists"
+
+    if [[ -r "$key_file" ]]; then
+      pass "participant key file is readable"
+    else
+      fail "participant key file is not readable"
+    fi
+
+    if "$PY" - "$key_file" <<'PY_KEY'
+from pathlib import Path
+import sys
+
+p = Path(sys.argv[1])
+
+try:
+    text = p.read_text().strip()
+    raw = bytes.fromhex(text)
+except Exception:
+    raise SystemExit(1)
+
+raise SystemExit(0 if len(raw) == 32 else 1)
+PY_KEY
+    then
+      pass "participant key format is valid"
+    else
+      fail "participant key must contain exactly one 32-byte hex secret"
+    fi
+  fi
+
+elif [[ -n "${BLAKE_SWAP_NOSTR_KEY_DIR:-}" ]]; then
+  legacy_key="${BLAKE_SWAP_NOSTR_KEY_DIR}/${role}.key"
+
+  if [[ -f "$legacy_key" ]]; then
+    pass "legacy Nostr key exists: $legacy_key"
+  else
+    fail "legacy Nostr key missing: $legacy_key"
+  fi
+
+else
+  fail "no participant Nostr key location is configured"
+fi
+
+if [[ -n "${BLAKE_SWAP_NOSTR_RELAYS:-}" ]]; then
+  pass "Nostr relay configuration is present"
+else
+  fail "BLAKE_SWAP_NOSTR_RELAYS is not set"
+fi
+
+printf '\nCHAIN RPC\n'
+printf '%s\n' '---------'
+
+check_chain() {
+  local label="$1"
+  local cli="$2"
+  local datadir="$3"
+  local wallet="$4"
+
+  if [[ -z "$cli" ]]; then
+    fail "$label CLI path is not configured"
+    return
+  fi
+
+  if [[ ! -x "$cli" ]]; then
+    fail "$label CLI is not executable: $cli"
+    return
+  fi
+
+  if [[ -z "$datadir" ]]; then
+    fail "$label datadir is not configured"
+    return
+  fi
+
+  local out
+  if out="$("$cli" -regtest -datadir="$datadir" getblockchaininfo 2>&1)"; then
+    pass "$label RPC reachable"
+  else
+    fail "$label RPC unavailable"
+    printf '      %s\n' "$(printf '%s\n' "$out" | head -1)"
+    return
+  fi
+
+  if [[ -z "$wallet" ]]; then
+    fail "$label wallet name is not configured"
+    return
+  fi
+
+  local wallets
+  if ! wallets="$("$cli" -regtest -datadir="$datadir" listwallets 2>&1)"; then
+    fail "$label could not query loaded wallets"
+    printf '      %s\n' "$(printf '%s\n' "$wallets" | head -1)"
+    return
+  fi
+
+  if printf '%s\n' "$wallets" | "$PY" -c '
+import json, sys
+wanted = sys.argv[1]
+try:
+    loaded = json.load(sys.stdin)
+except Exception:
+    raise SystemExit(2)
+raise SystemExit(0 if isinstance(loaded, list) and wanted in loaded else 1)
+' "$wallet"; then
+    pass "$label wallet \"$wallet\" is loaded"
+  else
+    fail "$label wallet \"$wallet\" is not loaded"
+    return
+  fi
+
+  local wallet_info
+  if wallet_info="$(
+    "$cli" \
+      -regtest \
+      -datadir="$datadir" \
+      -rpcwallet="$wallet" \
+      getwalletinfo 2>&1
+  )"; then
+    pass "$label wallet RPC usable"
+  else
+    fail "$label wallet RPC unavailable: $wallet"
+    printf '      %s\n' "$(printf '%s\n' "$wallet_info" | head -1)"
+  fi
+}
+
+local_wallet="${BLAKE_SWAP_CHAIN_WALLET:-}"
+
+check_chain \
+  "Bitcoin" \
+  "${BLAKE_SWAP_BTC_CLI:-}" \
+  "${BLAKE_SWAP_BTC_DATADIR:-}" \
+  "$local_wallet"
+
+check_chain \
+  "BLAKE" \
+  "${BLAKE_SWAP_BLAKE_CLI:-}" \
+  "${BLAKE_SWAP_BLAKE_DATADIR:-}" \
+  "$local_wallet"
+
+printf '\nRUNNER\n'
+printf '%s\n' '------'
+
+runner_unit="${BLAKE_SWAP_RUNNER_UNIT:-}"
+
+if [[ -z "$runner_unit" ]]; then
+  warn "runner service is not configured"
+elif ! command -v systemctl >/dev/null 2>&1; then
+  warn "systemd runner status not checked"
+else
+  if systemctl --user is-enabled "$runner_unit" >/dev/null 2>&1; then
+    pass "$runner_unit is enabled"
+  else
+    warn "$runner_unit is not enabled or does not exist"
+  fi
+
+  if systemctl --user is-active "$runner_unit" >/dev/null 2>&1; then
+    pass "$runner_unit is active"
+  else
+    warn "$runner_unit is not active"
+  fi
+fi
+
+printf '\nRESULT\n'
+printf '%s\n' '------'
+
+if [[ "$failures" -eq 0 ]]; then
+  printf 'READY: local participant prerequisites are healthy'
+  if [[ "$warnings" -gt 0 ]]; then
+    printf ' (%d warning(s))' "$warnings"
+  fi
+  printf '\n'
+  printf 'NOTE: relay configuration is present, but this check does not publish or probe relays.\n'
+  exit 0
+fi
+
+printf 'NOT READY: %d required check(s) failed' "$failures"
+if [[ "$warnings" -gt 0 ]]; then
+  printf ', %d warning(s)' "$warnings"
+fi
+printf '\n'
+printf 'No funds moved and no Nostr event was published.\n'
+exit 1

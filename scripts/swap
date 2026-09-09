@@ -36,11 +36,12 @@ die() {
 ROLE="${BLAKE_SWAP_ROLE:-}"
 STATE_DIR="${BLAKE_SWAP_STATE_DIR:-}"
 KEY_DIR="${BLAKE_SWAP_NOSTR_KEY_DIR:-}"
+PARTICIPANT_KEY_FILE="${BLAKE_SWAP_PARTICIPANT_KEY_FILE:-}"
 TRANSPORT="${BLAKE_SWAP_TRANSPORT:-}"
 
 
 [[ -n "$ROLE" ]] || die \
-    "No participant profile loaded. Run: source scripts/alice-env or source scripts/bob-env"
+    "No participant profile loaded. Source a participant profile first."
 
 case "$ROLE" in
     alice|bob)
@@ -54,8 +55,9 @@ esac
 [[ -n "$STATE_DIR" ]] || die \
     "BLAKE_SWAP_STATE_DIR is unset"
 
-[[ -n "$KEY_DIR" ]] || die \
-    "BLAKE_SWAP_NOSTR_KEY_DIR is unset"
+if [[ -z "$PARTICIPANT_KEY_FILE" && -z "$KEY_DIR" ]]; then
+    die "Configure BLAKE_SWAP_PARTICIPANT_KEY_FILE or BLAKE_SWAP_NOSTR_KEY_DIR"
+fi
 
 [[ -n "$TRANSPORT" ]] || die \
     "BLAKE_SWAP_TRANSPORT is unset"
@@ -72,7 +74,11 @@ if [[ -n "${BLAKE_SWAP_NOSTR_KEY_FILE:-}" ]]; then
 fi
 
 
-KEY_FILE="$KEY_DIR/$ROLE.key"
+if [[ -n "$PARTICIPANT_KEY_FILE" ]]; then
+    KEY_FILE="$PARTICIPANT_KEY_FILE"
+else
+    KEY_FILE="$KEY_DIR/$ROLE.key"
+fi
 
 [[ -f "$KEY_FILE" ]] || die \
     "Expected Nostr key does not exist: $KEY_FILE"

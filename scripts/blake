@@ -17,11 +17,8 @@ need_profile() {
     cat >&2 <<'EOF'
 ERROR: no participant profile is loaded.
 
-On the laptop:
-  source scripts/alice-env
-
-On Start9:
-  source scripts/bob-env
+Load a participant profile first, for example:
+  source scripts/participant-env
 EOF
     exit 2
   fi
@@ -215,8 +212,13 @@ case "$cmd" in
     echo "  * every independently safe funded swap may advance"
     echo "  * one broken/ambiguous swap does not block other swaps"
     echo "  * initial BLAKE funding is NEVER automatic"
+    echo "  * unchanged status is suppressed"
     echo "  * Ctrl-C stops this foreground runner"
     echo
+
+    last_next_output=""
+    last_settle_output=""
+    last_action_required=""
 
     while :; do
       if next_output="$(engine next 2>&1)"; then
@@ -225,21 +227,41 @@ case "$cmd" in
         next_status=$?
       fi
 
-      printf '%s\n' "$next_output"
+      if [ "$next_output" != "$last_next_output" ]; then
+        printf '%s\n' "$next_output"
+        last_next_output="$next_output"
+      fi
 
       if [ "$next_status" -ne 0 ]; then
-        echo
-        echo "COORDINATION PAUSED"
-        echo "==================="
-        echo "next returned an error; settlement supervision will still run."
+        if [ "$last_action_required" != "coordination-error" ]; then
+          echo
+          echo "COORDINATION PAUSED"
+          echo "==================="
+          echo "next returned an error; settlement supervision will still run."
+          last_action_required="coordination-error"
+        fi
+      else
+        if [ "$last_action_required" = "coordination-error" ]; then
+          echo
+          echo "COORDINATION RECOVERED"
+          echo "======================"
+          echo "safe coordination polling resumed."
+          last_action_required=""
+        fi
       fi
 
       if printf '%s\n' "$next_output" | grep -q '^READY TO FUND$'; then
-        echo
-        echo "ACTION REQUIRED"
-        echo "==============="
-        echo "Initial BLAKE funding requires an explicit:"
-        echo "  scripts/blake fund"
+        funding_key="$(printf '%s\n' "$next_output" | grep -E '^swap:|^trade:' | tr '\n' ' ')"
+        if [ "$last_action_required" != "$funding_key" ]; then
+          echo
+          echo "ACTION REQUIRED"
+          echo "==============="
+          echo "Initial BLAKE funding requires an explicit:"
+          echo "  scripts/blake fund"
+          last_action_required="$funding_key"
+        fi
+      elif [ "$last_action_required" != "coordination-error" ]; then
+        last_action_required=""
       fi
 
       if settle_output="$(engine resume-all 2>&1)"; then
@@ -248,7 +270,10 @@ case "$cmd" in
         settle_status=$?
       fi
 
-      printf '%s\n' "$settle_output"
+      if [ "$settle_output" != "$last_settle_output" ]; then
+        printf '%s\n' "$settle_output"
+        last_settle_output="$settle_output"
+      fi
 
       if [ "$settle_status" -ne 0 ]; then
         echo

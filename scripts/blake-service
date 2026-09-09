@@ -1,0 +1,329 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+BLAKE="$ROOT/scripts/blake"
+
+usage() {
+  cat <<'EOF'
+BLAKE SWAP SERVICE
+
+Usage:
+  scripts/blake-service start <profile-script> [poll-seconds]
+  scripts/blake-service stop [profile-script]
+  scripts/blake-service status [profile-script]
+  scripts/blake-service logs [profile-script] [lines]
+
+Examples:
+  scripts/blake-service start scripts/participant-env 15
+  scripts/blake-service status
+  scripts/blake-service logs
+  scripts/blake-service stop
+
+Any profile script is valid as long as it sets the participant
+environment, including BLAKE_SWAP_STATE_DIR.
+
+`start` requires a profile. After a successful start, status/logs/stop
+remember that profile automatically. You may still pass a profile
+explicitly to override the remembered one.
+EOF
+}
+
+resolve_profile() {
+  local requested="${1:-}"
+
+  if [[ -n "$requested" ]]; then
+    if [[ -f "$requested" ]]; then
+      printf '%s/%s\n' "$(cd "$(dirname "$requested")" && pwd)" "$(basename "$requested")"
+      return 0
+    fi
+
+    if [[ -f "$ROOT/$requested" ]]; then
+      printf '%s/%s\n' "$(cd "$(dirname "$ROOT/$requested")" && pwd)" "$(basename "$ROOT/$requested")"
+      return 0
+    fi
+
+    echo "ERROR: profile script not found: $requested" >&2
+    return 2
+  fi
+
+  # Discover a remembered profile from one of our participant state dirs.
+  # Prefer the profile recorded by an actually running service.
+  local candidate profile pid_file
+  for candidate in \
+    "$HOME"/.blake-swap-*/service \
+    "$HOME/.blake-swap/service"
+  do
+    [[ -d "$candidate" ]] || continue
+    [[ -f "$candidate/profile-path" ]] || continue
+    [[ -f "$candidate/blake-run.pid" ]] || continue
+
+    pid_file="$candidate/blake-run.pid"
+    if kill -0 "$(cat "$pid_file" 2>/dev/null || true)" 2>/dev/null; then
+      profile="$(cat "$candidate/profile-path" 2>/dev/null || true)"
+      if [[ -n "$profile" ]]; then
+        if [[ -f "$profile" ]]; then
+          printf '%s/%s\n' "$(cd "$(dirname "$profile")" && pwd)" "$(basename "$profile")"
+          return 0
+        elif [[ -f "$ROOT/$profile" ]]; then
+          printf '%s/%s\n' "$(cd "$(dirname "$ROOT/$profile")" && pwd)" "$(basename "$ROOT/$profile")"
+          return 0
+        fi
+      fi
+    fi
+  done
+
+  # If no service is running, a single remembered participant is enough.
+  local found=""
+  for candidate in \
+    "$HOME"/.blake-swap-*/service \
+    "$HOME/.blake-swap/service"
+  do
+    [[ -d "$candidate" ]] || continue
+    [[ -f "$candidate/profile-path" ]] || continue
+    profile="$(cat "$candidate/profile-path" 2>/dev/null || true)"
+    [[ -n "$profile" ]] || continue
+
+    if [[ -f "$profile" ]]; then
+      profile="$(cd "$(dirname "$profile")" && pwd)/$(basename "$profile")"
+    elif [[ -f "$ROOT/$profile" ]]; then
+      profile="$(cd "$(dirname "$ROOT/$profile")" && pwd)/$(basename "$ROOT/$profile")"
+    else
+      continue
+    fi
+
+    if [[ -n "$found" && "$found" != "$profile" ]]; then
+      echo "ERROR: multiple remembered profiles found; specify one explicitly" >&2
+      return 2
+    fi
+    found="$profile"
+  done
+
+  if [[ -n "$found" ]]; then
+    printf '%s\n' "$found"
+    return 0
+  fi
+
+  echo "ERROR: no remembered participant profile." >&2
+  echo "Start the service once with:" >&2
+  echo "  scripts/blake-service start <profile-script> [poll-seconds]" >&2
+  return 2
+}
+
+load_profile() {
+  local requested="${1:-}"
+  local profile
+
+  profile="$(resolve_profile "$requested")"
+
+  # shellcheck disable=SC1090
+  source "$profile"
+
+  if [[ -z "${BLAKE_SWAP_STATE_DIR:-}" ]]; then
+    echo "ERROR: profile did not set BLAKE_SWAP_STATE_DIR" >&2
+    exit 2
+  fi
+
+  mkdir -p "$BLAKE_SWAP_STATE_DIR/service"
+
+  SERVICE_DIR="$BLAKE_SWAP_STATE_DIR/service"
+  PID_FILE="$SERVICE_DIR/blake-run.pid"
+  LOG_FILE="$SERVICE_DIR/blake-run.log"
+  PROFILE_FILE="$SERVICE_DIR/profile-path"
+  ACTIVE_PROFILE="$profile"
+}
+
+remember_profile() {
+  printf '%s\n' "$ACTIVE_PROFILE" > "$PROFILE_FILE"
+}
+
+is_running() {
+  if [[ ! -f "$PID_FILE" ]]; then
+    return 1
+  fi
+
+  local pid
+  pid="$(cat "$PID_FILE" 2>/dev/null || true)"
+
+  if [[ -z "$pid" ]]; then
+    return 1
+  fi
+
+  if kill -0 "$pid" 2>/dev/null; then
+    return 0
+  fi
+
+  return 1
+}
+
+cmd="${1:-}"
+shift || true
+
+case "$cmd" in
+  start)
+    profile="${1:-}"
+    interval="${2:-15}"
+
+    if [[ -z "$profile" ]]; then
+      echo "ERROR: start requires a profile script" >&2
+      usage >&2
+      exit 2
+    fi
+
+    load_profile "$profile"
+
+    case "$interval" in
+      ''|*[!0-9]*)
+        echo "ERROR: poll interval must be an integer" >&2
+        exit 2
+        ;;
+    esac
+
+    if [[ "$interval" -lt 2 ]]; then
+      echo "ERROR: poll interval must be at least 2 seconds" >&2
+      exit 2
+    fi
+
+    if is_running; then
+      remember_profile
+      echo "BLAKE SWAP SERVICE ALREADY RUNNING"
+      echo "=================================="
+      echo "pid:      $(cat "$PID_FILE")"
+      echo "profile:  $ACTIVE_PROFILE"
+      echo "log:      $LOG_FILE"
+      exit 0
+    fi
+
+    rm -f "$PID_FILE"
+
+    {
+      echo
+      echo "============================================================"
+      echo "SERVICE START $(date -Is)"
+      echo "profile: $ACTIVE_PROFILE"
+      echo "poll:    ${interval}s"
+      echo "============================================================"
+    } >> "$LOG_FILE"
+
+    nohup "$BLAKE" run "$interval" >> "$LOG_FILE" 2>&1 &
+    pid=$!
+    printf '%s\n' "$pid" > "$PID_FILE"
+    remember_profile
+
+    sleep 1
+
+    if ! kill -0 "$pid" 2>/dev/null; then
+      echo "ERROR: service exited during startup" >&2
+      echo "See: $LOG_FILE" >&2
+      exit 1
+    fi
+
+    echo
+    echo "BLAKE SWAP SERVICE STARTED"
+    echo "=========================="
+    echo "pid:      $pid"
+    echo "profile:  $ACTIVE_PROFILE"
+    echo "state:    $BLAKE_SWAP_STATE_DIR"
+    echo "log:      $LOG_FILE"
+    echo
+    echo "The runner is detached from this terminal."
+    ;;
+
+  stop)
+    profile="${1:-}"
+    load_profile "$profile"
+
+    if ! is_running; then
+      echo "BLAKE SWAP SERVICE NOT RUNNING"
+      rm -f "$PID_FILE"
+      exit 0
+    fi
+
+    pid="$(cat "$PID_FILE")"
+
+    echo "Stopping BLAKE swap service pid $pid..."
+    kill "$pid"
+
+    for _ in $(seq 1 20); do
+      if ! kill -0 "$pid" 2>/dev/null; then
+        break
+      fi
+      sleep 0.25
+    done
+
+    if kill -0 "$pid" 2>/dev/null; then
+      echo "ERROR: service did not stop cleanly" >&2
+      echo "pid remains: $pid" >&2
+      exit 1
+    fi
+
+    rm -f "$PID_FILE"
+
+    {
+      echo
+      echo "SERVICE STOP $(date -Is)"
+    } >> "$LOG_FILE"
+
+    echo "BLAKE SWAP SERVICE STOPPED"
+    ;;
+
+  status)
+    profile="${1:-}"
+    load_profile "$profile"
+
+    echo
+    echo "BLAKE SWAP SERVICE STATUS"
+    echo "========================="
+
+    if is_running; then
+      echo "state:     RUNNING"
+      echo "pid:       $(cat "$PID_FILE")"
+    else
+      echo "state:     STOPPED"
+      [[ -f "$PID_FILE" ]] && rm -f "$PID_FILE"
+    fi
+
+    echo "profile:   $ACTIVE_PROFILE"
+    echo "state dir: $BLAKE_SWAP_STATE_DIR"
+    echo "log:       $LOG_FILE"
+    ;;
+
+  logs)
+    first="${1:-}"
+    second="${2:-}"
+
+    # Convenience:
+    #   logs
+    #   logs 200
+    #   logs scripts/participant-env
+    #   logs scripts/participant-env 200
+    if [[ -n "$first" && "$first" =~ ^[0-9]+$ ]]; then
+      profile=""
+      lines="$first"
+    else
+      profile="$first"
+      lines="${second:-80}"
+    fi
+
+    load_profile "$profile"
+
+    case "$lines" in
+      ''|*[!0-9]*)
+        echo "ERROR: log line count must be an integer" >&2
+        exit 2
+        ;;
+    esac
+
+    if [[ ! -f "$LOG_FILE" ]]; then
+      echo "No service log yet: $LOG_FILE"
+      exit 0
+    fi
+
+    tail -n "$lines" "$LOG_FILE"
+    ;;
+
+  *)
+    usage
+    exit 2
+    ;;
+esac

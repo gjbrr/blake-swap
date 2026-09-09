@@ -25,38 +25,39 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
 HOME = Path.home()
-SWAP_V2 = Path(os.environ.get("SWAP_V2", HOME / "swap_v2.py"))
 
-ALICE_BASE = Path(
+PROJECT_DIR = Path(__file__).resolve().parent.parent
+
+SWAP_V2 = Path(
     os.environ.get(
-        "BLAKE_SWAP_ALICE_STATE_DIR",
-        HOME / ".blake-swap-alice",
+        "SWAP_V2",
+        PROJECT_DIR / "src" / "swap_v2.py",
     )
 )
 
-BOB_BASE = Path(
-    os.environ.get(
-        "BLAKE_SWAP_BOB_STATE_DIR",
-        HOME / ".blake-swap-bob",
+TEST_ROOT = Path(
+    tempfile.mkdtemp(
+        prefix="blake-swap-tests-"
     )
 )
+
+ALICE_BASE = TEST_ROOT / "alice-state"
+BOB_BASE = TEST_ROOT / "bob-state"
 
 # Compatibility alias for tests that need a generic BASE.
 # Alice owns the secret-bearing side of ordinary test swaps.
 BASE = ALICE_BASE
 
-ALICE_DIR = ALICE_BASE / "alice"
-BOB_DIR = BOB_BASE / "bob"
+ALICE_DIR = ALICE_BASE
+BOB_DIR = BOB_BASE
 
-MESSAGE_DIR = (
-    HOME
-    / ".blake-swap-test-transport"
-    / "messages"
-)
+MESSAGE_DIR = TEST_ROOT / "messages"
+
 
 BTC_CLI = Path("/home/gary/bitcoin-core/build/bin/bitcoin-cli")
 BTC_DATADIR = Path("/home/gary/bitcoin-swap-regtest")
@@ -65,6 +66,10 @@ BLAKE_CLI = Path("/home/gary/bitcoin-blake-rc2/build-rc2/bin/bitcoin-cli")
 BLAKE_DATADIR = Path("/home/gary/blake-swap-regtest")
 
 ALICE_WALLET = "alice"
+BOB_WALLET = "bob"
+
+ALICE_PARTICIPANT_KEY = ALICE_BASE / "test-participant.key"
+BOB_PARTICIPANT_KEY = BOB_BASE / "test-participant.key"
 
 PASS_COUNT = 0
 FAIL_COUNT = 0
@@ -72,6 +77,22 @@ FAIL_COUNT = 0
 
 class TestFailure(RuntimeError):
     pass
+
+
+def ensure_test_participant_keys() -> None:
+    ALICE_BASE.mkdir(parents=True, exist_ok=True)
+    BOB_BASE.mkdir(parents=True, exist_ok=True)
+
+    # Deterministic non-production test secrets.
+    # They exist only to let FILE-transport tests derive stable
+    # participant identities without contacting Nostr relays.
+    if not ALICE_PARTICIPANT_KEY.exists():
+        ALICE_PARTICIPANT_KEY.write_text("11" * 32 + "\n")
+        ALICE_PARTICIPANT_KEY.chmod(0o600)
+
+    if not BOB_PARTICIPANT_KEY.exists():
+        BOB_PARTICIPANT_KEY.write_text("22" * 32 + "\n")
+        BOB_PARTICIPANT_KEY.chmod(0o600)
 
 
 def banner(text: str) -> None:
@@ -110,6 +131,7 @@ def run(cmd, *, env=None, expect_ok=True, echo=False) -> subprocess.CompletedPro
         "BLAKE_SWAP_STATE_DIR",
         "BLAKE_SWAP_MESSAGE_DIR",
         "BLAKE_SWAP_ROLE",
+        "BLAKE_SWAP_CHAIN_WALLET",
         "BLAKE_SWAP_PARTICIPANT_KEY_FILE",
         "BLAKE_SWAP_NOSTR_KEY_FILE",
         "BLAKE_SWAP_NOSTR_KEY_DIR",
@@ -131,20 +153,34 @@ def run(cmd, *, env=None, expect_ok=True, echo=False) -> subprocess.CompletedPro
         "BLAKE_SWAP_ROLE"
     )
 
-    if (
-        role == "alice"
-        and "BLAKE_SWAP_STATE_DIR" not in merged
-    ):
-        merged["BLAKE_SWAP_STATE_DIR"] = str(
-            ALICE_BASE
+    if role == "alice":
+        if "BLAKE_SWAP_STATE_DIR" not in merged:
+            merged["BLAKE_SWAP_STATE_DIR"] = str(
+                ALICE_BASE
+            )
+
+        merged.setdefault(
+            "BLAKE_SWAP_CHAIN_WALLET",
+            ALICE_WALLET,
+        )
+        merged.setdefault(
+            "BLAKE_SWAP_PARTICIPANT_KEY_FILE",
+            str(ALICE_PARTICIPANT_KEY),
         )
 
-    elif (
-        role == "bob"
-        and "BLAKE_SWAP_STATE_DIR" not in merged
-    ):
-        merged["BLAKE_SWAP_STATE_DIR"] = str(
-            BOB_BASE
+    elif role == "bob":
+        if "BLAKE_SWAP_STATE_DIR" not in merged:
+            merged["BLAKE_SWAP_STATE_DIR"] = str(
+                BOB_BASE
+            )
+
+        merged.setdefault(
+            "BLAKE_SWAP_CHAIN_WALLET",
+            BOB_WALLET,
+        )
+        merged.setdefault(
+            "BLAKE_SWAP_PARTICIPANT_KEY_FILE",
+            str(BOB_PARTICIPANT_KEY),
         )
 
     #
@@ -179,6 +215,9 @@ def run(cmd, *, env=None, expect_ok=True, echo=False) -> subprocess.CompletedPro
     return p
 
 
+ensure_test_participant_keys()
+
+
 def swap_cmd(*args, role=None, expect_ok=True, echo=False):
     env = {}
     env["BLAKE_SWAP_MESSAGE_DIR"] = str(
@@ -192,9 +231,18 @@ def swap_cmd(*args, role=None, expect_ok=True, echo=False):
             env["BLAKE_SWAP_STATE_DIR"] = str(
                 ALICE_BASE
             )
+            env["BLAKE_SWAP_CHAIN_WALLET"] = ALICE_WALLET
+            env["BLAKE_SWAP_PARTICIPANT_KEY_FILE"] = str(
+                ALICE_PARTICIPANT_KEY
+            )
+
         elif role == "bob":
             env["BLAKE_SWAP_STATE_DIR"] = str(
                 BOB_BASE
+            )
+            env["BLAKE_SWAP_CHAIN_WALLET"] = BOB_WALLET
+            env["BLAKE_SWAP_PARTICIPANT_KEY_FILE"] = str(
+                BOB_PARTICIPANT_KEY
             )
         else:
             raise TestFailure(
@@ -303,8 +351,17 @@ def assert_secret_separation(swap_id: str) -> None:
 
     for path in MESSAGE_DIR.glob(f"{swap_id}.*.json"):
         data = json.loads(path.read_text())
+
+        if (
+            isinstance(data, dict)
+            and isinstance(data.get("message"), dict)
+        ):
+            payload = data["message"]
+        else:
+            payload = data
+
         require(
-            "secret_hex" not in data,
+            "secret_hex" not in payload,
             f"secret_hex leaked through transport message {path.name}",
         )
 

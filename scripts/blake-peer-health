@@ -1,0 +1,266 @@
+#!/usr/bin/env bash
+set -u
+
+if [[ -x "$HOME/blake-swap-venv/bin/python3" ]]; then
+    PY="$HOME/blake-swap-venv/bin/python3"
+else
+    PY="${PYTHON:-python3}"
+fi
+
+PROFILE="${1:-}"
+
+if [ -z "$PROFILE" ]; then
+    echo "usage: scripts/blake-peer-health <profile>"
+    exit 2
+fi
+
+if [ ! -f "$PROFILE" ]; then
+    echo "ERROR: profile not found: $PROFILE"
+    exit 2
+fi
+
+# shellcheck disable=SC1090
+source "$PROFILE"
+
+failures=0
+
+pass() {
+    printf 'PASS  %s\n' "$1"
+}
+
+fail() {
+    printf 'FAIL  %s\n' "$1"
+    failures=$((failures + 1))
+}
+
+detail() {
+    printf '      %s\n' "$1"
+}
+
+BTC_CLI="${BLAKE_SWAP_BTC_CLI:-}"
+BTC_DATADIR="${BLAKE_SWAP_BTC_DATADIR:-}"
+BLAKE_CLI="${BLAKE_SWAP_BLAKE_CLI:-}"
+BLAKE_DATADIR="${BLAKE_SWAP_BLAKE_DATADIR:-}"
+
+CANONICAL_HOST="${BLAKE_SWAP_CANONICAL_HOST:-}"
+
+BTC_CANONICAL_PORT="${BLAKE_SWAP_CANONICAL_BTC_PORT:-19444}"
+BLAKE_CANONICAL_PORT="${BLAKE_SWAP_CANONICAL_BLAKE_PORT:-18444}"
+
+BTC_CHECKPOINT="${BLAKE_SWAP_CANONICAL_BTC_CHECKPOINT:-}"
+BLAKE_CHECKPOINT="${BLAKE_SWAP_CANONICAL_BLAKE_CHECKPOINT:-}"
+
+echo
+echo "BLAKE SWAP PEER SYNC"
+echo "===================="
+
+echo
+echo "CANONICAL HUB"
+echo "-------------"
+
+if [ -n "$CANONICAL_HOST" ]; then
+    pass "canonical host configured: $CANONICAL_HOST"
+else
+    fail "BLAKE_SWAP_CANONICAL_HOST is not configured"
+fi
+
+if [ -n "$BTC_CHECKPOINT" ]; then
+    pass "Bitcoin canonical checkpoint configured"
+    detail "$BTC_CHECKPOINT"
+else
+    fail "BLAKE_SWAP_CANONICAL_BTC_CHECKPOINT is not configured"
+fi
+
+if [ -n "$BLAKE_CHECKPOINT" ]; then
+    pass "BLAKE canonical checkpoint configured"
+    detail "$BLAKE_CHECKPOINT"
+else
+    fail "BLAKE_SWAP_CANONICAL_BLAKE_CHECKPOINT is not configured"
+fi
+
+check_rpc() {
+    local label="$1"
+    local cli="$2"
+    local datadir="$3"
+
+    if "$cli" -regtest -datadir="$datadir" getblockchaininfo >/dev/null 2>&1; then
+        pass "$label RPC reachable"
+        return 0
+    fi
+
+    fail "$label RPC unavailable"
+    return 1
+}
+
+check_peer() {
+    local label="$1"
+    local cli="$2"
+    local datadir="$3"
+    local host="$4"
+    local port="$5"
+
+    local peers
+
+    if ! peers="$("$cli" -regtest -datadir="$datadir" getpeerinfo 2>/dev/null)"; then
+        fail "$label peer list unavailable"
+        return
+    fi
+
+    if PEERS="$peers" HOST="$host" PORT="$port" "$PY" - <<'PY'
+import json
+import os
+import sys
+
+peers = json.loads(os.environ["PEERS"])
+host = os.environ["HOST"]
+port = os.environ["PORT"]
+
+wanted = f"{host}:{port}"
+
+for peer in peers:
+    addr = str(peer.get("addr", ""))
+    addrbind = str(peer.get("addrbind", ""))
+
+    if addr == wanted or addr.startswith(wanted):
+        sys.exit(0)
+
+sys.exit(1)
+PY
+    then
+        pass "$label peer connected to canonical hub $host:$port"
+    else
+        fail "$label canonical peer is not connected"
+        detail "expected peer: $host:$port"
+    fi
+}
+
+check_checkpoint() {
+    local label="$1"
+    local cli="$2"
+    local datadir="$3"
+    local checkpoint="$4"
+
+    local header
+
+    if ! header="$("$cli" \
+        -regtest \
+        -datadir="$datadir" \
+        getblockheader "$checkpoint" true 2>/dev/null)"; then
+
+        fail "$label canonical checkpoint is unknown"
+        detail "$checkpoint"
+        return
+    fi
+
+    if HEADER="$header" "$PY" - <<'PY'
+import json
+import os
+import sys
+
+h = json.loads(os.environ["HEADER"])
+confirmations = h.get("confirmations")
+
+if isinstance(confirmations, int) and confirmations > 0:
+    sys.exit(0)
+
+sys.exit(1)
+PY
+    then
+        local confirmations height
+
+        confirmations="$(
+            HEADER="$header" "$PY" - <<'PY'
+import json, os
+h = json.loads(os.environ["HEADER"])
+print(h.get("confirmations", "?"))
+PY
+        )"
+
+        height="$(
+            HEADER="$header" "$PY" - <<'PY'
+import json, os
+h = json.loads(os.environ["HEADER"])
+print(h.get("height", "?"))
+PY
+        )"
+
+        pass "$label canonical checkpoint is on active chain"
+        detail "height=$height confirmations=$confirmations"
+    else
+        fail "$label canonical checkpoint is not on active chain"
+        detail "$checkpoint"
+    fi
+}
+
+echo
+echo "LOCAL RPC"
+echo "---------"
+
+btc_rpc_ok=0
+blake_rpc_ok=0
+
+if [ -n "$BTC_CLI" ] && [ -n "$BTC_DATADIR" ]; then
+    check_rpc "Bitcoin" "$BTC_CLI" "$BTC_DATADIR" && btc_rpc_ok=1
+else
+    fail "Bitcoin CLI/datadir configuration missing"
+fi
+
+if [ -n "$BLAKE_CLI" ] && [ -n "$BLAKE_DATADIR" ]; then
+    check_rpc "BLAKE" "$BLAKE_CLI" "$BLAKE_DATADIR" && blake_rpc_ok=1
+else
+    fail "BLAKE CLI/datadir configuration missing"
+fi
+
+echo
+echo "P2P CONNECTION"
+echo "--------------"
+
+if [ "$btc_rpc_ok" -eq 1 ] && [ -n "$CANONICAL_HOST" ]; then
+    check_peer \
+        "Bitcoin" \
+        "$BTC_CLI" \
+        "$BTC_DATADIR" \
+        "$CANONICAL_HOST" \
+        "$BTC_CANONICAL_PORT"
+fi
+
+if [ "$blake_rpc_ok" -eq 1 ] && [ -n "$CANONICAL_HOST" ]; then
+    check_peer \
+        "BLAKE" \
+        "$BLAKE_CLI" \
+        "$BLAKE_DATADIR" \
+        "$CANONICAL_HOST" \
+        "$BLAKE_CANONICAL_PORT"
+fi
+
+echo
+echo "CHAIN COMPATIBILITY"
+echo "-------------------"
+
+if [ "$btc_rpc_ok" -eq 1 ] && [ -n "$BTC_CHECKPOINT" ]; then
+    check_checkpoint \
+        "Bitcoin" \
+        "$BTC_CLI" \
+        "$BTC_DATADIR" \
+        "$BTC_CHECKPOINT"
+fi
+
+if [ "$blake_rpc_ok" -eq 1 ] && [ -n "$BLAKE_CHECKPOINT" ]; then
+    check_checkpoint \
+        "BLAKE" \
+        "$BLAKE_CLI" \
+        "$BLAKE_DATADIR" \
+        "$BLAKE_CHECKPOINT"
+fi
+
+echo
+echo "RESULT"
+echo "------"
+
+if [ "$failures" -eq 0 ]; then
+    echo "READY FOR TWO-HOST SWAPS"
+    exit 0
+fi
+
+echo "NOT READY: $failures required check(s) failed"
+exit 1

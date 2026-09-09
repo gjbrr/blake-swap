@@ -5,3 +5,6 @@ __pycache__/
 *.swp
 .env
 .venv/
+
+# Generated participant profile
+scripts/participant-env

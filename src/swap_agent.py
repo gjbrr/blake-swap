@@ -27,9 +27,13 @@ def state_path(
     swap_id,
     role,
 ):
+    #
+    # BLAKE_SWAP_STATE_DIR is already the private state root
+    # for the selected participant. Do not append the role
+    # again here.
+    #
     return (
         BASE
-        / role
         / f"{swap_id}.json"
     )
 

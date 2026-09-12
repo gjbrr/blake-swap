@@ -79,10 +79,24 @@ def start_agent(
         env["BLAKE_SWAP_STATE_DIR"] = str(
             h.ALICE_BASE
         )
+        env["BLAKE_SWAP_CHAIN_WALLET"] = (
+            h.ALICE_WALLET
+        )
+        env["BLAKE_SWAP_PARTICIPANT_KEY_FILE"] = str(
+            h.ALICE_PARTICIPANT_KEY
+        )
+
     elif role == "bob":
         env["BLAKE_SWAP_STATE_DIR"] = str(
             h.BOB_BASE
         )
+        env["BLAKE_SWAP_CHAIN_WALLET"] = (
+            h.BOB_WALLET
+        )
+        env["BLAKE_SWAP_PARTICIPANT_KEY_FILE"] = str(
+            h.BOB_PARTICIPANT_KEY
+        )
+
     else:
         raise h.TestFailure(
             f"unknown autonomous role: {role}"

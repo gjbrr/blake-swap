@@ -37,14 +37,14 @@ BTC_DATADIR="${BLAKE_SWAP_BTC_DATADIR:-$HOME/bitcoin-swap-regtest}"
 BLAKE_CLI="${BLAKE_SWAP_BLAKE_CLI:-$HOME/bitcoin-blake-rc2/build-rc2/bin/bitcoin-cli}"
 BLAKE_DATADIR="${BLAKE_SWAP_BLAKE_DATADIR:-$HOME/blake-swap-regtest}"
 
-WALLET="${BLAKE_SWAP_CHAIN_WALLET:-blakeswap}"
+WALLET="${BLAKE_SWAP_SETUP_WALLET:-blakeswap}"
 
-STATE_DIR="${BLAKE_SWAP_STATE_DIR:-$HOME/.blake-swap}"
+STATE_DIR="${BLAKE_SWAP_SETUP_STATE_DIR:-$HOME/.blake-swap}"
 NOSTR_KEY_DIR="${BLAKE_SWAP_NOSTR_KEY_DIR:-$STATE_DIR/nostr-keys}"
 
 RELAYS="${BLAKE_SWAP_NOSTR_RELAYS:-wss://TheForest.nostr1.com,wss://nos.lol}"
 
-PROFILE="${BLAKE_SWAP_PROFILE:-$ROOT/scripts/participant-env}"
+PROFILE="${BLAKE_SWAP_SETUP_PROFILE:-$ROOT/scripts/participant-env}"
 
 pass() { printf 'PASS  %s\n' "$*"; }
 fail() { printf 'FAIL  %s\n' "$*" >&2; exit 1; }

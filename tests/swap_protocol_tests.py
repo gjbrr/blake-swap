@@ -220,6 +220,11 @@ ensure_test_participant_keys()
 
 def swap_cmd(*args, role=None, expect_ok=True, echo=False):
     env = {}
+
+    # Tests must never discover or publish against the
+    # operator's configured public Nostr relays.
+    env["BLAKE_SWAP_NOSTR_RELAYS"] = "ws://127.0.0.1:1"
+
     env["BLAKE_SWAP_MESSAGE_DIR"] = str(
         MESSAGE_DIR
     )
@@ -1273,11 +1278,35 @@ def message_file(swap_id: str, message_type: str) -> Path:
 
 def mutate_message(path: Path, mutator):
     if not path.exists():
-        raise TestFailure(f"message file not found: {path}")
+        raise TestFailure(
+            f"message file not found: {path}"
+        )
+
     original = path.read_text()
     data = json.loads(original)
-    mutator(data)
-    path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n")
+
+    # FILE transport v2 wraps the protocol payload so tests
+    # must mutate the actual message, not transport metadata.
+    if (
+        isinstance(data, dict)
+        and data.get("_file_transport_version") == 2
+        and isinstance(data.get("message"), dict)
+    ):
+        payload = data["message"]
+    else:
+        payload = data
+
+    mutator(payload)
+
+    path.write_text(
+        json.dumps(
+            data,
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n"
+    )
+
     return original
 
 
@@ -1762,10 +1791,13 @@ def test_race() -> None:
 
             env = os.environ.copy()
             env["BLAKE_SWAP_TRANSPORT"] = "file"
+
             env["BLAKE_SWAP_ROLE"] = "bob"
+            env["BLAKE_SWAP_CHAIN_WALLET"] = BOB_WALLET
             env["BLAKE_SWAP_STATE_DIR"] = str(
                 BOB_BASE
             )
+
             env["BLAKE_SWAP_MESSAGE_DIR"] = str(
                 MESSAGE_DIR
             )
@@ -1982,6 +2014,289 @@ def test_race() -> None:
 
 
 
+def test_market_take_retry_idempotence():
+    banner(
+        "MARKET TAKE RETRY IDEMPOTENCE V1"
+    )
+
+    import importlib.util
+    from types import SimpleNamespace
+
+    src_dir = str(SWAP_V2.parent)
+
+    if src_dir not in sys.path:
+        sys.path.insert(0, src_dir)
+
+    spec = importlib.util.spec_from_file_location(
+        "swap_v2_market_retry_test",
+        SWAP_V2,
+    )
+    require(
+        spec is not None
+        and spec.loader is not None,
+        "could not load swap_v2 module",
+    )
+
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    offer_id = "11" * 32
+    maker_pubkey = "22" * 32
+    taker_pubkey = "33" * 32
+    take_id = "44" * 32
+
+    offer_event = {
+        "id": offer_id,
+        "pubkey": maker_pubkey,
+        "content": json.dumps(
+            {
+                "type": "market-offer",
+                "version": 2,
+                "direction": "blake-for-btc",
+                "blake_amount": "0.01",
+                "btc_sats": 2000,
+                "expires_at": int(time.time()) + 3600,
+            }
+        ),
+    }
+
+    take_event = {
+        "id": take_id,
+        "pubkey": taker_pubkey,
+        "content": json.dumps(
+            {
+                "type": "market-take",
+                "version": 2,
+                "offer_id": offer_id,
+                "maker": maker_pubkey,
+                "taker": taker_pubkey,
+                "blake_amount": "0.01",
+                "btc_sats": 2000,
+            }
+        ),
+    }
+
+    take_message = json.loads(
+        take_event["content"]
+    )
+
+    build_count = 0
+    cached_take = None
+    publish_ids = []
+
+    async def fake_fetch_market_offers(limit=200):
+        return [
+            {
+                "event_id": offer_id,
+                "maker": maker_pubkey,
+                "blake_amount": "0.01",
+                "btc_sats": 2000,
+            }
+        ]
+
+    async def fake_fetch_event_by_id(event_id):
+        require(
+            event_id == offer_id,
+            "wrong offer requested",
+        )
+        return offer_event
+
+    def fake_build_market_take_event(
+        original,
+        offer_message,
+    ):
+        nonlocal build_count
+        build_count += 1
+
+        require(
+            original is offer_event,
+            "take built from wrong offer event",
+        )
+
+        return take_event, take_message
+
+    def fake_prior_market_take(
+        requested_offer_id,
+        taker_pubkey=None,
+    ):
+        require(
+            requested_offer_id == offer_id,
+            "prior-take lookup used wrong offer id",
+        )
+        return cached_take
+
+    async def fake_publish_event(event):
+        nonlocal cached_take
+
+        publish_ids.append(
+            event["id"]
+        )
+
+        # Model the real publish path:
+        # durable local cache happens before relay success.
+        if cached_take is None:
+            cached_take = event
+
+        # Simulate every configured relay failing.
+        raise RuntimeError(
+            "No configured Nostr relay accepted the event"
+        )
+
+    originals = {
+        "resolve_cached_nostr_prefix":
+            mod.resolve_cached_nostr_prefix,
+        "nostr_fetch_market_offers":
+            mod.nostr_fetch_market_offers,
+        "nostr_fetch_event_by_id":
+            mod.nostr_fetch_event_by_id,
+        "verify_nostr_event":
+            mod.verify_nostr_event,
+        "validate_btc_trade_amount":
+            mod.validate_btc_trade_amount,
+        "build_market_take_event":
+            mod.build_market_take_event,
+        "nostr_prior_market_take":
+            mod.nostr_prior_market_take,
+        "nostr_publish_event":
+            mod.nostr_publish_event,
+    }
+
+    try:
+        mod.resolve_cached_nostr_prefix = (
+            lambda value, **kwargs: offer_id
+        )
+        mod.nostr_fetch_market_offers = (
+            fake_fetch_market_offers
+        )
+        mod.nostr_fetch_event_by_id = (
+            fake_fetch_event_by_id
+        )
+        mod.verify_nostr_event = (
+            lambda event: None
+        )
+        mod.validate_btc_trade_amount = (
+            lambda *args, **kwargs: None
+        )
+        mod.build_market_take_event = (
+            fake_build_market_take_event
+        )
+        mod.nostr_prior_market_take = (
+            fake_prior_market_take
+        )
+        mod.nostr_publish_event = (
+            fake_publish_event
+        )
+
+        args = SimpleNamespace(
+            offer_id=offer_id
+        )
+
+        #
+        # First attempt creates exactly one signed take.
+        # Publication then fails after the event has become
+        # locally durable.
+        #
+        try:
+            mod.command_take_market_offer(
+                args
+            )
+        except RuntimeError as e:
+            require(
+                "No configured Nostr relay accepted"
+                in str(e),
+                (
+                    "first publication failed for "
+                    f"unexpected reason: {e}"
+                ),
+            )
+        else:
+            raise TestFailure(
+                "first failed relay publication "
+                "unexpectedly succeeded"
+            )
+
+        require(
+            build_count == 1,
+            (
+                "first take did not create exactly "
+                f"one event; build_count={build_count}"
+            ),
+        )
+
+        require(
+            cached_take is take_event,
+            "first signed take was not retained",
+        )
+
+        first_id = cached_take["id"]
+
+        #
+        # Second and third attempts must reuse the exact
+        # signed event already retained above.
+        #
+        mod.command_take_market_offer(
+            SimpleNamespace(
+                offer_id=offer_id
+            )
+        )
+
+        mod.command_take_market_offer(
+            SimpleNamespace(
+                offer_id=offer_id
+            )
+        )
+
+        require(
+            build_count == 1,
+            (
+                "retry created another market-take; "
+                f"build_count={build_count}"
+            ),
+        )
+
+        require(
+            cached_take["id"] == first_id,
+            "cached take id changed during retry",
+        )
+
+        require(
+            publish_ids == [
+                first_id,
+                first_id,
+                first_id,
+            ],
+            (
+                "retry did not republish the exact "
+                f"same event id: {publish_ids}"
+            ),
+        )
+
+        ok(
+            "first attempt created exactly one signed take"
+        )
+        ok(
+            "second attempt reused identical take id"
+        )
+        ok(
+            "third attempt reused identical take id"
+        )
+        ok(
+            "relay failure cannot create duplicate take events"
+        )
+        ok(
+            "retry path moves no funds"
+        )
+
+    finally:
+        for name, value in originals.items():
+            setattr(
+                mod,
+                name,
+                value,
+            )
+
+
+
 def preflight() -> None:
     for path, label in [
         (SWAP_V2, "swap_v2.py"),
@@ -2003,7 +2318,7 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "suite",
-        choices=["happy", "refund", "mallory", "recovery", "race", "all"],
+        choices=["happy", "refund", "mallory", "recovery", "race", "market-retry", "all"],
         nargs="?",
         default="all",
     )
@@ -2053,6 +2368,17 @@ def main() -> int:
                 test_race()
             except Exception as e:
                 fail("CONCURRENT BTC FUNDING RACE", str(e))
+                if args.suite != "all":
+                    raise
+
+        if args.suite in ("market-retry", "all"):
+            try:
+                test_market_take_retry_idempotence()
+            except Exception as e:
+                fail(
+                    "MARKET TAKE RETRY IDEMPOTENCE",
+                    str(e),
+                )
                 if args.suite != "all":
                     raise
 

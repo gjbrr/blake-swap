@@ -1872,6 +1872,27 @@ def command_new(args):
         #
         swap.validate()
 
+    #
+    # The creator of a normal swap is protocol Alice.
+    # Persist Alice's own participant identity immediately.
+    #
+    # This is local identity evidence derived from the configured
+    # participant key; it does not depend on Nostr transport or on
+    # any counterparty-supplied message.
+    #
+    alice_identity = current_nostr_pubkey()
+
+    if (
+        swap.nostr_alice_pub is not None
+        and swap.nostr_alice_pub != alice_identity
+    ):
+        raise RuntimeError(
+            "SECURITY FAILURE: existing Alice participant "
+            "identity does not match current participant"
+        )
+
+    swap.nostr_alice_pub = alice_identity
+
     path = save_swap(
         swap
     )
@@ -3762,23 +3783,33 @@ def command_receive_accept(args):
         "btc_bob_pub"
     ]
 
-    if TRANSPORT == "nostr":
-        signer = message.get(
-            "_nostr_pubkey"
+    #
+    # Both authenticated Nostr transport and the v2 local FILE
+    # test envelope attach sender identity as `_nostr_pubkey`.
+    #
+    # Nostr requires this metadata because it came from signature
+    # verification.  FILE transport is intentionally only a
+    # local/regtest backend; its v2 envelope preserves the sending
+    # participant identity so black-box tests exercise the same
+    # identity-binding state transitions.
+    #
+    signer = message.get(
+        "_nostr_pubkey"
+    )
+
+    if TRANSPORT == "nostr" and not signer:
+        raise RuntimeError(
+            "Nostr acceptance has no verified signer identity"
         )
 
-        if not signer:
-            raise RuntimeError(
-                "Nostr acceptance has no verified signer identity"
-            )
-
+    if signer is not None:
         if (
             swap.nostr_bob_pub is not None
             and swap.nostr_bob_pub != signer
         ):
             raise RuntimeError(
-                "SECURITY FAILURE: acceptance was signed "
-                "by a different Nostr identity"
+                "SECURITY FAILURE: acceptance sender identity "
+                "differs from pinned Bob identity"
             )
 
         swap.nostr_bob_pub = signer
@@ -5368,6 +5399,54 @@ def command_refund_blake(args):
         print("state: ", swap.state)
         return
 
+    if State(swap.state) == State.BLAKE_FUNDED:
+        #
+        # Abort-before-BTC-funding recovery.
+        #
+        # Confirmed-spend recovery above runs first so a crash
+        # after broadcasting/mining our exact refund remains
+        # idempotently recoverable.
+        #
+        # If no confirmed refund exists, a stale BLAKE_FUNDED
+        # checkpoint is not sufficient authority to refund.
+        # Immediately re-prove:
+        #
+        #   1. Bitcoin funding does not exist.
+        #   2. The expected BLAKE HTLC is still funded/unspent.
+        #   3. The BLAKE refund timelock is mature.
+        #
+        btc_obs = _reconcile_observe_htlc(
+            swap,
+            "btc",
+        )
+        if btc_obs.get("status") != "absent":
+            raise RuntimeError(
+                "SECURITY FAILURE: BLAKE_FUNDED refund requires "
+                "Bitcoin funding to be independently absent; "
+                f"observed {btc_obs.get('status')}"
+            )
+
+        blake_obs = _reconcile_observe_htlc(
+            swap,
+            "blake",
+        )
+        if blake_obs.get("status") != "funded":
+            raise RuntimeError(
+                "SECURITY FAILURE: BLAKE_FUNDED refund requires "
+                "the expected BLAKE HTLC to remain confirmed "
+                "and unspent; "
+                f"observed {blake_obs.get('status')}"
+            )
+
+        blake_height = int(
+            blake_cli("getblockcount")
+        )
+        if blake_height < int(swap.blake_timeout):
+            raise RuntimeError(
+                "SECURITY FAILURE: BLAKE refund timelock "
+                "is not mature"
+            )
+
     verify_blake_contract(
         swap,
         verbose=True,
@@ -6870,6 +6949,83 @@ def nostr_market_cancellation_applies(
     return True
 
 
+
+def nostr_market_match_applies(
+    event,
+    offer_id,
+    maker_pubkey,
+):
+    import json
+
+    verify_nostr_event(event)
+
+    if event.get("kind") != 1:
+        return False
+
+    if not any(
+        len(tag) >= 2
+        and tag[0] == "t"
+        and tag[1] == "blake-swap-market-match"
+        for tag in event.get("tags", [])
+    ):
+        return False
+
+    if not any(
+        len(tag) >= 2
+        and tag[0] == "e"
+        and tag[1] == offer_id
+        for tag in event.get("tags", [])
+    ):
+        return False
+
+    if event.get("pubkey") != maker_pubkey:
+        return False
+
+    try:
+        message = json.loads(
+            event.get("content", "")
+        )
+    except Exception:
+        return False
+
+    if message.get("type") != "market-match":
+        return False
+
+    if message.get("offer_id") != offer_id:
+        return False
+
+    if message.get("maker") != maker_pubkey:
+        return False
+
+    take_id = message.get("take_id")
+
+    if (
+        not isinstance(take_id, str)
+        or len(take_id) != 64
+    ):
+        return False
+
+    try:
+        int(take_id, 16)
+    except ValueError:
+        return False
+
+    taker = message.get("taker")
+
+    if (
+        not isinstance(taker, str)
+        or len(taker) != 64
+    ):
+        return False
+
+    try:
+        int(taker, 16)
+    except ValueError:
+        return False
+
+    return True
+
+
 def nostr_derive_market_offer_state(
     offer_event,
     market_events,
@@ -6877,10 +7033,6 @@ def nostr_derive_market_offer_state(
 ):
     import time
 
-    #
-    # First establish that the object whose state we
-    # are deriving is itself a valid market offer.
-    #
     message, offer = (
         nostr_parse_market_offer_event(
             offer_event
@@ -6892,47 +7044,154 @@ def nostr_derive_market_offer_state(
     else:
         now = int(now)
 
-    if offer["expires_at"] <= now:
-        return {
-            "state": "EXPIRED",
-            "offer": offer,
-            "message": message,
-            "cancel_event_id": None,
-        }
+    expires_at = int(
+        offer["expires_at"]
+    )
 
     #
-    # Cancellation evidence is evaluated independently
-    # of where it came from. Relay, cache, database, etc.
-    # are availability mechanisms, not authorities.
+    # MATCH and CANCEL are both terminal,
+    # maker-authorized market events.
     #
-    cancellations = []
+    # Once either happened while the offer was live,
+    # later wall-clock expiry must not rewrite history.
+    #
+    terminal_events = []
+
+    #
+    # Immutable evidence lookup used by MATCH validation.
+    #
+    events_by_id = {
+        event.get("id"): event
+        for event in market_events
+        if (
+            isinstance(event, dict)
+            and isinstance(
+                event.get("id"),
+                str,
+            )
+        )
+    }
 
     for event in market_events:
         try:
+            created_at = int(
+                event.get("created_at", 0)
+            )
+
+            if created_at >= expires_at:
+                continue
+
             if nostr_market_cancellation_applies(
                 event,
                 offer["event_id"],
                 offer["maker"],
             ):
-                cancellations.append(event)
+                terminal_events.append(
+                    (
+                        created_at,
+                        event["id"],
+                        "CANCELLED",
+                        event,
+                    )
+                )
+                continue
+
+            #
+            # MATCHED requires complete offer + take + match
+            # evidence. A maker-signed but economically
+            # inconsistent match must not hide an OPEN offer.
+            #
+            try:
+                import json
+
+                match_message = json.loads(
+                    event.get(
+                        "content",
+                        "",
+                    )
+                )
+            except Exception:
+                continue
+
+            if (
+                match_message.get("type")
+                != "market-match"
+            ):
+                continue
+
+            take_id = match_message.get(
+                "take_id"
+            )
+
+            take_event = events_by_id.get(
+                take_id
+            )
+
+            if take_event is None:
+                continue
+
+            validate_market_match_evidence(
+                event,
+                offer_event,
+                take_event,
+            )
+
+            terminal_events.append(
+                (
+                    created_at,
+                    event["id"],
+                    "MATCHED",
+                    event,
+                )
+            )
+
         except Exception:
             continue
 
-    if cancellations:
-        cancellations.sort(
-            key=lambda event: (
-                event["created_at"],
-                event["id"],
+    #
+    # First valid terminal event wins.
+    #
+    # Event ID gives deterministic ordering if two
+    # terminal events share the same created_at.
+    #
+    if terminal_events:
+        terminal_events.sort(
+            key=lambda item: (
+                item[0],
+                item[1],
             )
         )
 
+        (
+            _created_at,
+            _event_id,
+            state,
+            terminal_event,
+        ) = terminal_events[0]
+
         return {
-            "state": "CANCELLED",
+            "state": state,
             "offer": offer,
             "message": message,
             "cancel_event_id": (
-                cancellations[0]["id"]
+                terminal_event["id"]
+                if state == "CANCELLED"
+                else None
             ),
+            "match_event_id": (
+                terminal_event["id"]
+                if state == "MATCHED"
+                else None
+            ),
+        }
+
+    if expires_at <= now:
+        return {
+            "state": "EXPIRED",
+            "offer": offer,
+            "message": message,
+            "cancel_event_id": None,
+            "match_event_id": None,
         }
 
     return {
@@ -6940,8 +7199,8 @@ def nostr_derive_market_offer_state(
         "offer": offer,
         "message": message,
         "cancel_event_id": None,
+        "match_event_id": None,
     }
-
 
 def nostr_cached_market_events():
     #
@@ -7007,6 +7266,42 @@ def nostr_cached_market_events():
 
     return events
 
+
+def nostr_prior_market_take(
+    offer_id,
+    taker_pubkey=None,
+):
+    """
+    Return this participant's previously signed market take
+    for offer_id, or None.
+
+    Only cryptographically verified events from the durable
+    Nostr cache are considered.
+    """
+    if taker_pubkey is None:
+        taker_pubkey = current_nostr_pubkey()
+
+    for event in nostr_cached_market_events():
+        try:
+            verify_nostr_event(event)
+
+            if event.get("pubkey") != taker_pubkey:
+                continue
+
+            message = json.loads(
+                event.get("content", "{}")
+            )
+
+            if (
+                message.get("type") == "market-take"
+                and message.get("offer_id") == offer_id
+            ):
+                return event
+
+        except Exception:
+            continue
+
+    return None
 
 
 def resolve_cached_nostr_prefix(value, expected_type=None, label="Nostr event"):
@@ -7182,6 +7477,12 @@ async def nostr_fetch_market_events_from_relay(
         "limit": max(100, limit * 4),
     }
 
+    match_filter = {
+        "kinds": [1],
+        "#t": ["blake-swap-market-match"],
+        "limit": max(100, limit * 4),
+    }
+
     events = []
 
     async with websockets.connect(
@@ -7197,6 +7498,7 @@ async def nostr_fetch_market_events_from_relay(
                     sub_id,
                     offer_filter,
                     cancel_filter,
+                    match_filter,
                 ]
             )
         )
@@ -7416,7 +7718,10 @@ def nostr_parse_market_offer_event(event):
     return message, offer
 
 
-async def nostr_fetch_market_offers(limit=50):
+async def nostr_fetch_market_states(
+    limit=50,
+    announce=True,
+):
     import asyncio
     import time
 
@@ -7454,8 +7759,10 @@ async def nostr_fetch_market_offers(limit=50):
             if not isinstance(event_id, str):
                 continue
 
-            # Same immutable Nostr event may appear
-            # on several relays. Process it once.
+            #
+            # Same immutable Nostr event may appear on
+            # several relays. Process it exactly once.
+            #
             events_by_id.setdefault(
                 event_id,
                 event,
@@ -7471,7 +7778,7 @@ async def nostr_fetch_market_offers(limit=50):
     # First establish cryptographic authenticity and
     # retain every authentic immutable market event.
     #
-    # Protocol semantics are derived separately below.
+    # Protocol meaning is derived only after that.
     #
     verified_market_events = {}
     offer_events = {}
@@ -7481,16 +7788,12 @@ async def nostr_fetch_market_offers(limit=50):
             verify_nostr_event(event)
 
             #
-            # Relay storage is disposable. Preserve
-            # authentic evidence locally.
+            # Relay storage is disposable.
+            # Preserve authentic evidence locally.
             #
             nostr_cache_event(event)
 
         except Exception:
-            #
-            # Invalid signatures/event IDs are relay
-            # garbage and never enter market state.
-            #
             continue
 
         event_id = event.get("id")
@@ -7504,9 +7807,8 @@ async def nostr_fetch_market_offers(limit=50):
         )
 
         #
-        # Only valid offer events become candidates
-        # for display. The canonical parser owns all
-        # offer-schema and economic validation.
+        # Only canonical protocol-valid offers become
+        # offer-state candidates.
         #
         try:
             nostr_parse_market_offer_event(
@@ -7520,13 +7822,47 @@ async def nostr_fetch_market_offers(limit=50):
             event,
         )
 
-    now = int(time.time())
-    offers = []
+    #
+    # Current relay reads are only discovery windows.
+    # They are not complete protocol history.
+    #
+    # Merge previously cached authentic immutable Nostr
+    # evidence before deriving canonical offer state.
+    #
+    # Disk is not authority: re-verify every cached event
+    # before allowing it to participate in state derivation.
+    #
+    for event in nostr_cached_market_events():
+        try:
+            verify_nostr_event(event)
+        except Exception:
+            continue
 
-    #
-    # The canonical state deriver now owns expiry
-    # and maker-authorized cancellation semantics.
-    #
+        event_id = event.get("id")
+
+        if not isinstance(event_id, str):
+            continue
+
+        verified_market_events.setdefault(
+            event_id,
+            event,
+        )
+
+        try:
+            nostr_parse_market_offer_event(
+                event
+            )
+        except Exception:
+            continue
+
+        offer_events.setdefault(
+            event_id,
+            event,
+        )
+
+    now = int(time.time())
+    states = []
+
     for offer_event in offer_events.values():
         try:
             derived = (
@@ -7539,14 +7875,31 @@ async def nostr_fetch_market_offers(limit=50):
         except Exception:
             continue
 
-        if derived["state"] != "OPEN":
-            continue
-
-        offers.append(
+        offer = dict(
             derived["offer"]
         )
 
-    offers.sort(
+        offer["state"] = (
+            derived["state"]
+        )
+
+        offer["cancel_event_id"] = (
+            derived.get(
+                "cancel_event_id"
+            )
+        )
+
+        offer["match_event_id"] = (
+            derived.get(
+                "match_event_id"
+            )
+        )
+
+        states.append(
+            offer
+        )
+
+    states.sort(
         key=lambda x: (
             x["created_at"],
             x["event_id"],
@@ -7554,16 +7907,88 @@ async def nostr_fetch_market_offers(limit=50):
         reverse=True,
     )
 
-    print(
-        "Nostr market read:",
-        len(events_by_id),
-        "unique event(s) from",
-        f"{successful_relays}/"
-        f"{len(NOSTR_RELAYS)} relay(s)",
+    if announce:
+        print(
+            "Nostr market read:",
+            len(events_by_id),
+            "unique event(s) from",
+            f"{successful_relays}/"
+            f"{len(NOSTR_RELAYS)} relay(s)",
+        )
+
+    return states
+
+
+async def nostr_fetch_market_offers(limit=50):
+    #
+    # Backward-compatible human-market API:
+    # only currently OPEN offers are returned.
+    #
+    states = await nostr_fetch_market_states(
+        limit=limit,
+        announce=True,
     )
 
-    return offers
+    return [
+        item
+        for item in states
+        if item["state"] == "OPEN"
+    ]
 
+
+
+
+def command_market_state(args):
+    """
+    Emit canonical market offer state.
+
+    This is the machine-readable boundary for UIs and
+    other local tooling.  Clients must not re-derive
+    OPEN / MATCHED / CANCELLED / EXPIRED themselves.
+    """
+    import asyncio
+    import json
+
+    offers = asyncio.run(
+        nostr_fetch_market_states(
+            limit=args.limit,
+            announce=False,
+        )
+    )
+
+    result = {
+        "offers": offers,
+    }
+
+    if args.json:
+        print(
+            json.dumps(
+                result,
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return
+
+    print()
+    print("BLAKE/BTC MARKET STATE")
+    print("======================")
+    print()
+
+    if not offers:
+        print("No valid market offers found.")
+        return
+
+    for item in offers:
+        print(
+            item["event_id"][:12],
+            item["state"],
+            item["direction"],
+            item["blake_amount"],
+            "BLAKE",
+            f'{item["btc_sats"]:,}',
+            "sats",
+        )
 
 
 def command_market(args):
@@ -8567,6 +8992,7 @@ async def nostr_fetch_market_takes(
     limit=100,
     extra_events=None,
     allow_expired=False,
+    allow_matched=False,
 ):
     import asyncio
     import time
@@ -8680,6 +9106,10 @@ async def nostr_fetch_market_takes(
         and not (
             allow_expired
             and derived["state"] == "EXPIRED"
+        )
+        and not (
+            allow_matched
+            and derived["state"] == "MATCHED"
         )
     ):
         raise RuntimeError(
@@ -8831,6 +9261,7 @@ def command_market_takes(args):
             nostr_fetch_market_takes(
                 args.offer_id,
                 limit=args.limit,
+                allow_matched=True,
             )
         )
     )
@@ -9461,28 +9892,38 @@ async def nostr_fetch_market_match_events_from_relay(
     return events
 
 
-async def validate_market_match_event(
+
+def validate_market_match_evidence(
     event,
-    expected_taker_pubkey,
+    offer_event,
+    take_event,
+    expected_taker_pubkey=None,
 ):
-    import asyncio
+    """
+    Pure validation of one market-match against its exact
+    referenced offer and take.
+
+    No relay access occurs here.
+
+    This is the canonical definition of a protocol-valid
+    MATCHED terminal event.
+    """
+    import json
 
     verify_nostr_event(event)
 
-    #
-    # A valid signature is necessary but does not by
-    # itself make this a protocol-valid market match.
-    #
     if event.get("kind") != 1:
         raise RuntimeError(
             "Market match Nostr kind is not 1"
         )
 
+    tags = event.get("tags", [])
+
     if not any(
         len(tag) >= 2
         and tag[0] == "t"
         and tag[1] == "blake-swap-market-match"
-        for tag in event.get("tags", [])
+        for tag in tags
     ):
         raise RuntimeError(
             "Market match is missing expected "
@@ -9503,9 +9944,7 @@ async def validate_market_match_event(
             "Event is not a market match"
         )
 
-    version = message.get(
-        "version"
-    )
+    version = message.get("version")
 
     if version not in (1, 2):
         raise RuntimeError(
@@ -9514,7 +9953,7 @@ async def validate_market_match_event(
 
     if (
         message.get("created_at")
-        != event["created_at"]
+        != event.get("created_at")
     ):
         raise RuntimeError(
             "Market match timestamp mismatch"
@@ -9530,16 +9969,10 @@ async def validate_market_match_event(
             "Market match quote mismatch"
         )
 
-    #
-    # v1 has one implicit economic direction.
-    # v2 must explicitly commit to direction and
-    # the roles deterministically derived from it.
-    #
     if version == 1:
         direction = (
             MARKET_DIRECTION_BLAKE_FOR_BTC
         )
-
         roles = market_protocol_roles(
             direction
         )
@@ -9578,85 +10011,75 @@ async def validate_market_match_event(
             len(tag) >= 2
             and tag[0] == "direction"
             and tag[1] == direction
-            for tag in event.get("tags", [])
+            for tag in tags
         ):
             raise RuntimeError(
                 "Market match direction does not "
                 "match Nostr direction tag"
             )
 
-    offer_id = message.get(
-        "offer_id"
+    offer_id = message.get("offer_id")
+    take_id = message.get("take_id")
+    swap_id = message.get("swap_id")
+
+    def require_hex(value, length, label):
+        if (
+            not isinstance(value, str)
+            or len(value) != length
+        ):
+            raise RuntimeError(
+                f"Invalid {label}"
+            )
+
+        try:
+            int(value, 16)
+        except ValueError as e:
+            raise RuntimeError(
+                f"{label} is not hex"
+            ) from e
+
+    require_hex(
+        offer_id,
+        64,
+        "market offer ID",
     )
 
-    take_id = message.get(
-        "take_id"
+    require_hex(
+        take_id,
+        64,
+        "market take ID",
     )
 
-    swap_id = message.get(
-        "swap_id"
+    require_hex(
+        swap_id,
+        12,
+        "atomic swap ID",
     )
 
-    if (
-        not isinstance(offer_id, str)
-        or len(offer_id) != 64
-    ):
+    if offer_event.get("id") != offer_id:
         raise RuntimeError(
-            "Invalid market offer ID"
+            "Market match references a different offer"
         )
 
-    if (
-        not isinstance(take_id, str)
-        or len(take_id) != 64
-    ):
+    if take_event.get("id") != take_id:
         raise RuntimeError(
-            "Invalid market take ID"
-        )
-
-    if (
-        not isinstance(swap_id, str)
-        or len(swap_id) != 12
-    ):
-        raise RuntimeError(
-            "Invalid atomic swap ID"
-        )
-
-    try:
-        int(swap_id, 16)
-    except ValueError as e:
-        raise RuntimeError(
-            "Atomic swap ID is not hex"
-        ) from e
-
-    if message.get("taker") != expected_taker_pubkey:
-        raise RuntimeError(
-            "Market match is for another taker"
+            "Market match references a different take"
         )
 
     if not any(
         len(tag) >= 2
         and tag[0] == "d"
         and tag[1] == swap_id
-        for tag in event.get("tags", [])
+        for tag in tags
     ):
         raise RuntimeError(
             "Market match swap_id does not match "
             "Nostr d-tag"
         )
 
-    if not any(
-        len(tag) >= 2
-        and tag[0] == "p"
-        and tag[1] == expected_taker_pubkey
-        for tag in event["tags"]
-    ):
-        raise RuntimeError(
-            "Market match does not tag Bob"
-        )
-
     e_refs = {
         tag[1]
-        for tag in event["tags"]
+        for tag in tags
         if (
             len(tag) >= 2
             and tag[0] == "e"
@@ -9675,21 +10098,8 @@ async def validate_market_match_event(
             "the take"
         )
 
-    offer_event, take_event = await asyncio.gather(
-        nostr_fetch_event_by_id(
-            offer_id
-        ),
-        nostr_fetch_event_by_id(
-            take_id
-        ),
-    )
-
     #
-    # Validate the referenced offer through the
-    # canonical market-offer parser.
-    #
-    # Do not maintain a second definition of a
-    # protocol-valid offer inside the match validator.
+    # Canonical offer validation.
     #
     offer_message, parsed_offer = (
         nostr_parse_market_offer_event(
@@ -9697,20 +10107,21 @@ async def validate_market_match_event(
         )
     )
 
+    maker = parsed_offer["maker"]
+
+    if event.get("pubkey") != maker:
+        raise RuntimeError(
+            "SECURITY FAILURE: market match "
+            "was not signed by original maker"
+        )
+
+    if message.get("maker") != maker:
+        raise RuntimeError(
+            "Market match maker mismatch"
+        )
+
     #
-    # Validate Bob's referenced take through the same
-    # canonical take validator used by market-takes.
-    #
-    # This binds:
-    #   signature
-    #   kind / t-tag
-    #   JSON schema
-    #   exact offer ID
-    #   maker identity
-    #   economic terms
-    #   timestamp
-    #   e-tag
-    #   p-tag
+    # Canonical take validation.
     #
     take_item = nostr_validate_market_take_event(
         take_event,
@@ -9719,10 +10130,32 @@ async def validate_market_match_event(
         offer_id,
     )
 
-    #
-    # Offer, take and match must all resolve to
-    # exactly the same economic direction and roles.
-    #
+    taker = take_item["taker"]
+
+    if message.get("taker") != taker:
+        raise RuntimeError(
+            "Market match taker disagrees "
+            "with referenced take"
+        )
+
+    if (
+        expected_taker_pubkey is not None
+        and taker != expected_taker_pubkey
+    ):
+        raise RuntimeError(
+            "Market match is for another taker"
+        )
+
+    if not any(
+        len(tag) >= 2
+        and tag[0] == "p"
+        and tag[1] == taker
+        for tag in tags
+    ):
+        raise RuntimeError(
+            "Market match does not tag taker"
+        )
+
     if (
         take_item["direction"]
         != direction
@@ -9750,27 +10183,20 @@ async def validate_market_match_event(
             "with referenced take"
         )
 
-    maker = offer_event["pubkey"]
-
-    if event["pubkey"] != maker:
-        raise RuntimeError(
-            "SECURITY FAILURE: market match "
-            "was not signed by original maker"
+    try:
+        match_blake = float(
+            message["blake_amount"]
         )
-
-    if message.get("maker") != maker:
-        raise RuntimeError(
-            "Market match maker mismatch"
+        match_sats = int(
+            message["btc_sats"]
         )
-
-    if take_item["taker"] != expected_taker_pubkey:
+    except Exception as e:
         raise RuntimeError(
-            "SECURITY FAILURE: referenced take "
-            "was not signed by current Bob"
-        )
+            "Market match has invalid economic terms"
+        ) from e
 
     if (
-        float(message["blake_amount"])
+        match_blake
         != float(
             offer_message["blake_amount"]
         )
@@ -9780,7 +10206,7 @@ async def validate_market_match_event(
         )
 
     if (
-        int(message["btc_sats"])
+        match_sats
         != int(
             offer_message["btc_sats"]
         )
@@ -9789,8 +10215,9 @@ async def validate_market_match_event(
             "Match changed BTC terms"
         )
 
-    # Alice must have matched Bob only after Bob
-    # signed the take.
+    #
+    # A maker cannot select a take before that take exists.
+    #
     if (
         int(event["created_at"])
         < int(take_event["created_at"])
@@ -9799,14 +10226,18 @@ async def validate_market_match_event(
             "Market match predates the take"
         )
 
-    # The match itself must have happened before
-    # the advertised offer expired.
+    #
+    # Canonical expiry boundary:
+    #
+    # At expires_at the offer is already EXPIRED.
+    # Match must therefore be strictly earlier.
+    #
     if (
         int(event["created_at"])
-        > int(offer_message["expires_at"])
+        >= int(offer_message["expires_at"])
     ):
         raise RuntimeError(
-            "Market match was created after "
+            "Market match was created at or after "
             "offer expiry"
         )
 
@@ -9816,7 +10247,7 @@ async def validate_market_match_event(
         "take_id": take_id,
         "swap_id": swap_id,
         "maker": maker,
-        "taker": expected_taker_pubkey,
+        "taker": taker,
         "blake_amount": float(
             offer_message["blake_amount"]
         ),
@@ -9828,22 +10259,93 @@ async def validate_market_match_event(
             roles["maker_role"],
         "taker_role":
             roles["taker_role"],
-        "created_at": event[
-            "created_at"
-        ],
+        "created_at":
+            event["created_at"],
     }
 
 
+async def validate_market_match_event(
+    event,
+    expected_taker_pubkey,
+):
+    """
+    Network wrapper around the canonical pure
+    market-match evidence validator.
+    """
+    import asyncio
+    import json
+
+    verify_nostr_event(event)
+
+    try:
+        message = json.loads(
+            event["content"]
+        )
+    except Exception as e:
+        raise RuntimeError(
+            "Market match contains invalid JSON"
+        ) from e
+
+    offer_id = message.get(
+        "offer_id"
+    )
+
+    take_id = message.get(
+        "take_id"
+    )
+
+    if (
+        not isinstance(offer_id, str)
+        or len(offer_id) != 64
+    ):
+        raise RuntimeError(
+            "Invalid market offer ID"
+        )
+
+    if (
+        not isinstance(take_id, str)
+        or len(take_id) != 64
+    ):
+        raise RuntimeError(
+            "Invalid market take ID"
+        )
+
+    offer_event, take_event = await asyncio.gather(
+        nostr_fetch_event_by_id(
+            offer_id
+        ),
+        nostr_fetch_event_by_id(
+            take_id
+        ),
+    )
+
+    return validate_market_match_evidence(
+        event,
+        offer_event,
+        take_event,
+        expected_taker_pubkey=(
+            expected_taker_pubkey
+        ),
+    )
+
+
 async def nostr_fetch_market_matches(
-    bob_pubkey,
+    expected_taker_pubkey,
     limit=100,
 ):
+    """
+    Discover and fully validate market-match events
+    addressed to one taker identity.
+
+    Relay results are discovery only. Every candidate
+    is cryptographically and protocol validated before
+    it is returned.
+    """
     import asyncio
 
     tasks = [
-        nostr_fetch_market_match_events_from_relay(
+        nostr_fetch_market_events_from_relay(
             relay,
-            bob_pubkey,
             limit=limit,
         )
         for relay in NOSTR_RELAYS
@@ -9855,29 +10357,18 @@ async def nostr_fetch_market_matches(
     )
 
     events_by_id = {}
-    successful_relays = 0
 
-    for relay, result in zip(
-        NOSTR_RELAYS,
-        results,
-    ):
+    for result in results:
         if isinstance(result, Exception):
             continue
-
-        successful_relays += 1
 
         for event in result:
             if not isinstance(event, dict):
                 continue
 
-            event_id = event.get(
-                "id"
-            )
+            event_id = event.get("id")
 
-            if not isinstance(
-                event_id,
-                str,
-            ):
+            if not isinstance(event_id, str):
                 continue
 
             events_by_id.setdefault(
@@ -9886,15 +10377,13 @@ async def nostr_fetch_market_matches(
             )
 
     #
-    # Merge durable authentic Nostr evidence with
-    # whatever the relays returned.
-    #
-    # The cache is an evidence store, not a semantic
-    # market index.  validate_market_match_event()
-    # decides which candidates are valid matches.
+    # Cached authentic events may contain older matches
+    # no longer present in a bounded relay window.
     #
     for event in nostr_cached_market_events():
-        if not isinstance(event, dict):
+        try:
+            verify_nostr_event(event)
+        except Exception:
             continue
 
         event_id = event.get("id")
@@ -9907,49 +10396,30 @@ async def nostr_fetch_market_matches(
             event,
         )
 
-    if (
-        successful_relays == 0
-        and not events_by_id
-    ):
-        raise RuntimeError(
-            "Could not query any configured "
-            "Nostr relay for market matches and "
-            "no cached evidence is available"
-        )
-
-    valid = []
+    matches = []
 
     for event in events_by_id.values():
         try:
-            item = (
-                await validate_market_match_event(
-                    event,
-                    bob_pubkey,
-                )
+            item = await validate_market_match_event(
+                event,
+                expected_taker_pubkey,
             )
-
-            valid.append(item)
-
         except Exception:
             continue
 
-    valid.sort(
-        key=lambda x: (
-            x["created_at"],
-            x["event_id"],
+        matches.append(
+            item
+        )
+
+    matches.sort(
+        key=lambda item: (
+            item["created_at"],
+            item["event_id"],
         ),
         reverse=True,
     )
 
-    print(
-        "Nostr match read:",
-        len(events_by_id),
-        "unique event(s) from",
-        f"{successful_relays}/"
-        f"{len(NOSTR_RELAYS)} relay(s)",
-    )
-
-    return valid
+    return matches
 
 
 def command_market_matches(args):
@@ -12304,6 +12774,61 @@ def command_take_market_offer(args):
             "Offer expired before it could be taken"
         )
 
+        # Do not publish another take for an offer this
+    # participant has already taken.
+    prior_take = nostr_prior_market_take(
+        args.offer_id
+    )
+
+
+    if prior_take is not None:
+        print()
+        print("MARKET OFFER ALREADY TAKEN")
+        print("==========================")
+        print("offer id:", args.offer_id)
+        print("take id: ", prior_take["id"])
+        print("taker:   ", prior_take["pubkey"])
+        print()
+        print(
+            "PASS: existing signed take reused"
+        )
+        print(
+            "PASS: no duplicate Nostr event created"
+        )
+        print(
+            "PASS: no money has moved"
+        )
+        print()
+        print(
+            "Retrying publication of the exact "
+            "same signed take..."
+        )
+
+        try:
+            asyncio.run(
+                nostr_publish_event(
+                    prior_take
+                )
+            )
+        except RuntimeError as e:
+            print()
+            print(
+                "WARNING: relay publication was "
+                "not confirmed"
+            )
+            print(str(e))
+            print()
+            print(
+                "PASS: original signed take remains "
+                "durably cached"
+            )
+            print(
+                "PASS: retry did not create a new "
+                "take event"
+            )
+
+        return
+
     take_event, take_message = (
         build_market_take_event(
             original,
@@ -12336,10 +12861,10 @@ def command_take_market_offer(args):
     )
     print()
     print(
-        "PASS: offer was open when Bob took it"
+        "PASS: offer was open when taker took it"
     )
     print(
-        "PASS: take request is signed by Bob"
+        "PASS: take request is signed by taker"
     )
     print(
         "PASS: no money has moved"
@@ -13422,6 +13947,19 @@ def _reconcile_next_action(swap, role, blake, btc, blake_height, btc_height):
             return "fund-blake", "counterparty is pinned and no BLAKE funding exists"
 
         if blake.get("status") == "funded" and btc.get("status") == "absent":
+            if blake_height >= int(swap.blake_timeout):
+                return (
+                    "refund-blake",
+                    "Bitcoin was never funded and BLAKE refund is mature",
+                )
+
+            if btc_height >= int(swap.btc_timeout):
+                return (
+                    "wait",
+                    "Bitcoin funding window has closed; "
+                    "waiting for BLAKE refund maturity",
+                )
+
             return "wait", "BLAKE is funded; protocol Bob must fund Bitcoin"
 
         if btc.get("status") == "funded":
@@ -14110,52 +14648,11 @@ def command_next(args):
     ]
 
     # Do not create another take for an offer we have already taken.
-    # Search authenticated cached market-take events signed by us.
-    prior_take_offer_ids = set()
-
-    try:
-        cached_events = nostr_cached_market_events()
-    except Exception:
-        cached_events = []
-
-    for event in cached_events:
-        try:
-            verify_nostr_event(event)
-        except Exception:
-            continue
-
-        if event.get("pubkey") != me:
-            continue
-
-        tags = event.get("tags", [])
-
-        if not any(
-            len(tag) >= 2
-            and tag[0] == "t"
-            and tag[1] == "blake-swap-market-take"
-            for tag in tags
-        ):
-            continue
-
-        try:
-            import json as _json
-            message = _json.loads(event.get("content", "{}"))
-        except Exception:
-            continue
-
-        if message.get("type") != "market-take":
-            continue
-
-        offer_id = message.get("offer_id")
-
-        if (
-            isinstance(offer_id, str)
-            and len(offer_id) == 64
-        ):
-            prior_take_offer_ids.add(offer_id)
-
     for offer in eligible_offers:
-        if offer["event_id"] in prior_take_offer_ids:
+        if nostr_prior_market_take(
+            offer["event_id"],
+            taker_pubkey=me,
+        ) is not None:
             continue
 
         actions.append(
@@ -15927,6 +16424,19 @@ def command_run(args):
                 print("reason: BLAKE HTLC is not confirmed and unspent")
                 return
 
+            if (
+                report.get("checkpoint_state")
+                == State.BLAKE_FUNDED.value
+                and report.get("btc", {}).get("status") != "absent"
+            ):
+                print()
+                print("RUN RESULT: refusing automatic refund-blake")
+                print(
+                    "reason: pre-BTC refund requires "
+                    "Bitcoin funding to be independently absent"
+                )
+                return
+
             if int(report.get("timeouts", {}).get("blake_blocks_remaining", 1)) > 0:
                 print()
                 print("RUN RESULT: refusing automatic refund-blake")
@@ -16206,6 +16716,33 @@ def main():
 
     p.set_defaults(
         func=command_market
+    )
+
+    #
+    # Canonical machine-readable market state.
+    #
+    p = sub.add_parser(
+        "market-state",
+        help=(
+            "Show canonical OPEN / MATCHED / "
+            "CANCELLED / EXPIRED market state"
+        ),
+    )
+
+    p.add_argument(
+        "--limit",
+        type=int,
+        default=50,
+    )
+
+    p.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit machine-readable JSON",
+    )
+
+    p.set_defaults(
+        func=command_market_state
     )
 
     # Public marketplace advertisement.

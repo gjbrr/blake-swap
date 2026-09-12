@@ -132,6 +132,17 @@ def require_rejected_cleanly(
     )
 
 
+def protocol_payload(data):
+    if (
+        isinstance(data, dict)
+        and data.get("_file_transport_version") == 2
+        and isinstance(data.get("message"), dict)
+    ):
+        return data["message"]
+
+    return data
+
+
 def mutate_offer(
     path,
     mutator,
@@ -140,7 +151,9 @@ def mutate_offer(
         path.read_text()
     )
 
-    mutator(data)
+    payload = protocol_payload(data)
+
+    mutator(payload)
 
     path.write_text(
         json.dumps(
@@ -389,6 +402,7 @@ def test_short_recovery_gap():
     message = json.loads(
         path.read_text()
     )
+    message = protocol_payload(message)
 
     policy = TimeoutPolicy()
 
@@ -477,6 +491,7 @@ def test_dishonest_metadata():
     message = json.loads(
         path.read_text()
     )
+    message = protocol_payload(message)
 
     btc_window = int(
         message[

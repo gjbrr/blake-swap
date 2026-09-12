@@ -73,6 +73,14 @@ echo "== Autonomous agents: kill / restart / recovery =="
 python3 tests/swap_autonomous_agents_tests.py
 
 echo
+echo "== Market state =="
+python3 tests/market_state_tests.py
+
+echo
+echo "== Pre-BTC BLAKE refund =="
+python3 tests/pre_btc_refund_tests.py
+
+echo
 echo "============================================================"
-echo "ALL V1.5 TEST SUITES PASSED"
+echo "ALL BLAKE SWAP TEST SUITES PASSED"
 echo "============================================================"

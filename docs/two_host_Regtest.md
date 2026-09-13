@@ -1,3 +1,9 @@
+# HISTORICAL CHECKPOINT — NOT THE CURRENT SETUP GUIDE
+
+This file records an earlier Laptop/Start9 topology. For the current independently reproduced two-host procedure, see `docs/REGTEST_TWO_HOST.md`.
+
+---
+
 Laptop / Alice
   ├─ Alice state
   ├─ Alice Nostr key

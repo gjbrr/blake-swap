@@ -1,0 +1,7 @@
+# Runtime Python dependencies for the reference implementation.
+#
+# Versions below were used successfully during the
+# September 2026 two-host clean-room reproduction.
+
+coincurve==21.0.0
+websockets==17.1

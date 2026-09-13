@@ -1,69 +1,31 @@
-# BTC ↔ BLAKE Atomic Swap Prototype
+# BTC ↔ BLAKE Atomic Swap
 
-Experimental peer-to-peer atomic swaps between Bitcoin and the BLAKE
-Bitcoin fork using Bitcoin-style HTLCs.
+Experimental peer-to-peer atomic swaps between Bitcoin and the BLAKE Bitcoin
+fork using Bitcoin-style HTLCs and Nostr coordination.
 
-**Status:** protocol-hardened regtest prototype (v1.5)
+**Status:** two-host regtest reference implementation, reproduced successfully
+in both physical directions.
 
 **Do not use with valuable funds.**
 
-## What this project demonstrates
+## What has been demonstrated
 
-The prototype implements and tests a BTC ↔ BLAKE atomic swap in which:
+The reference implementation has completed BTC ↔ BLAKE atomic swaps across two
+independently configured Linux hosts with:
 
-1. Alice offers BLAKE in exchange for BTC.
-2. Alice chooses a secret `S` and publishes `H = SHA256(S)`.
-3. Alice locks BLAKE in an HTLC.
-4. Bob independently verifies the BLAKE contract.
-5. Bob locks BTC in an HTLC using the same hash.
-6. Alice claims the BTC using `S`.
-7. Bitcoin reveals `S` in the claim witness.
-8. Bob independently discovers `S` from Bitcoin.
-9. Bob verifies `SHA256(S) == H`.
-10. Bob claims the BLAKE.
+- independent Bitcoin and BLAKE nodes,
+- separate wallets and participant state,
+- separate Nostr identities,
+- authenticated market coordination,
+- explicit initial BLAKE funding,
+- independent HTLC verification,
+- chain-based restart and recovery,
+- Bitcoin revelation of the hashlock secret,
+- Bob recovering that secret directly from Bitcoin,
+- settlement without requiring Nostr economic messages,
+- dynamic Alice/Bob role assignment in both physical directions.
 
-If settlement does not complete, the two contracts provide timeout refund
-paths.
-
-The secret is never transported through Nostr or the protocol messaging
-layer.
-
-## Design model
-
-> Relays provide availability. Keys provide identity. Blockchains provide
-> settlement. Each participant provides their own judgment of safety.
-
-Nostr is used for discovery, identity, and coordination.
-
-Bitcoin and BLAKE are authoritative for economic state.
-
-After negotiation, protocol messages are conveniences rather than a
-requirement for settlement liveness: participants can reconstruct funding
-and settlement state from their own nodes.
-
-## Current architecture
+The practical clean-room reproduction baseline is:
 
 ```text
-                  Nostr relays
-               discovery / identity
-                       |
-          +------------+------------+
-          |                         |
-       Alice agent                Bob agent
-          |                         |
-          +-------- protocol -------+
-          |                         |
-     BLAKE node                Bitcoin node
-          \                         /
-           \---- atomic HTLCs -----/
-
-
-
-
-
-
-
-
-'
-eof
-OEF
+3ac62777eb3e47a5ed99f7000f4f4015a0a6c318

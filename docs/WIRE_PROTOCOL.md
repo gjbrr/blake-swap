@@ -1,7 +1,7 @@
 # BTC ↔ BLAKE Atomic Swap Wire Protocol
 
 **Status:** Experimental Draft 0.1  
-**Reference implementation:** `v1.5-regtest`
+**Reference implementation:** `3ac62777` (two-host clean-room baseline)
 
 This document specifies the message formats used by the reference
 BTC ↔ BLAKE atomic-swap implementation.

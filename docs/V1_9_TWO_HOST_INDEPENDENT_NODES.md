@@ -1,3 +1,9 @@
+# HISTORICAL CHECKPOINT — NOT THE CURRENT SETUP GUIDE
+
+This file records an earlier v1.9 development checkpoint. For the current independently reproduced two-host procedure, see `docs/REGTEST_TWO_HOST.md`.
+
+---
+
 cd ~/blake-swap
 
 git status

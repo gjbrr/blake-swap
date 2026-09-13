@@ -1,7 +1,7 @@
 # BTC ↔ BLAKE Atomic Swap Protocol
 
 **Status:** Experimental Draft 0.2  
-**Reference implementation checkpoint:** `v1.5-regtest`
+**Reference implementation checkpoint:** `3ac62777` (two-host clean-room baseline)
 
 This document specifies the protocol behavior implemented and tested by the
 BTC ↔ BLAKE atomic-swap prototype.

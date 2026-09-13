@@ -4,12 +4,16 @@ set -euo pipefail
 echo "BLAKE SWAP ENVIRONMENT"
 echo "======================"
 echo "role:        ${BLAKE_SWAP_ROLE:-<unset>}"
+echo "wallet:      ${BLAKE_SWAP_CHAIN_WALLET:-<unset>}"
 echo "state dir:   ${BLAKE_SWAP_STATE_DIR:-<unset>}"
 echo "key dir:     ${BLAKE_SWAP_NOSTR_KEY_DIR:-<unset>}"
+echo "key file:    ${BLAKE_SWAP_PARTICIPANT_KEY_FILE:-<unset>}"
 echo "transport:   ${BLAKE_SWAP_TRANSPORT:-<unset>}"
 echo "relays:      ${BLAKE_SWAP_NOSTR_RELAYS:-<unset>}"
 echo "btc cli:     ${BLAKE_SWAP_BTC_CLI:-<default>}"
+echo "btc datadir: ${BLAKE_SWAP_BTC_DATADIR:-<default>}"
 echo "blake cli:   ${BLAKE_SWAP_BLAKE_CLI:-<default>}"
+echo "blake data:  ${BLAKE_SWAP_BLAKE_DATADIR:-<default>}"
 echo
 
 if [[ -z "${BLAKE_SWAP_ROLE:-}" ]]; then

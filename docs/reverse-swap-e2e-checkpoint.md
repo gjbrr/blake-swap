@@ -1,3 +1,9 @@
+# HISTORICAL E2E CHECKPOINT
+
+This file preserves evidence from an earlier reverse-swap run. For the current clean-room reproduction procedure, see `docs/REGTEST_TWO_HOST.md`.
+
+---
+
 # Reverse Swap E2E Checkpoint
 
 Successful swap:

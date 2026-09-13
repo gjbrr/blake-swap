@@ -10310,14 +10310,39 @@ async def validate_market_match_event(
             "Invalid market take ID"
         )
 
-    offer_event, take_event = await asyncio.gather(
-        nostr_fetch_event_by_id(
-            offer_id
-        ),
-        nostr_fetch_event_by_id(
-            take_id
-        ),
-    )
+    # Immutable referenced evidence is safe to satisfy from the
+    # verified local cache.  nostr_load_cached_event() re-verifies
+    # the signature and exact event-ID binding on every use.
+    #
+    # Only fall back to relay lookup for cache misses.  This avoids
+    # repeated network round trips when validating historical matches.
+    offer_event = nostr_load_cached_event(offer_id)
+    take_event = nostr_load_cached_event(take_id)
+
+    missing = []
+
+    if offer_event is None:
+        missing.append(("offer", offer_id))
+
+    if take_event is None:
+        missing.append(("take", take_id))
+
+    if missing:
+        fetched = await asyncio.gather(
+            *[
+                nostr_fetch_event_by_id(event_id)
+                for _, event_id in missing
+            ]
+        )
+
+        for (kind, _), fetched_event in zip(
+            missing,
+            fetched,
+        ):
+            if kind == "offer":
+                offer_event = fetched_event
+            else:
+                take_event = fetched_event
 
     return validate_market_match_evidence(
         event,
@@ -10332,6 +10357,7 @@ async def validate_market_match_event(
 async def nostr_fetch_market_matches(
     expected_taker_pubkey,
     limit=100,
+    dependency_fetch_after=None,
 ):
     """
     Discover and fully validate market-match events
@@ -10344,8 +10370,9 @@ async def nostr_fetch_market_matches(
     import asyncio
 
     tasks = [
-        nostr_fetch_market_events_from_relay(
+        nostr_fetch_market_match_events_from_relay(
             relay,
+            expected_taker_pubkey,
             limit=limit,
         )
         for relay in NOSTR_RELAYS
@@ -10399,6 +10426,75 @@ async def nostr_fetch_market_matches(
     matches = []
 
     for event in events_by_id.values():
+        #
+        # `dependency_fetch_after` is a live-work optimization only.
+        #
+        # Older signed matches are not declared invalid.  Explicit
+        # historical commands remain exhaustive because they leave this
+        # argument unset.
+        #
+        # For `next`, however, an event already outside the automatic
+        # coordination window cannot become automatic work.  If its
+        # referenced offer/take evidence is also missing from the
+        # verified local cache, avoid going back to the relays merely to
+        # reconstruct historical evidence.
+        #
+        if dependency_fetch_after is not None:
+            try:
+                verify_nostr_event(event)
+
+                created_at = int(
+                    event.get("created_at", 0)
+                )
+
+                if created_at < int(dependency_fetch_after):
+                    message = json.loads(
+                        event["content"]
+                    )
+
+                    offer_id = message.get(
+                        "offer_id"
+                    )
+                    take_id = message.get(
+                        "take_id"
+                    )
+
+                    if (
+                        isinstance(offer_id, str)
+                        and len(offer_id) == 64
+                        and isinstance(take_id, str)
+                        and len(take_id) == 64
+                    ):
+                        try:
+                            offer_cached = (
+                                nostr_load_cached_event(
+                                    offer_id
+                                )
+                                is not None
+                            )
+                            take_cached = (
+                                nostr_load_cached_event(
+                                    take_id
+                                )
+                                is not None
+                            )
+                        except Exception:
+                            offer_cached = False
+                            take_cached = False
+
+                        if not (
+                            offer_cached
+                            and take_cached
+                        ):
+                            continue
+
+            except Exception:
+                #
+                # Malformed candidates still fall through to the
+                # canonical validator below, which remains authoritative.
+                #
+                pass
+
         try:
             item = await validate_market_match_event(
                 event,
@@ -14408,12 +14504,19 @@ def command_reconcile(args):
     print("known: ", "yes" if report["secret"]["known"] else "no")
     print("source:", report["secret"]["source"])
 
-    print()
-    print("TIMEOUT DISTANCE")
-    print("----------------")
-    print("BTC blocks:  ", report["timeouts"]["btc_blocks_remaining"])
-    print("BLAKE blocks:", report["timeouts"]["blake_blocks_remaining"])
+    timeouts = report.get("timeouts")
 
+    if timeouts:
+        print()
+        print("TIMEOUT DISTANCE")
+        print("----------------")
+        print("BTC blocks:  ", timeouts["btc_blocks_remaining"])
+        print("BLAKE blocks:", timeouts["blake_blocks_remaining"])
+    else:
+        print()
+        print("TIMEOUT DISTANCE")
+        print("----------------")
+        print("not evaluated")
 
     readiness = report.get("readiness", {})
 
@@ -14744,6 +14847,9 @@ def command_next(args):
                 nostr_fetch_market_matches(
                     me,
                     limit=200,
+                    dependency_fetch_after=(
+                        now - freshness_seconds
+                    ),
                 )
             )
     except Exception:
@@ -14861,12 +14967,20 @@ def command_next(args):
             # referenced match, then enforce the same 60-minute
             # automatic-coordination window used elsewhere by next.
             try:
-                with contextlib.redirect_stdout(io.StringIO()):
-                    match_event = asyncio.run(
-                        nostr_fetch_event_by_id(
-                            match_id
+                # Durable selections reference immutable signed match
+                # events by exact ID. Prefer the verified local cache;
+                # use the relays only when that exact event is absent.
+                match_event = nostr_load_cached_event(
+                    match_id
+                )
+
+                if match_event is None:
+                    with contextlib.redirect_stdout(io.StringIO()):
+                        match_event = asyncio.run(
+                            nostr_fetch_event_by_id(
+                                match_id
+                            )
                         )
-                    )
 
                 verify_nostr_event(match_event)
 
@@ -14965,15 +15079,10 @@ def command_next(args):
     # C. Valid takes on the current participant's still-open offers.
     #    Accepting a take binds negotiation but moves no funds.
     # --------------------------------------------------------------
-    try:
-        with contextlib.redirect_stdout(io.StringIO()):
-            offers = asyncio.run(
-                nostr_fetch_market_offers(
-                    limit=100,
-                )
-            )
-    except Exception:
-        offers = []
+    # Reuse the market snapshot already fetched in section A.
+    # `next` is one coordination pass; fetching the same open-offer
+    # view twice only adds relay and event-loop overhead.
+    offers = open_offers
 
     for offer in offers:
         if offer.get("maker") != me:
@@ -15256,6 +15365,36 @@ def command_next(args):
             swap.nostr_bob_pub,
         }:
             continue
+
+        # Fast-path terminal pre-BTC refunds for the work queue only.
+        #
+        # `build_reconcile_report()` remains the full forensic view and
+        # still independently evaluates both chains.  But `next` only
+        # needs to know whether post-funding work is available.
+        #
+        # While the exact final BLAKE refund remains confirmed, a
+        # BLAKE_REFUNDED swap cannot have resumable settlement work.
+        # If that terminal evidence is missing or ambiguous, fall
+        # through to full reconciliation so reorg recovery remains
+        # conservative.
+        if swap.state == State.BLAKE_REFUNDED.value:
+            try:
+                with contextlib.redirect_stdout(io.StringIO()):
+                    terminal_blake = _reconcile_observe_htlc(
+                        swap,
+                        "blake",
+                    )
+            except Exception:
+                terminal_blake = None
+
+            if (
+                isinstance(terminal_blake, dict)
+                and terminal_blake.get("status") == "spent"
+                and terminal_blake.get("branch") == "refund"
+                and terminal_blake.get("spend_txid")
+                    == swap.blake_refund_txid
+            ):
+                continue
 
         try:
             with contextlib.redirect_stdout(io.StringIO()):
@@ -15673,8 +15812,10 @@ def command_dismiss(args):
     negotiation_incomplete_unfundable = (
         swap.state == State.OFFERED.value
         and report.get("negotiation_status") == "negotiation-incomplete"
-        and not getattr(swap, "blake_alice_pub", None)
-        and not getattr(swap, "btc_alice_pub", None)
+        and report.get("negotiation_reason")
+            == "protocol Bob settlement pubkeys were never created or imported"
+        and not getattr(swap, "blake_bob_pub", None)
+        and not getattr(swap, "btc_bob_pub", None)
     )
 
     always_unsafe = {
@@ -15756,7 +15897,7 @@ def command_dismiss(args):
             "PASS: negotiation never became settlement-capable"
         )
         print(
-            "PASS: missing Alice settlement pubkeys make HTLC evaluation inapplicable"
+            "PASS: missing Bob settlement pubkeys make HTLC evaluation inapplicable"
         )
     else:
         print(

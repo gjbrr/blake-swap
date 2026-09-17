@@ -12553,15 +12553,12 @@ def command_accept_market_take(args):
 
     #
     # Step 5:
-    # Create fresh atomic-swap parameters.
+    # Create fresh atomic-swap parameters using the
+    # same v1.5 wall-clock-aware timeout policy used
+    # by normal production swap construction.
     #
-    # REGTEST POLICY ONLY:
-    #
-    # These offsets reproduce the safety spacing
-    # already exercised by our regtest harness.
-    # Production needs wall-clock-aware policy
-    # rather than comparing unrelated chain heights.
-    #
+    timeout_policy = TimeoutPolicy()
+
     btc_height = int(
         btc_cli("getblockcount")
     )
@@ -12570,13 +12567,15 @@ def command_accept_market_take(args):
         blake_cli("getblockcount")
     )
 
-    btc_timeout = (
-        btc_height + 8
+    timeout_plan = build_timeout_plan(
+        btc_height=btc_height,
+        blake_height=blake_height,
+        policy=timeout_policy,
     )
 
-    blake_timeout = max(
-        blake_height + 16,
-        btc_timeout + 30,
+    validate_timeout_plan(
+        timeout_plan,
+        timeout_policy,
     )
 
     swap = make_swap(
@@ -12590,9 +12589,29 @@ def command_accept_market_take(args):
                 "btc_sats"
             ]
         ),
-        blake_timeout,
-        btc_timeout,
+        timeout_plan.blake_timeout_height,
+        timeout_plan.btc_timeout_height,
     )
+
+    swap.timeout_policy_version = "1.5"
+
+    swap.btc_timeout_window_seconds = (
+        timeout_plan.btc_window_seconds
+    )
+
+    swap.blake_timeout_window_seconds = (
+        timeout_plan.blake_window_seconds
+    )
+
+    swap.bob_recovery_seconds = (
+        timeout_plan.bob_recovery_seconds
+    )
+
+    #
+    # Exercise the complete persisted-swap invariants,
+    # not only the standalone timeout-plan validator.
+    #
+    swap.validate()
 
     #
     # The marketplace handshake now supplies

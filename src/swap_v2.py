@@ -97,6 +97,21 @@ LOCAL_WALLET = os.environ.get(
     else BOB_WALLET,
 )
 
+# Backward-compatible chain-specific wallet overrides.
+#
+# Existing profiles that set only BLAKE_SWAP_CHAIN_WALLET continue
+# to behave exactly as before. Mixed-provider deployments may select
+# independent signing wallets for BLAKE and Bitcoin.
+BLAKE_WALLET = os.environ.get(
+    "BLAKE_SWAP_BLAKE_WALLET",
+    LOCAL_WALLET,
+)
+
+BTC_WALLET = os.environ.get(
+    "BLAKE_SWAP_BTC_WALLET",
+    LOCAL_WALLET,
+)
+
 # BLAKE-side keys
 ALICE_PUB = "03c2b0716765cce0ad45843be950aba370feecd46d127c8888d3c69dd653606356"
 BOB_PUB = "02670525ad0c200edcc985e0523fc8691703e62808a2dc0d493a20b1b18a0dce44"
@@ -1073,7 +1088,7 @@ def command_extract_secret(args):
     )
 
 def mine_btc(blocks=1):
-    wallet = LOCAL_WALLET
+    wallet = BTC_WALLET
 
     addr = btc_cli(
         "getnewaddress",
@@ -1114,7 +1129,7 @@ def get_wallet_pubkey(chain_cli, wallet):
 
 
 def mine_blake(blocks=1):
-    wallet = LOCAL_WALLET
+    wallet = BLAKE_WALLET
 
     addr = blake_cli(
         "getnewaddress",
@@ -1365,7 +1380,7 @@ def find_wallet_payment(
 def recover_blake_funding(swap, address):
     found = find_wallet_payment(
         blake_cli,
-        LOCAL_WALLET,
+        BLAKE_WALLET,
         address,
         swap.blake_amount,
     )
@@ -1380,7 +1395,7 @@ def recover_blake_funding(swap, address):
         tx = blake_cli(
             "gettransaction",
             txid,
-            wallet=LOCAL_WALLET,
+            wallet=BLAKE_WALLET,
         )
         blockhash = tx.get("blockhash")
 
@@ -1396,7 +1411,7 @@ def recover_blake_funding(swap, address):
 def recover_btc_funding(swap, address):
     found = find_wallet_payment(
         btc_cli,
-        LOCAL_WALLET,
+        BTC_WALLET,
         address,
         swap.btc_sats,
         sats=True,
@@ -1412,7 +1427,7 @@ def recover_btc_funding(swap, address):
         tx = btc_cli(
             "gettransaction",
             txid,
-            wallet=LOCAL_WALLET,
+            wallet=BTC_WALLET,
         )
         blockhash = tx.get("blockhash")
 
@@ -1674,7 +1689,7 @@ def command_fund_blake(args):
         # wallet's present balance is now below the original amount.
         balances = blake_cli(
             "getbalances",
-            wallet=LOCAL_WALLET,
+            wallet=BLAKE_WALLET,
         )
         trusted = Decimal(
             str(
@@ -1689,7 +1704,7 @@ def command_fund_blake(args):
             print()
             print("INSUFFICIENT BLAKE BALANCE")
             print("==========================")
-            print("wallet:   ", LOCAL_WALLET)
+            print("wallet:   ", BLAKE_WALLET)
             print("trusted:  ", trusted)
             print("required: ", required)
             print()
@@ -1713,7 +1728,7 @@ def command_fund_blake(args):
             "sendtoaddress",
             address,
             swap.blake_amount,
-            wallet=LOCAL_WALLET,
+            wallet=BLAKE_WALLET,
         )
 
         blockhash = mine_blake(1)[0]
@@ -3181,13 +3196,13 @@ def command_publish_offer(args):
     if not swap.blake_alice_pub:
         swap.blake_alice_pub = get_wallet_pubkey(
             blake_cli,
-            LOCAL_WALLET,
+            BLAKE_WALLET,
         )
 
     if not swap.btc_alice_pub:
         swap.btc_alice_pub = get_wallet_pubkey(
             btc_cli,
-            LOCAL_WALLET,
+            BTC_WALLET,
         )
 
     save_swap(
@@ -3660,12 +3675,12 @@ def command_accept_offer(args):
     # Bob creates only Bob-owned keys.
     swap.blake_bob_pub = get_wallet_pubkey(
         blake_cli,
-        LOCAL_WALLET,
+        BLAKE_WALLET,
     )
 
     swap.btc_bob_pub = get_wallet_pubkey(
         btc_cli,
-        LOCAL_WALLET,
+        BTC_WALLET,
     )
 
     actual_bob_pub = current_nostr_pubkey()
@@ -4456,7 +4471,7 @@ def command_fund_btc(args):
             "sendtoaddress",
             address,
             f"{amount_btc:.8f}",
-            wallet=LOCAL_WALLET,
+            wallet=BTC_WALLET,
         )
 
         blockhash = mine_btc(1)[0]
@@ -4785,7 +4800,7 @@ def command_publish_blake_claimed(args):
         wallet_tx = blake_cli(
             "gettransaction",
             swap.blake_claim_txid,
-            wallet=LOCAL_WALLET,
+            wallet=BLAKE_WALLET,
         )
 
         recovered_blockhash = wallet_tx.get("blockhash")
@@ -5129,7 +5144,7 @@ def command_claim_blake(args):
         "getnewaddress",
         "",
         "bech32",
-        wallet=LOCAL_WALLET,
+        wallet=BLAKE_WALLET,
     )
 
     fee = Decimal("0.00010000")
@@ -5175,7 +5190,7 @@ def command_claim_blake(args):
         "ALL",
         True,
         False,
-        wallet=LOCAL_WALLET,
+        wallet=BLAKE_WALLET,
     )
 
     signed_psbt = signed["psbt"]
@@ -5488,7 +5503,7 @@ def command_refund_blake(args):
             "getnewaddress",
             "",
             "bech32",
-            wallet=LOCAL_WALLET,
+            wallet=BLAKE_WALLET,
         )
 
         inputs = [
@@ -5528,7 +5543,7 @@ def command_refund_blake(args):
             "ALL",
             True,
             False,
-            wallet=LOCAL_WALLET,
+            wallet=BLAKE_WALLET,
         )
 
         finalized = blake_cli(
@@ -6016,7 +6031,7 @@ def command_claim_btc(args):
         "getnewaddress",
         "",
         "bech32",
-        wallet=LOCAL_WALLET,
+        wallet=BTC_WALLET,
     )
 
     output_sats = swap.btc_sats - fee_sats
@@ -6057,7 +6072,7 @@ def command_claim_btc(args):
         "ALL",
         True,
         False,
-        wallet=LOCAL_WALLET,
+        wallet=BTC_WALLET,
     )
 
     signed_psbt = signed["psbt"]
@@ -6201,7 +6216,7 @@ def command_refund_btc(args):
             "getnewaddress",
             "",
             "bech32",
-            wallet=LOCAL_WALLET,
+            wallet=BTC_WALLET,
         )
 
         fee_sats = int(
@@ -6265,7 +6280,7 @@ def command_refund_btc(args):
             "ALL",
             True,
             False,
-            wallet=LOCAL_WALLET,
+            wallet=BTC_WALLET,
         )
 
         finalized = btc_cli(
@@ -14155,7 +14170,7 @@ def _reconcile_execution_readiness(
         "checked": False,
         "action": action,
         "ready": None,
-        "wallet": LOCAL_WALLET,
+        "wallet": None,
         "wallet_loaded": None,
         "trusted_balance": None,
         "required_balance": None,
@@ -14180,6 +14195,7 @@ def _reconcile_execution_readiness(
         cli = blake_cli
         chain_name = "BLAKE"
         balance_unit = "BLAKE"
+        wallet = BLAKE_WALLET
 
         fee_reserve = Decimal(
             os.environ.get(
@@ -14212,6 +14228,7 @@ def _reconcile_execution_readiness(
         cli = btc_cli
         chain_name = "Bitcoin"
         balance_unit = "BTC"
+        wallet = BTC_WALLET
 
         fee_reserve_sats = int(
             os.environ.get(
@@ -14245,6 +14262,8 @@ def _reconcile_execution_readiness(
             )
         )
 
+    result["wallet"] = wallet
+
     if minimum_blocks < 1:
         raise ValueError(
             "funding minimum timeout blocks must be >= 1"
@@ -14266,12 +14285,12 @@ def _reconcile_execution_readiness(
         )
         return result
 
-    wallet_loaded = isinstance(loaded, list) and LOCAL_WALLET in loaded
+    wallet_loaded = isinstance(loaded, list) and wallet in loaded
     result["wallet_loaded"] = wallet_loaded
 
     if not wallet_loaded:
         result["reasons"].append(
-            f"local wallet {LOCAL_WALLET!r} is not loaded"
+            f"local wallet {wallet!r} is not loaded"
         )
 
     trusted = None
@@ -14280,7 +14299,7 @@ def _reconcile_execution_readiness(
         try:
             balances = cli(
                 "getbalances",
-                wallet=LOCAL_WALLET,
+                wallet=wallet,
             )
 
             trusted = Decimal(

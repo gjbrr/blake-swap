@@ -95,7 +95,7 @@ def require_one_spender(
     return spenders[0]
 
 
-def retry_must_fail_closed(
+def retry_must_remain_pending(
     *,
     action: str,
     swap_id: str,
@@ -110,18 +110,70 @@ def retry_must_fail_closed(
         action,
         swap_id,
         role=role,
-        expect_ok=False,
     )
 
+    output = p.stdout + p.stderr
+
     h.require(
-        p.returncode != 0,
-        f"{action}: unexpectedly succeeded with unconfirmed spender",
+        "PENDING" in output,
+        (
+            f"{action}: retry did not report exact settlement "
+            "as pending"
+        ),
     )
 
     h.assert_state(
         swap_id,
         role,
         expected_state,
+    )
+
+    state = h.load_state(
+        swap_id,
+        role,
+    )
+
+    fields = {
+        "claim-btc": (
+            "btc_claim_txid",
+            "btc_claim_blockhash",
+        ),
+        "refund-btc": (
+            "btc_refund_txid",
+            "btc_refund_blockhash",
+        ),
+        "claim-blake": (
+            "blake_claim_txid",
+            "blake_claim_blockhash",
+        ),
+        "refund-blake": (
+            "blake_refund_txid",
+            "blake_refund_blockhash",
+        ),
+    }
+
+    if action not in fields:
+        raise h.TestFailure(
+            f"unknown settlement action: {action}"
+        )
+
+    tx_field, block_field = fields[action]
+
+    h.require(
+        state.get(tx_field) == original_spender,
+        (
+            f"{action}: retry changed recorded settlement txid; "
+            f"expected {original_spender}, "
+            f"got {state.get(tx_field)}"
+        ),
+    )
+
+    h.require(
+        state.get(block_field) is None,
+        (
+            f"{action}: pending retry unexpectedly recorded "
+            "a blockhash"
+        ),
     )
 
     spenders = find_mempool_spenders(
@@ -196,7 +248,7 @@ def test_btc_claim():
     )
     h.ok("BTC claim exists exactly once in mempool")
 
-    retry_must_fail_closed(
+    retry_must_remain_pending(
         action="claim-btc",
         swap_id=swap_id,
         role="alice",
@@ -206,7 +258,7 @@ def test_btc_claim():
         funding_vout=funding_vout,
         original_spender=spender,
     )
-    h.ok("BTC claim retry refuses unconfirmed spender")
+    h.ok("BTC claim retry recognizes exact pending spend")
 
     h.mine_btc(1)
 
@@ -310,7 +362,7 @@ def test_blake_claim():
     )
     h.ok("BLAKE claim exists exactly once in mempool")
 
-    retry_must_fail_closed(
+    retry_must_remain_pending(
         action="claim-blake",
         swap_id=swap_id,
         role="bob",
@@ -320,7 +372,7 @@ def test_blake_claim():
         funding_vout=funding_vout,
         original_spender=spender,
     )
-    h.ok("BLAKE claim retry refuses unconfirmed spender")
+    h.ok("BLAKE claim retry recognizes exact pending spend")
 
     h.mine_blake(1)
 
@@ -403,7 +455,7 @@ def test_btc_refund():
     )
     h.ok("BTC refund exists exactly once in mempool")
 
-    retry_must_fail_closed(
+    retry_must_remain_pending(
         action="refund-btc",
         swap_id=swap_id,
         role="bob",
@@ -413,7 +465,7 @@ def test_btc_refund():
         funding_vout=funding_vout,
         original_spender=spender,
     )
-    h.ok("BTC refund retry refuses unconfirmed spender")
+    h.ok("BTC refund retry recognizes exact pending spend")
 
     h.mine_btc(1)
 
@@ -505,7 +557,7 @@ def test_blake_refund():
     )
     h.ok("BLAKE refund exists exactly once in mempool")
 
-    retry_must_fail_closed(
+    retry_must_remain_pending(
         action="refund-blake",
         swap_id=swap_id,
         role="alice",
@@ -515,7 +567,7 @@ def test_blake_refund():
         funding_vout=funding_vout,
         original_spender=spender,
     )
-    h.ok("BLAKE refund retry refuses unconfirmed spender")
+    h.ok("BLAKE refund retry recognizes exact pending spend")
 
     h.mine_blake(1)
 

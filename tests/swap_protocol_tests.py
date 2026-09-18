@@ -322,7 +322,7 @@ def parse_swap_id(output: str) -> str:
     return m.group(1).lower()
 
 
-def make_fresh_swap(*, blake=10.0, sats=25_000) -> str:
+def make_fresh_swap(*, blake=0.1, sats=25_000) -> str:
     btc_height = int(btc_cli("getblockcount"))
     blake_height = int(blake_cli("getblockcount"))
 

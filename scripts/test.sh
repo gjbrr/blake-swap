@@ -20,6 +20,24 @@ export SWAP_V2="$PROJECT_DIR/src/swap_v2.py"
 export SWAP_AGENT="$PROJECT_DIR/src/swap_agent.py"
 export PYTHONPATH="$PROJECT_DIR/src:$PROJECT_DIR/tests${PYTHONPATH:+:$PYTHONPATH}"
 
+if [[ -x "$PROJECT_DIR/.venv/bin/python" ]]; then
+    PYTHON_BIN="$PROJECT_DIR/.venv/bin/python"
+else
+    PYTHON_BIN="$(command -v python3)"
+fi
+
+"$PYTHON_BIN" - <<'PY_CHECK'
+import sys
+print("Test Python:", sys.executable)
+try:
+    import coincurve
+except ImportError as exc:
+    raise SystemExit(
+        "ERROR: selected test Python cannot import coincurve: "
+        f"{sys.executable}"
+    ) from exc
+PY_CHECK
+
 cd "$PROJECT_DIR"
 
 echo "============================================================"
@@ -30,55 +48,55 @@ echo "engine:  $SWAP_V2"
 echo
 
 echo "== Syntax =="
-python3 -m py_compile \
+"$PYTHON_BIN" -m py_compile \
     src/swap_v2.py \
     src/swap_agent.py \
     src/swap_timeout_policy.py
 
 echo
 echo "== Timeout policy =="
-python3 tests/swap_timeout_policy_tests.py
+"$PYTHON_BIN" tests/swap_timeout_policy_tests.py
 
 echo
 echo "== Timeout negotiation / Time Mallory =="
-python3 tests/swap_timeout_negotiation_tests.py
+"$PYTHON_BIN" tests/swap_timeout_negotiation_tests.py
 
 echo
 echo "== Protocol regression =="
-python3 tests/swap_protocol_tests.py all
+"$PYTHON_BIN" tests/swap_protocol_tests.py all
 
 echo
 echo "== Settlement recovery =="
-python3 tests/swap_settlement_recovery_tests.py
+"$PYTHON_BIN" tests/swap_settlement_recovery_tests.py
 
 echo
 echo "== Peer recovery =="
-python3 tests/swap_peer_recovery_tests.py
+"$PYTHON_BIN" tests/swap_peer_recovery_tests.py
 
 echo
 echo "== Chain autonomy =="
-python3 tests/swap_chain_autonomy_tests.py
+"$PYTHON_BIN" tests/swap_chain_autonomy_tests.py
 
 echo
 echo "== Bounded funding scan =="
-python3 tests/swap_bounded_scan_tests.py
+"$PYTHON_BIN" tests/swap_bounded_scan_tests.py
 
 echo
 echo
 echo "== Reorg safety =="
-PYTHONPATH="$PROJECT_DIR/tests:$PROJECT_DIR/src" python3 tests/swap_reorg_safety_tests.py
+PYTHONPATH="$PROJECT_DIR/tests:$PROJECT_DIR/src" "$PYTHON_BIN" tests/swap_reorg_safety_tests.py
 
 
 echo "== Autonomous agents: kill / restart / recovery =="
-python3 tests/swap_autonomous_agents_tests.py
+"$PYTHON_BIN" tests/swap_autonomous_agents_tests.py
 
 echo
 echo "== Market state =="
-python3 tests/market_state_tests.py
+"$PYTHON_BIN" tests/market_state_tests.py
 
 echo
 echo "== Pre-BTC BLAKE refund =="
-python3 tests/pre_btc_refund_tests.py
+"$PYTHON_BIN" tests/pre_btc_refund_tests.py
 
 echo
 echo "============================================================"

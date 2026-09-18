@@ -19,6 +19,12 @@ from swap_timeout_policy import (
     validate_timeout_plan,
 )
 
+from fee_policy import (
+    choose_fee_rate_sat_vb,
+    fee_for_vsize,
+    enforce_fee_cap,
+)
+
 import subprocess
 import os
 import shlex
@@ -5065,6 +5071,165 @@ def verify_confirmed_btc_claim_for_blake(swap):
     return True
 
 
+def _coin_decimal_to_sats(value):
+    value = Decimal(str(value))
+    sats = value * Decimal(100_000_000)
+
+    if sats != sats.to_integral_value():
+        raise ValueError(
+            f"amount has sub-satoshi precision: {value}"
+        )
+
+    return int(sats)
+
+
+def _sats_to_coin_decimal(value):
+    return (
+        Decimal(int(value))
+        / Decimal(100_000_000)
+    )
+
+
+def _decoded_tx_vsize(cli, tx_hex):
+    decoded = cli(
+        "decoderawtransaction",
+        tx_hex,
+    )
+
+    vsize = int(decoded.get("vsize", 0))
+
+    if vsize < 1:
+        raise RuntimeError(
+            "finalized transaction has invalid vsize"
+        )
+
+    return vsize
+
+
+def _decoded_spend_fee_sats(
+    cli,
+    tx_hex,
+    input_sats,
+):
+    decoded = cli(
+        "decoderawtransaction",
+        tx_hex,
+    )
+
+    output_sats = 0
+
+    for output in decoded.get("vout", []):
+        output_sats += _coin_decimal_to_sats(
+            output["value"]
+        )
+
+    fee_sats = int(input_sats) - output_sats
+
+    if fee_sats < 1:
+        raise RuntimeError(
+            "finalized settlement transaction "
+            "does not pay a positive fee"
+        )
+
+    return fee_sats
+
+
+def build_dynamic_settlement_spend(
+    *,
+    chain,
+    cli,
+    input_sats,
+    build_finalized,
+):
+    """
+    Build a finalized HTLC spend whose actual vsize agrees with
+    the selected fee policy.
+
+    build_finalized(fee_sats) must return fully finalized raw hex.
+    It must not broadcast.
+    """
+    input_sats = int(input_sats)
+
+    override = settlement_fee_override_sats(chain)
+
+    if override is not None:
+        enforce_fee_cap(
+            override,
+            input_sats,
+            max_percent=settlement_fee_cap_percent(),
+        )
+
+        tx_hex = build_finalized(override)
+        vsize = _decoded_tx_vsize(cli, tx_hex)
+
+        return {
+            "hex": tx_hex,
+            "fee_sats": override,
+            "vsize": vsize,
+            "rate_sat_vb": (
+                Decimal(override)
+                / Decimal(vsize)
+            ),
+            "source": "override",
+        }
+
+    estimate = cli(
+        "estimatesmartfee",
+        settlement_fee_target_blocks(),
+    )
+
+    mempool = cli(
+        "getmempoolinfo"
+    )
+
+    rate = choose_fee_rate_sat_vb(
+        estimate,
+        mempool,
+        multiplier=settlement_fee_multiplier(),
+    )
+
+    # Start deliberately small. The provisional transaction is
+    # never broadcast; it exists only to measure the real witness.
+    fee_sats = 1
+
+    for _attempt in range(8):
+        enforce_fee_cap(
+            fee_sats,
+            input_sats,
+            max_percent=settlement_fee_cap_percent(),
+        )
+
+        tx_hex = build_finalized(fee_sats)
+        vsize = _decoded_tx_vsize(cli, tx_hex)
+
+        required_fee = fee_for_vsize(
+            vsize,
+            rate,
+        )
+
+        enforce_fee_cap(
+            required_fee,
+            input_sats,
+            max_percent=settlement_fee_cap_percent(),
+        )
+
+        if required_fee == fee_sats:
+            return {
+                "hex": tx_hex,
+                "fee_sats": fee_sats,
+                "vsize": vsize,
+                "rate_sat_vb": rate,
+                "source": "dynamic",
+            }
+
+        fee_sats = required_fee
+
+    raise RuntimeError(
+        "Settlement fee/vsize did not converge "
+        "after 8 signing attempts"
+    )
+
+
 @serialized_funding("blake")
 def command_claim_blake(args):
 
@@ -5147,74 +5312,90 @@ def command_claim_blake(args):
         wallet=BLAKE_WALLET,
     )
 
-    fee = Decimal("0.00010000")
     amount = Decimal(
         str(swap.blake_amount)
     )
+    input_sats = _coin_decimal_to_sats(amount)
 
-    output_amount = amount - fee
+    def build_claim_with_fee(fee_sats):
+        if fee_sats >= input_sats:
+            raise ValueError(
+                "BLAKE amount is too small for claim fee"
+            )
 
-    if output_amount <= 0:
-        raise ValueError(
-            "BLAKE amount is too small for claim fee"
+        output_sats = input_sats - fee_sats
+        output_amount = _sats_to_coin_decimal(
+            output_sats
         )
 
-    raw = blake_cli(
-        "createrawtransaction",
-        json.dumps([
-            {
-                "txid": swap.blake_funding_txid,
-                "vout": swap.blake_funding_vout,
-            }
-        ]),
-        json.dumps({
-            destination: float(output_amount)
-        }),
-    )
-
-    psbt = blake_cli(
-        "converttopsbt",
-        raw,
-    )
-
-    psbt = blake_cli(
-        "utxoupdatepsbt",
-        psbt,
-        json.dumps([desc]),
-    )
-
-    signed = blake_cli(
-        "walletprocesspsbt",
-        psbt,
-        True,
-        "ALL",
-        True,
-        False,
-        wallet=BLAKE_WALLET,
-    )
-
-    signed_psbt = signed["psbt"]
-
-    # CRITICAL:
-    # This uses the secret Bob extracted from Bitcoin.
-    # It does NOT use swap.secret_hex.
-    with_secret = add_sha256_preimage(
-        signed_psbt,
-        swap.secret_hash,
-        swap.revealed_secret_hex,
-    )
-
-    finalized = blake_cli(
-        "finalizepsbt",
-        with_secret,
-    )
-
-    if not finalized.get("complete"):
-        raise RuntimeError(
-            "BLAKE claim PSBT did not finalize"
+        raw = blake_cli(
+            "createrawtransaction",
+            json.dumps([
+                {
+                    "txid": swap.blake_funding_txid,
+                    "vout": swap.blake_funding_vout,
+                }
+            ]),
+            json.dumps({
+                destination: float(output_amount)
+            }),
         )
 
-    claim_hex = finalized["hex"]
+        psbt = blake_cli(
+            "converttopsbt",
+            raw,
+        )
+
+        psbt = blake_cli(
+            "utxoupdatepsbt",
+            psbt,
+            json.dumps([desc]),
+        )
+
+        signed = blake_cli(
+            "walletprocesspsbt",
+            psbt,
+            True,
+            "ALL",
+            True,
+            False,
+            wallet=BLAKE_WALLET,
+        )
+
+        # CRITICAL:
+        # This uses the secret Bob extracted from Bitcoin.
+        # It does NOT use swap.secret_hex.
+        with_secret = add_sha256_preimage(
+            signed["psbt"],
+            swap.secret_hash,
+            swap.revealed_secret_hex,
+        )
+
+        finalized = blake_cli(
+            "finalizepsbt",
+            with_secret,
+        )
+
+        if not finalized.get("complete"):
+            raise RuntimeError(
+                "BLAKE claim PSBT did not finalize"
+            )
+
+        return finalized["hex"]
+
+    fee_plan = build_dynamic_settlement_spend(
+        chain="blake",
+        cli=blake_cli,
+        input_sats=input_sats,
+        build_finalized=build_claim_with_fee,
+    )
+
+    claim_hex = fee_plan["hex"]
+    fee_sats = fee_plan["fee_sats"]
+    fee = _sats_to_coin_decimal(fee_sats)
+    output_amount = _sats_to_coin_decimal(
+        input_sats - fee_sats
+    )
 
     print()
     print("BLAKE CLAIM READY")
@@ -5222,6 +5403,13 @@ def command_claim_blake(args):
     print("input: ", amount, "BLAKE")
     print("output:", output_amount, "BLAKE")
     print("fee:   ", fee, "BLAKE")
+    print("vsize: ", fee_plan["vsize"], "vB")
+    print(
+        "rate:  ",
+        fee_plan["rate_sat_vb"],
+        "sat/vB",
+    )
+    print("source:", fee_plan["source"])
     print()
 
     txid = blake_cli(
@@ -5471,14 +5659,8 @@ def command_refund_blake(args):
         "getblockcount"
     )
 
-    fee = Decimal("0.00010000")
     amount = Decimal(str(swap.blake_amount))
-    output_amount = amount - fee
-
-    if output_amount <= 0:
-        raise ValueError(
-            "BLAKE amount is too small for refund fee"
-        )
+    input_sats = _coin_decimal_to_sats(amount)
 
     refund_path = (
         BASE_SWAP_DIR
@@ -5491,6 +5673,31 @@ def command_refund_blake(args):
     #
     if refund_path.exists():
         refund_hex = refund_path.read_text().strip()
+
+        fee_sats = _decoded_spend_fee_sats(
+            blake_cli,
+            refund_hex,
+            input_sats,
+        )
+
+        fee_plan = {
+            "hex": refund_hex,
+            "fee_sats": fee_sats,
+            "vsize": _decoded_tx_vsize(
+                blake_cli,
+                refund_hex,
+            ),
+            "rate_sat_vb": (
+                Decimal(fee_sats)
+                / Decimal(
+                    _decoded_tx_vsize(
+                        blake_cli,
+                        refund_hex,
+                    )
+                )
+            ),
+            "source": "saved",
+        }
 
         print()
         print("Reusing saved signed BLAKE refund:")
@@ -5514,49 +5721,69 @@ def command_refund_blake(args):
             }
         ]
 
-        outputs = {
-            destination: float(output_amount)
-        }
+        def build_refund_with_fee(fee_sats):
+            if fee_sats >= input_sats:
+                raise ValueError(
+                    "BLAKE amount is too small for refund fee"
+                )
 
-        raw = blake_cli(
-            "createrawtransaction",
-            json.dumps(inputs),
-            json.dumps(outputs),
-            swap.blake_timeout,
-        )
-
-        psbt = blake_cli(
-            "converttopsbt",
-            raw,
-        )
-
-        psbt = blake_cli(
-            "utxoupdatepsbt",
-            psbt,
-            json.dumps([desc]),
-        )
-
-        signed = blake_cli(
-            "walletprocesspsbt",
-            psbt,
-            True,
-            "ALL",
-            True,
-            False,
-            wallet=BLAKE_WALLET,
-        )
-
-        finalized = blake_cli(
-            "finalizepsbt",
-            signed["psbt"],
-        )
-
-        if not finalized.get("complete"):
-            raise RuntimeError(
-                "BLAKE refund PSBT did not finalize"
+            output_sats = input_sats - fee_sats
+            output_amount = _sats_to_coin_decimal(
+                output_sats
             )
 
-        refund_hex = finalized["hex"]
+            outputs = {
+                destination: float(output_amount)
+            }
+
+            raw = blake_cli(
+                "createrawtransaction",
+                json.dumps(inputs),
+                json.dumps(outputs),
+                swap.blake_timeout,
+            )
+
+            psbt = blake_cli(
+                "converttopsbt",
+                raw,
+            )
+
+            psbt = blake_cli(
+                "utxoupdatepsbt",
+                psbt,
+                json.dumps([desc]),
+            )
+
+            signed = blake_cli(
+                "walletprocesspsbt",
+                psbt,
+                True,
+                "ALL",
+                True,
+                False,
+                wallet=BLAKE_WALLET,
+            )
+
+            finalized = blake_cli(
+                "finalizepsbt",
+                signed["psbt"],
+            )
+
+            if not finalized.get("complete"):
+                raise RuntimeError(
+                    "BLAKE refund PSBT did not finalize"
+                )
+
+            return finalized["hex"]
+
+        fee_plan = build_dynamic_settlement_spend(
+            chain="blake",
+            cli=blake_cli,
+            input_sats=input_sats,
+            build_finalized=build_refund_with_fee,
+        )
+
+        refund_hex = fee_plan["hex"]
 
         refund_path.write_text(
             refund_hex + "\n"
@@ -5571,9 +5798,22 @@ def command_refund_blake(args):
     print("==================")
     print("current height:", current_height)
     print("refund height: ", swap.blake_timeout)
+    fee_sats = fee_plan["fee_sats"]
+    fee = _sats_to_coin_decimal(fee_sats)
+    output_amount = _sats_to_coin_decimal(
+        input_sats - fee_sats
+    )
+
     print("input:         ", amount, "BLAKE")
     print("output:        ", output_amount, "BLAKE")
     print("fee:           ", fee, "BLAKE")
+    print("vsize:         ", fee_plan["vsize"], "vB")
+    print(
+        "rate:          ",
+        fee_plan["rate_sat_vb"],
+        "sat/vB",
+    )
+    print("fee source:    ", fee_plan["source"])
 
     if current_height < swap.blake_timeout:
         print()
@@ -6008,23 +6248,6 @@ def command_claim_btc(args):
         verbose=True,
     )
 
-    fee_sats = int(
-        os.environ.get(
-            "BLAKE_SWAP_BTC_SPEND_FEE_SATS",
-            "1000",
-        )
-    )
-
-    if fee_sats < 1:
-        raise ValueError(
-            "BLAKE_SWAP_BTC_SPEND_FEE_SATS must be >= 1"
-        )
-
-    if swap.btc_sats <= fee_sats:
-        raise ValueError(
-            "BTC amount is too small for claim fee"
-        )
-
     desc = get_btc_contract_descriptor(swap)
 
     destination = btc_cli(
@@ -6034,66 +6257,81 @@ def command_claim_btc(args):
         wallet=BTC_WALLET,
     )
 
-    output_sats = swap.btc_sats - fee_sats
+    input_sats = int(swap.btc_sats)
 
-    output_btc = (
-        Decimal(output_sats)
-        / Decimal(100_000_000)
-    )
+    def build_claim_with_fee(fee_sats):
+        if fee_sats >= input_sats:
+            raise ValueError(
+                "BTC amount is too small for claim fee"
+            )
 
-    raw = btc_cli(
-        "createrawtransaction",
-        json.dumps([
-            {
-                "txid": swap.btc_funding_txid,
-                "vout": swap.btc_funding_vout,
-            }
-        ]),
-        json.dumps({
-            destination: float(output_btc)
-        }),
-    )
-
-    psbt = btc_cli(
-        "converttopsbt",
-        raw,
-    )
-
-    psbt = btc_cli(
-        "utxoupdatepsbt",
-        psbt,
-        json.dumps([desc]),
-    )
-
-    signed = btc_cli(
-        "walletprocesspsbt",
-        psbt,
-        True,
-        "ALL",
-        True,
-        False,
-        wallet=BTC_WALLET,
-    )
-
-    signed_psbt = signed["psbt"]
-
-    with_secret = add_sha256_preimage(
-        signed_psbt,
-        swap.secret_hash,
-        swap.secret_hex,
-    )
-
-    finalized = btc_cli(
-        "finalizepsbt",
-        with_secret,
-    )
-
-    if not finalized.get("complete"):
-        raise RuntimeError(
-            "Bitcoin claim PSBT did not finalize"
+        output_sats = input_sats - fee_sats
+        output_btc = _sats_to_coin_decimal(
+            output_sats
         )
 
-    claim_hex = finalized["hex"]
+        raw = btc_cli(
+            "createrawtransaction",
+            json.dumps([
+                {
+                    "txid": swap.btc_funding_txid,
+                    "vout": swap.btc_funding_vout,
+                }
+            ]),
+            json.dumps({
+                destination: float(output_btc)
+            }),
+        )
+
+        psbt = btc_cli(
+            "converttopsbt",
+            raw,
+        )
+
+        psbt = btc_cli(
+            "utxoupdatepsbt",
+            psbt,
+            json.dumps([desc]),
+        )
+
+        signed = btc_cli(
+            "walletprocesspsbt",
+            psbt,
+            True,
+            "ALL",
+            True,
+            False,
+            wallet=BTC_WALLET,
+        )
+
+        with_secret = add_sha256_preimage(
+            signed["psbt"],
+            swap.secret_hash,
+            swap.secret_hex,
+        )
+
+        finalized = btc_cli(
+            "finalizepsbt",
+            with_secret,
+        )
+
+        if not finalized.get("complete"):
+            raise RuntimeError(
+                "Bitcoin claim PSBT did not finalize"
+            )
+
+        return finalized["hex"]
+
+    fee_plan = build_dynamic_settlement_spend(
+        chain="btc",
+        cli=btc_cli,
+        input_sats=input_sats,
+        build_finalized=build_claim_with_fee,
+    )
+
+    claim_hex = fee_plan["hex"]
+    fee_sats = fee_plan["fee_sats"]
+    output_sats = input_sats - fee_sats
 
     print()
     print("BTC CLAIM READY")
@@ -6101,6 +6339,13 @@ def command_claim_btc(args):
     print("input sats: ", swap.btc_sats)
     print("output sats:", output_sats)
     print("fee sats:   ", fee_sats)
+    print("vsize:      ", fee_plan["vsize"], "vB")
+    print(
+        "rate:       ",
+        fee_plan["rate_sat_vb"],
+        "sat/vB",
+    )
+    print("fee source:  ", fee_plan["source"])
     print()
 
     txid = btc_cli(
@@ -6205,6 +6450,30 @@ def command_refund_btc(args):
     if refund_path.exists():
         refund_hex = refund_path.read_text().strip()
 
+        input_sats = int(swap.btc_sats)
+
+        fee_sats = _decoded_spend_fee_sats(
+            btc_cli,
+            refund_hex,
+            input_sats,
+        )
+
+        vsize = _decoded_tx_vsize(
+            btc_cli,
+            refund_hex,
+        )
+
+        fee_plan = {
+            "hex": refund_hex,
+            "fee_sats": fee_sats,
+            "vsize": vsize,
+            "rate_sat_vb": (
+                Decimal(fee_sats)
+                / Decimal(vsize)
+            ),
+            "source": "saved",
+        }
+
         print()
         print("Reusing saved signed Bitcoin refund:")
         print(refund_path)
@@ -6219,29 +6488,7 @@ def command_refund_btc(args):
             wallet=BTC_WALLET,
         )
 
-        fee_sats = int(
-            os.environ.get(
-                "BLAKE_SWAP_BTC_SPEND_FEE_SATS",
-                "1000",
-            )
-        )
-
-        if fee_sats < 1:
-            raise ValueError(
-                "BLAKE_SWAP_BTC_SPEND_FEE_SATS must be >= 1"
-            )
-
-        if swap.btc_sats <= fee_sats:
-            raise ValueError(
-                "BTC amount is too small for refund fee"
-            )
-
-        output_sats = swap.btc_sats - fee_sats
-
-        output_btc = (
-            Decimal(output_sats)
-            / Decimal(100_000_000)
-        )
+        input_sats = int(swap.btc_sats)
 
         inputs = [
             {
@@ -6251,49 +6498,69 @@ def command_refund_btc(args):
             }
         ]
 
-        outputs = {
-            destination: float(output_btc)
-        }
+        def build_refund_with_fee(fee_sats):
+            if fee_sats >= input_sats:
+                raise ValueError(
+                    "BTC amount is too small for refund fee"
+                )
 
-        raw = btc_cli(
-            "createrawtransaction",
-            json.dumps(inputs),
-            json.dumps(outputs),
-            swap.btc_timeout,
-        )
-
-        psbt = btc_cli(
-            "converttopsbt",
-            raw,
-        )
-
-        psbt = btc_cli(
-            "utxoupdatepsbt",
-            psbt,
-            json.dumps([desc]),
-        )
-
-        signed = btc_cli(
-            "walletprocesspsbt",
-            psbt,
-            True,
-            "ALL",
-            True,
-            False,
-            wallet=BTC_WALLET,
-        )
-
-        finalized = btc_cli(
-            "finalizepsbt",
-            signed["psbt"],
-        )
-
-        if not finalized.get("complete"):
-            raise RuntimeError(
-                "Bitcoin refund PSBT did not finalize"
+            output_sats = input_sats - fee_sats
+            output_btc = _sats_to_coin_decimal(
+                output_sats
             )
 
-        refund_hex = finalized["hex"]
+            outputs = {
+                destination: float(output_btc)
+            }
+
+            raw = btc_cli(
+                "createrawtransaction",
+                json.dumps(inputs),
+                json.dumps(outputs),
+                swap.btc_timeout,
+            )
+
+            psbt = btc_cli(
+                "converttopsbt",
+                raw,
+            )
+
+            psbt = btc_cli(
+                "utxoupdatepsbt",
+                psbt,
+                json.dumps([desc]),
+            )
+
+            signed = btc_cli(
+                "walletprocesspsbt",
+                psbt,
+                True,
+                "ALL",
+                True,
+                False,
+                wallet=BTC_WALLET,
+            )
+
+            finalized = btc_cli(
+                "finalizepsbt",
+                signed["psbt"],
+            )
+
+            if not finalized.get("complete"):
+                raise RuntimeError(
+                    "Bitcoin refund PSBT did not finalize"
+                )
+
+            return finalized["hex"]
+
+        fee_plan = build_dynamic_settlement_spend(
+            chain="btc",
+            cli=btc_cli,
+            input_sats=input_sats,
+            build_finalized=build_refund_with_fee,
+        )
+
+        refund_hex = fee_plan["hex"]
 
         refund_path.write_text(
             refund_hex + "\n"
@@ -6308,6 +6575,16 @@ def command_refund_btc(args):
     print("==============")
     print("current height:", current_height)
     print("refund height: ", swap.btc_timeout)
+    print("input sats:    ", swap.btc_sats)
+    print("output sats:   ", int(swap.btc_sats) - fee_plan["fee_sats"])
+    print("fee sats:      ", fee_plan["fee_sats"])
+    print("vsize:         ", fee_plan["vsize"], "vB")
+    print(
+        "rate:          ",
+        fee_plan["rate_sat_vb"],
+        "sat/vB",
+    )
+    print("fee source:    ", fee_plan["source"])
 
     if current_height < swap.btc_timeout:
         print()
@@ -8286,21 +8563,153 @@ def build_market_offer_event(
 
 
 
-def btc_trade_minimum_sats():
-    """
-    Local settlement-feasibility floor for the BTC leg.
-    """
-    fee_sats = int(
+def settlement_fee_target_blocks():
+    target = int(
         os.environ.get(
-            "BLAKE_SWAP_BTC_SPEND_FEE_SATS",
-            "1000",
+            "BLAKE_SWAP_FEE_TARGET_BLOCKS",
+            "2",
         )
     )
 
-    if fee_sats < 1:
+    if target < 1:
         raise ValueError(
-            "BLAKE_SWAP_BTC_SPEND_FEE_SATS must be >= 1"
+            "BLAKE_SWAP_FEE_TARGET_BLOCKS must be >= 1"
         )
+
+    return target
+
+
+def settlement_fee_multiplier():
+    multiplier = Decimal(
+        os.environ.get(
+            "BLAKE_SWAP_FEE_RATE_MULTIPLIER",
+            "1.0",
+        )
+    )
+
+    if multiplier < Decimal("1.0"):
+        raise ValueError(
+            "BLAKE_SWAP_FEE_RATE_MULTIPLIER must be >= 1.0"
+        )
+
+    return multiplier
+
+
+def settlement_fee_cap_percent():
+    value = Decimal(
+        os.environ.get(
+            "BLAKE_SWAP_MAX_SETTLEMENT_FEE_PERCENT",
+            "10",
+        )
+    )
+
+    if value <= 0 or value >= 100:
+        raise ValueError(
+            "BLAKE_SWAP_MAX_SETTLEMENT_FEE_PERCENT "
+            "must be > 0 and < 100"
+        )
+
+    return value
+
+
+def settlement_fee_override_sats(chain):
+    if chain == "btc":
+        name = "BLAKE_SWAP_BTC_SPEND_FEE_SATS"
+    elif chain == "blake":
+        name = "BLAKE_SWAP_BLAKE_SPEND_FEE_SATS"
+    else:
+        raise ValueError(
+            f"unknown settlement-fee chain: {chain}"
+        )
+
+    raw = os.environ.get(name)
+
+    if raw in (None, ""):
+        return None
+
+    value = int(raw)
+
+    if value < 1:
+        raise ValueError(
+            f"{name} must be >= 1"
+        )
+
+    return value
+
+
+def estimate_dynamic_settlement_fee(
+    cli,
+    *,
+    vsize,
+    input_sats=None,
+):
+    """
+    Derive a settlement fee from the node's current estimator
+    and policy floors.
+
+    This helper does not broadcast or mutate chain state.
+    """
+    estimate = cli(
+        "estimatesmartfee",
+        settlement_fee_target_blocks(),
+    )
+
+    mempool = cli(
+        "getmempoolinfo"
+    )
+
+    rate = choose_fee_rate_sat_vb(
+        estimate,
+        mempool,
+        multiplier=settlement_fee_multiplier(),
+    )
+
+    fee_sats = fee_for_vsize(
+        vsize,
+        rate,
+    )
+
+    if input_sats is not None:
+        enforce_fee_cap(
+            fee_sats,
+            input_sats,
+            max_percent=settlement_fee_cap_percent(),
+        )
+
+    return fee_sats, rate
+
+
+def btc_trade_minimum_sats():
+    """
+    Local settlement-feasibility floor for the BTC leg.
+
+    An explicit legacy override remains available for emergency
+    operator control. Otherwise derive the floor from current
+    Bitcoin node fee conditions using a conservative settlement
+    vsize estimate.
+    """
+    override = settlement_fee_override_sats("btc")
+
+    if override is not None:
+        return override + 1
+
+    vsize = int(
+        os.environ.get(
+            "BLAKE_SWAP_BTC_SETTLEMENT_VSIZE_ESTIMATE",
+            "200",
+        )
+    )
+
+    if vsize < 1:
+        raise ValueError(
+            "BLAKE_SWAP_BTC_SETTLEMENT_VSIZE_ESTIMATE "
+            "must be >= 1"
+        )
+
+    fee_sats, _rate = estimate_dynamic_settlement_fee(
+        btc_cli,
+        vsize=vsize,
+    )
 
     return fee_sats + 1
 
@@ -8313,7 +8722,7 @@ def validate_btc_trade_amount(btc_sats, context="trade"):
         raise ValueError(
             f"{context} BTC amount {btc_sats} sats is too small; "
             f"minimum settlement-feasible amount is {minimum} sats "
-            f"with BLAKE_SWAP_BTC_SPEND_FEE_SATS={minimum - 1}"
+            "under the current settlement fee policy"
         )
 
     return True

@@ -943,6 +943,233 @@ def find_confirmed_htlc_spend(
             f"Swap has no {chain_name} funding blockhash"
         )
 
+    #
+    # Fast path: if durable state already records the exact confirmed
+    # settlement transaction, verify that transaction directly rather
+    # than rescanning every block since HTLC funding.
+    #
+    # The persisted txid is NOT trusted blindly.  We independently:
+    #
+    #   * fetch the exact transaction from its recorded block,
+    #   * require it to remain on the active chain,
+    #   * require at least one confirmation,
+    #   * prove that it spends this swap's HTLC outpoint, and
+    #   * classify the actual witness/script branch.
+    #
+    # Historical block scanning remains the recovery fallback when
+    # durable state does not know the spender.
+    #
+    known_spenders = []
+
+    if chain == "btc":
+        known_spenders = [
+            (
+                "claim",
+                swap.btc_claim_txid,
+                swap.btc_claim_blockhash,
+            ),
+            (
+                "refund",
+                swap.btc_refund_txid,
+                swap.btc_refund_blockhash,
+            ),
+        ]
+
+    elif chain == "blake":
+        known_spenders = [
+            (
+                "claim",
+                swap.blake_claim_txid,
+                swap.blake_claim_blockhash,
+            ),
+            (
+                "refund",
+                swap.blake_refund_txid,
+                swap.blake_refund_blockhash,
+            ),
+        ]
+
+    populated = [
+        (expected_branch, txid, blockhash)
+        for expected_branch, txid, blockhash in known_spenders
+        if txid is not None
+    ]
+
+    if len(populated) > 1:
+        raise RuntimeError(
+            "SECURITY FAILURE: durable state records multiple "
+            f"{chain_name} HTLC settlement transactions"
+        )
+
+    if populated:
+        expected_branch, settlement_txid, settlement_blockhash = (
+            populated[0]
+        )
+
+        if not settlement_blockhash:
+            #
+            # Production-style settlement persists the broadcast txid
+            # immediately, while deliberately leaving protocol state
+            # unchanged until active-chain confirmation.
+            #
+            # A known txid with no blockhash is therefore a normal pending
+            # condition, not corruption.  Independently verify the exact
+            # transaction before refusing any rebroadcast.
+            #
+            try:
+                tx = cli(
+                    "getrawtransaction",
+                    settlement_txid,
+                    True,
+                )
+            except Exception:
+                #
+                # Nodes without txindex cannot necessarily retrieve a
+                # wallet-created transaction through getrawtransaction
+                # once it is no longer exposed by the mempool lookup.
+                #
+                # This participant created the recorded settlement, so
+                # recover it from the local wallet and independently
+                # decode the raw transaction instead.
+                #
+                wallet = (
+                    BTC_WALLET
+                    if chain == "btc"
+                    else BLAKE_WALLET
+                )
+
+                try:
+                    wallet_tx = cli(
+                        "gettransaction",
+                        settlement_txid,
+                        wallet=wallet,
+                    )
+
+                    tx = cli(
+                        "decoderawtransaction",
+                        wallet_tx["hex"],
+                    )
+
+                    tx["confirmations"] = int(
+                        wallet_tx.get("confirmations", 0) or 0
+                    )
+
+                    if wallet_tx.get("blockhash"):
+                        tx["blockhash"] = wallet_tx["blockhash"]
+
+                except Exception as e:
+                    raise RuntimeError(
+                        "SECURITY FAILURE: durable state records "
+                        f"{chain_name} {expected_branch} txid "
+                        "but the transaction cannot be independently verified"
+                    ) from e
+
+            spends_htlc = any(
+                vin.get("txid") == funding_txid
+                and int(vin.get("vout", -1)) == int(funding_vout)
+                for vin in tx.get("vin", [])
+            )
+
+            if not spends_htlc:
+                raise RuntimeError(
+                    "SECURITY FAILURE: recorded "
+                    f"{chain_name} {expected_branch} transaction "
+                    "does not spend this swap's HTLC"
+                )
+
+            actual_branch = classify_htlc_spend(
+                tx,
+                funding_txid,
+                funding_vout,
+                swap.secret_hash,
+            )
+
+            if actual_branch != expected_branch:
+                raise RuntimeError(
+                    "SECURITY FAILURE: recorded "
+                    f"{chain_name} settlement branch mismatch: "
+                    f"expected {expected_branch}, observed {actual_branch}"
+                )
+
+            confirmations = int(
+                tx.get("confirmations", 0) or 0
+            )
+
+            if confirmations < 1:
+                raise RuntimeError(
+                    "PENDING: recorded "
+                    f"{chain_name} {expected_branch} transaction "
+                    "is unconfirmed; refusing to rebroadcast"
+                )
+
+            settlement_blockhash = tx.get("blockhash")
+
+            if not settlement_blockhash:
+                raise RuntimeError(
+                    "SECURITY FAILURE: confirmed recorded "
+                    f"{chain_name} {expected_branch} transaction "
+                    "has no blockhash"
+                )
+
+        else:
+            tx = cli(
+                "getrawtransaction",
+                settlement_txid,
+                True,
+                settlement_blockhash,
+            )
+
+        if tx.get("in_active_chain") is False:
+            raise RuntimeError(
+                "SECURITY FAILURE: recorded "
+                f"{chain_name} {expected_branch} transaction "
+                "is no longer on the active chain"
+            )
+
+        confirmations = int(
+            tx.get("confirmations", 0) or 0
+        )
+
+        if confirmations < 1:
+            raise RuntimeError(
+                "SECURITY FAILURE: recorded "
+                f"{chain_name} {expected_branch} transaction "
+                "is not confirmed on the active chain"
+            )
+
+        spends_htlc = any(
+            vin.get("txid") == funding_txid
+            and vin.get("vout") == funding_vout
+            for vin in tx.get("vin", [])
+        )
+
+        if not spends_htlc:
+            raise RuntimeError(
+                "SECURITY FAILURE: recorded "
+                f"{chain_name} {expected_branch} transaction "
+                "does not spend this swap's HTLC"
+            )
+
+        actual_branch = classify_htlc_spend(
+            tx,
+            funding_txid,
+            funding_vout,
+            swap.secret_hash,
+        )
+
+        if actual_branch != expected_branch:
+            raise RuntimeError(
+                "SECURITY FAILURE: recorded "
+                f"{chain_name} settlement branch mismatch: "
+                f"expected {expected_branch}, observed {actual_branch}"
+            )
+
+        return {
+            "txid": settlement_txid,
+            "blockhash": settlement_blockhash,
+            "branch": actual_branch,
+        }
+
     funding_block = cli(
         "getblock",
         funding_blockhash,
@@ -1020,7 +1247,6 @@ def find_confirmed_htlc_spend(
         )
 
     return None
-
 
 def require_recovered_branch(
     swap,
@@ -1860,6 +2086,12 @@ def command_fund_blake(args):
     swap = load_swap(
         args.swap_id,
         role="alice",
+    )
+
+    require_local_protocol_role(
+        swap,
+        "alice",
+        "BLAKE funding",
     )
 
     if State(swap.state) != State.OFFERED:
@@ -4147,6 +4379,12 @@ def command_receive_blake_funded(args):
         role="bob",
     )
 
+    require_local_protocol_role(
+        swap,
+        "bob",
+        "BLAKE funding receipt",
+    )
+
     message, path = receive_message(
         args.swap_id,
         "blake-funded",
@@ -4626,6 +4864,12 @@ def command_fund_btc(args):
         role="bob",
     )
 
+    require_local_protocol_role(
+        swap,
+        "bob",
+        "BTC funding",
+    )
+
     if not swap.btc_alice_pub:
         raise ValueError(
             "Bob has no Bitcoin Alice pubkey"
@@ -4841,6 +5085,12 @@ def command_receive_btc_funded(args):
     swap = load_swap(
         args.swap_id,
         role="alice",
+    )
+
+    require_local_protocol_role(
+        swap,
+        "alice",
+        "BTC funding receipt",
     )
 
     message, path = receive_message(
@@ -5486,6 +5736,12 @@ def command_claim_blake(args):
         role="bob",
     )
 
+    require_local_protocol_role(
+        swap,
+        "bob",
+        "BLAKE claim",
+    )
+
 
     if State(swap.state) != State.BTC_CLAIMED:
         raise ValueError(
@@ -5840,6 +6096,12 @@ def command_refund_blake(args):
     swap = load_swap(
         args.swap_id,
         role="alice",
+    )
+
+    require_local_protocol_role(
+        swap,
+        "alice",
+        "BLAKE refund",
     )
 
     if State(swap.state) not in {
@@ -6549,6 +6811,12 @@ def command_receive_btc_claimed(args):
 def command_claim_btc(args):
     swap = load_swap(args.swap_id, role="alice")
 
+    require_local_protocol_role(
+        swap,
+        "alice",
+        "BTC claim",
+    )
+
     if State(swap.state) != State.BTC_FUNDED:
         raise ValueError(
             "claim-btc requires state BTC_FUNDED"
@@ -6779,6 +7047,12 @@ def command_claim_btc(args):
 @serialized_funding("btc")
 def command_refund_btc(args):
     swap = load_swap(args.swap_id,role="bob")
+
+    require_local_protocol_role(
+        swap,
+        "bob",
+        "BTC refund",
+    )
 
     if State(swap.state) != State.BTC_FUNDED:
         raise ValueError(
@@ -14117,6 +14391,119 @@ def scan_chain_for_expected_funding(swap, chain):
     return matches[0]
 
 
+def recover_recorded_confirmed_funding(swap, chain):
+    """
+    Fast path for a funding transaction whose exact outpoint was already
+    durably recorded before confirmation.
+
+    Verify the recorded outpoint directly.  If it is confirmed and valid,
+    recover its active blockhash from the local funding wallet and avoid a
+    historical chain scan.
+
+    Return None only when the recorded outpoint cannot be used as the fast
+    path; callers may then fall back to scan_chain_for_expected_funding().
+    A present-but-invalid recorded outpoint is a security failure and must
+    not silently fall back to a different transaction.
+    """
+
+    if chain == "blake":
+        cli = blake_cli
+        wallet = BLAKE_WALLET
+        tx_field = "blake_funding_txid"
+        vout_field = "blake_funding_vout"
+        block_field = "blake_funding_blockhash"
+        verifier = verify_blake_contract
+    elif chain == "btc":
+        cli = btc_cli
+        wallet = BTC_WALLET
+        tx_field = "btc_funding_txid"
+        vout_field = "btc_funding_vout"
+        block_field = "btc_funding_blockhash"
+        verifier = verify_btc_contract
+    else:
+        raise ValueError(
+            f"Unknown funding chain: {chain}"
+        )
+
+    txid = getattr(swap, tx_field)
+    vout = getattr(swap, vout_field)
+
+    if txid is None and vout is None:
+        return None
+
+    if txid is None or vout is None:
+        raise RuntimeError(
+            "SECURITY FAILURE: incomplete recorded "
+            f"{chain.upper()} funding outpoint"
+        )
+
+    utxo = cli(
+        "gettxout",
+        txid,
+        vout,
+    )
+
+    if not utxo:
+        # It may already be spent, or this participant may need full
+        # historical recovery.  Preserve the existing scan fallback.
+        return None
+
+    confirmations = int(
+        utxo.get("confirmations", 0) or 0
+    )
+
+    if confirmations < 1:
+        return None
+
+    #
+    # This proves amount, derived HTLC address and confirmation.
+    # Any mismatch in an already-recorded live outpoint is a security
+    # failure; do not silently search for some different transaction.
+    #
+    verifier(
+        swap,
+        verbose=False,
+    )
+
+    blockhash = getattr(
+        swap,
+        block_field,
+    )
+
+    #
+    # Normal funding recovery is especially cheap for the party that
+    # created the transaction: gettransaction gives us its confirmed
+    # blockhash directly.
+    #
+    if not blockhash:
+        try:
+            wallet_tx = cli(
+                "gettransaction",
+                txid,
+                wallet=wallet,
+            )
+        except Exception:
+            wallet_tx = None
+
+        if isinstance(wallet_tx, dict):
+            blockhash = wallet_tx.get(
+                "blockhash"
+            )
+
+    if not blockhash:
+        # Counterparty state may know the exact outpoint without owning
+        # the funding transaction.  Let the existing historical scanner
+        # recover the blockhash in that less-common case.
+        return None
+
+    return {
+        "txid": txid,
+        "vout": int(vout),
+        "blockhash": blockhash,
+        "confirmations": confirmations,
+        "recorded_fast_path": True,
+    }
+
 def command_sync_funding(args):
     """
     Reconcile funding state directly from confirmed chain history.
@@ -14153,9 +14540,15 @@ def command_sync_funding(args):
         #
         if state == State.OFFERED:
 
-            recovered = scan_chain_for_expected_funding(
-                swap,
-                "blake",
+            recovered = (
+                recover_recorded_confirmed_funding(
+                    swap,
+                    "blake",
+                )
+                or scan_chain_for_expected_funding(
+                    swap,
+                    "blake",
+                )
             )
 
             if recovered is None:
@@ -14209,9 +14602,24 @@ def command_sync_funding(args):
             )
 
             #
-            # Continue around the loop. It is possible that Bitcoin
-            # funding also already happened while this process was away.
+            # If Bitcoin funding is already recorded, continue around the
+            # loop and synchronize it too.  Otherwise stop here.  Missing
+            # Bitcoin funding is the normal next protocol condition after
+            # BLAKE funding, and ordinary Resume must not launch a
+            # historical Bitcoin scan merely to prove that Bob has not
+            # funded yet.
             #
+            if (
+                swap.btc_funding_txid is None
+                and swap.btc_funding_vout is None
+            ):
+                print()
+                print(
+                    "Bitcoin funding is not recorded; "
+                    "leaving BTC discovery for the next protocol stage."
+                )
+                break
+
             continue
 
         #
@@ -14219,9 +14627,15 @@ def command_sync_funding(args):
         #
         if state == State.BLAKE_FUNDED:
 
-            recovered = scan_chain_for_expected_funding(
-                swap,
-                "btc",
+            recovered = (
+                recover_recorded_confirmed_funding(
+                    swap,
+                    "btc",
+                )
+                or scan_chain_for_expected_funding(
+                    swap,
+                    "btc",
+                )
             )
 
             if recovered is None:
@@ -14293,7 +14707,6 @@ def command_sync_funding(args):
         "state:   ",
         swap.state,
     )
-
 
 def command_sync_settlement(args):
     """
@@ -14684,6 +15097,35 @@ def _reconcile_local_role(swap):
     )
 
 
+def require_local_protocol_role(
+    swap,
+    expected_role,
+    action,
+):
+    """
+    Fail closed before any economic action unless the persistent
+    participant identity is pinned to this swap in the protocol
+    role required by that action.
+    """
+    if expected_role not in ("alice", "bob"):
+        raise ValueError(
+            "expected_role must be alice or bob"
+        )
+
+    actual_role, me, counterparty = (
+        _reconcile_local_role(swap)
+    )
+
+    if actual_role != expected_role:
+        raise RuntimeError(
+            "SECURITY FAILURE: refusing "
+            f"{action} as protocol {actual_role}; "
+            f"protocol requires {expected_role}"
+        )
+
+    return actual_role, me, counterparty
+
+
 def _reconcile_quiet(fn, *args, **kwargs):
     import contextlib
     import io
@@ -14716,6 +15158,7 @@ def _reconcile_observe_htlc(swap, chain):
     vout = getattr(work, vout_field)
     blockhash = getattr(work, block_field)
 
+
     if (txid is None) != (vout is None):
         raise RuntimeError(
             f"SECURITY FAILURE: incomplete recorded {chain.upper()} funding outpoint"
@@ -14727,11 +15170,13 @@ def _reconcile_observe_htlc(swap, chain):
         # Direct-chain recovery is deliberately allowed in this read-only
         # report.  It updates only this temporary in-memory copy.
         try:
+
             match = _reconcile_quiet(
                 scan_chain_for_expected_funding,
                 work,
                 chain,
             )
+
         except Exception as e:
             return {
                 "status": "unknown",
@@ -14749,9 +15194,101 @@ def _reconcile_observe_htlc(swap, chain):
         setattr(work, vout_field, vout)
         setattr(work, block_field, blockhash)
 
+
     utxo = cli("gettxout", txid, vout)
 
+
     if utxo:
+        confirmations = int(
+            utxo.get("confirmations", 0) or 0
+        )
+
+        #
+        # A zero-confirmation funding output is not invalid merely
+        # because it is still waiting for a block.  Before classifying
+        # it as pending, independently prove that the observed output
+        # has the expected amount and HTLC address.
+        #
+        if confirmations < 1:
+            try:
+                actual_address = (
+                    utxo
+                    .get("scriptPubKey", {})
+                    .get("address")
+                )
+
+                if chain == "blake":
+                    expected_address = (
+                        derive_blake_contract_address(
+                            get_blake_contract_descriptor(work)
+                        )
+                    )
+
+                    actual_amount = Decimal(
+                        str(utxo["value"])
+                    )
+                    expected_amount = Decimal(
+                        str(work.blake_amount)
+                    )
+
+                    if (
+                        abs(actual_amount - expected_amount)
+                        > Decimal("0.00000001")
+                    ):
+                        raise RuntimeError(
+                            "Wrong BLAKE amount: expected "
+                            f"{work.blake_amount}, "
+                            f"found {utxo['value']}"
+                        )
+
+                    if actual_address != expected_address:
+                        raise RuntimeError(
+                            "BLAKE funding output does not match "
+                            "the expected HTLC address"
+                        )
+
+                else:
+                    expected_address = (
+                        derive_btc_contract_address(
+                            get_btc_contract_descriptor(work)
+                        )
+                    )
+
+                    actual_sats = int(
+                        Decimal(str(utxo["value"]))
+                        * Decimal(100_000_000)
+                    )
+
+                    if actual_sats != work.btc_sats:
+                        raise RuntimeError(
+                            "Wrong Bitcoin amount: expected "
+                            f"{work.btc_sats} sats, "
+                            f"found {actual_sats} sats"
+                        )
+
+                    if actual_address != expected_address:
+                        raise RuntimeError(
+                            "Bitcoin funding output does not match "
+                            "the expected HTLC address"
+                        )
+
+            except Exception as e:
+                return {
+                    "status": "invalid",
+                    "txid": txid,
+                    "vout": vout,
+                    "reason": f"{type(e).__name__}: {e}",
+                }
+
+            return {
+                "status": "pending",
+                "txid": txid,
+                "vout": vout,
+                "blockhash": blockhash,
+                "confirmations": confirmations,
+                "discovered": discovered,
+            }
+
         try:
             _reconcile_quiet(verifier, work, verbose=False)
         except Exception as e:
@@ -14767,11 +15304,127 @@ def _reconcile_observe_htlc(swap, chain):
             "txid": txid,
             "vout": vout,
             "blockhash": blockhash,
-            "confirmations": int(utxo.get("confirmations", 0) or 0),
+            "confirmations": confirmations,
             "discovered": discovered,
         }
 
+    #
+    # A recorded funding transaction may still be in the mempool.
+    # Some RPC/provider paths can fail to expose the output through
+    # gettxout even though the exact recorded transaction is available.
+    #
+    # Before calling that state unknown, independently fetch the
+    # recorded transaction and prove that its exact vout is the expected
+    # HTLC output.  Only an unconfirmed transaction is classified here;
+    # confirmed/spent cases continue through normal settlement recovery.
+    #
     if not blockhash:
+        try:
+            funding_tx = cli(
+                "getrawtransaction",
+                txid,
+                True,
+            )
+        except Exception:
+            funding_tx = None
+
+        if funding_tx is not None:
+            confirmations = int(
+                funding_tx.get("confirmations", 0) or 0
+            )
+
+            if confirmations < 1:
+                funding_output = next(
+                    (
+                        output
+                        for output in funding_tx.get("vout", [])
+                        if int(output.get("n", -1)) == int(vout)
+                    ),
+                    None,
+                )
+
+                if funding_output is None:
+                    return {
+                        "status": "invalid",
+                        "txid": txid,
+                        "vout": vout,
+                        "reason": (
+                            "recorded unconfirmed funding transaction "
+                            "does not contain the recorded vout"
+                        ),
+                    }
+
+                actual_address = (
+                    funding_output
+                    .get("scriptPubKey", {})
+                    .get("address")
+                )
+
+                try:
+                    if chain == "blake":
+                        expected_address = (
+                            derive_blake_contract_address(
+                                get_blake_contract_descriptor(work)
+                            )
+                        )
+
+                        actual_amount = Decimal(
+                            str(funding_output["value"])
+                        )
+                        expected_amount = Decimal(
+                            str(work.blake_amount)
+                        )
+
+                        if (
+                            abs(actual_amount - expected_amount)
+                            > Decimal("0.00000001")
+                        ):
+                            raise RuntimeError(
+                                "recorded pending BLAKE funding "
+                                "has the wrong amount"
+                            )
+
+                    else:
+                        expected_address = (
+                            derive_btc_contract_address(
+                                get_btc_contract_descriptor(work)
+                            )
+                        )
+
+                        actual_sats = int(
+                            Decimal(str(funding_output["value"]))
+                            * Decimal(100_000_000)
+                        )
+
+                        if actual_sats != int(work.btc_sats):
+                            raise RuntimeError(
+                                "recorded pending Bitcoin funding "
+                                "has the wrong amount"
+                            )
+
+                    if actual_address != expected_address:
+                        raise RuntimeError(
+                            f"recorded pending {chain.upper()} funding "
+                            "does not match the expected HTLC address"
+                        )
+
+                except Exception as e:
+                    return {
+                        "status": "invalid",
+                        "txid": txid,
+                        "vout": vout,
+                        "reason": f"{type(e).__name__}: {e}",
+                    }
+
+                return {
+                    "status": "pending",
+                    "txid": txid,
+                    "vout": vout,
+                    "blockhash": None,
+                    "confirmations": 0,
+                    "discovered": discovered,
+                }
+
         return {
             "status": "unknown",
             "txid": txid,
@@ -14779,12 +15432,129 @@ def _reconcile_observe_htlc(swap, chain):
             "reason": "outpoint unavailable and funding blockhash is unknown",
         }
 
+    #
+    # The local participant may already have broadcast its expected
+    # claim/refund transaction and durably recorded its txid while that
+    # settlement transaction is still unconfirmed.
+    #
+    # Prove the exact mempool transaction spends this HTLC and uses the
+    # expected branch.  This is a WAIT condition, not manual attention.
+    #
+    if chain == "btc":
+        known_spenders = [
+            ("claim", work.btc_claim_txid, work.btc_claim_blockhash),
+            ("refund", work.btc_refund_txid, work.btc_refund_blockhash),
+        ]
+    else:
+        known_spenders = [
+            ("claim", work.blake_claim_txid, work.blake_claim_blockhash),
+            ("refund", work.blake_refund_txid, work.blake_refund_blockhash),
+        ]
+
+    pending_spenders = [
+        (expected_branch, settlement_txid)
+        for expected_branch, settlement_txid, settlement_blockhash
+        in known_spenders
+        if settlement_txid is not None
+        and settlement_blockhash is None
+    ]
+
+    if len(pending_spenders) > 1:
+        return {
+            "status": "invalid",
+            "txid": txid,
+            "vout": vout,
+            "reason": (
+                "durable state records multiple unconfirmed "
+                f"{chain.upper()} settlement transactions"
+            ),
+        }
+
+    if pending_spenders:
+        expected_branch, settlement_txid = pending_spenders[0]
+
+        #
+        # Direct lookup is only a fast path for recognizing our exact
+        # unconfirmed settlement.  Failure to retrieve the tx here is
+        # not itself ambiguous: it may have just confirmed, or a node
+        # without txindex may no longer expose it through this RPC.
+        #
+        # In either case, fall through to find_confirmed_htlc_spend(),
+        # which has the hardened wallet/block recovery path.
+        #
+        try:
+            settlement_tx = cli(
+                "getrawtransaction",
+                settlement_txid,
+                True,
+            )
+        except Exception:
+            settlement_tx = None
+
+        if settlement_tx is not None:
+            confirmations = int(
+                settlement_tx.get("confirmations", 0) or 0
+            )
+
+            if confirmations < 1:
+                try:
+                    spends_htlc = any(
+                        vin.get("txid") == txid
+                        and int(vin.get("vout", -1)) == int(vout)
+                        for vin in settlement_tx.get("vin", [])
+                    )
+
+                    if not spends_htlc:
+                        raise RuntimeError(
+                            "recorded pending settlement transaction "
+                            "does not spend this swap's HTLC"
+                        )
+
+                    actual_branch = classify_htlc_spend(
+                        settlement_tx,
+                        txid,
+                        vout,
+                        work.secret_hash,
+                    )
+
+                    if actual_branch != expected_branch:
+                        raise RuntimeError(
+                            "recorded pending settlement branch mismatch: "
+                            f"expected {expected_branch}, "
+                            f"observed {actual_branch}"
+                        )
+
+                except Exception as e:
+                    return {
+                        "status": "pending-or-ambiguous",
+                        "txid": txid,
+                        "vout": vout,
+                        "reason": f"{type(e).__name__}: {e}",
+                    }
+
+                return {
+                    "status": "pending-spend",
+                    "txid": txid,
+                    "vout": vout,
+                    "spend_txid": settlement_txid,
+                    "branch": actual_branch,
+                    "confirmations": 0,
+                    "discovered": discovered,
+                }
+
+            # A directly visible confirmed transaction deliberately falls
+            # through too.  find_confirmed_htlc_spend() independently
+            # verifies the recorded txid, HTLC outpoint, branch, active
+            # chain status, confirmations, and blockhash.
+
     try:
+
         spend = _reconcile_quiet(
             find_confirmed_htlc_spend,
             work,
             chain,
         )
+
     except Exception as e:
         return {
             "status": "pending-or-ambiguous",
@@ -14811,7 +15581,6 @@ def _reconcile_observe_htlc(swap, chain):
         "discovered": discovered,
     }
 
-
 def _reconcile_next_action(swap, role, blake, btc, blake_height, btc_height):
     """Return one conservative recommendation.  Never execute it here."""
     state = State(swap.state)
@@ -14835,11 +15604,37 @@ def _reconcile_next_action(swap, role, blake, btc, blake_height, btc_height):
             "chain reality does not prove both claim branches",
         )
 
+    if blake.get("status") == "pending-spend":
+        return (
+            "wait",
+            "BLAKE settlement transaction is broadcast "
+            "and awaiting confirmation",
+        )
+
+    if btc.get("status") == "pending-spend":
+        return (
+            "wait",
+            "Bitcoin settlement transaction is broadcast "
+            "and awaiting confirmation",
+        )
+
     unsafe = {"unknown", "invalid", "pending-or-ambiguous"}
     if blake.get("status") in unsafe:
         return "manual-attention", f"BLAKE observation is {blake['status']}"
     if btc.get("status") in unsafe:
         return "manual-attention", f"Bitcoin observation is {btc['status']}"
+
+    if blake.get("status") == "pending":
+        return (
+            "wait",
+            "BLAKE funding is broadcast and awaiting confirmation",
+        )
+
+    if btc.get("status") == "pending":
+        return (
+            "wait",
+            "Bitcoin funding is broadcast and awaiting confirmation",
+        )
 
     # Chain truth outranks a stale checkpoint.
 
@@ -14963,7 +15758,6 @@ def _reconcile_next_action(swap, role, blake, btc, blake_height, btc_height):
 
     return "manual-attention", f"no conservative rule matched checkpoint {state.value}"
 
-
 def _reconcile_negotiation_status(swap):
     """
     Classify whether enough authenticated negotiation state
@@ -15018,7 +15812,13 @@ def _reconcile_execution_readiness(
         "checked": False,
         "action": action,
         "ready": None,
-        "wallet": None,
+        "wallet": (
+            BLAKE_WALLET
+            if action == "fund-blake"
+            else BTC_WALLET
+            if action == "fund-btc"
+            else None
+        ),
         "wallet_loaded": None,
         "trusted_balance": None,
         "required_balance": None,
@@ -15035,6 +15835,8 @@ def _reconcile_execution_readiness(
     result["checked"] = True
 
     if action == "fund-blake":
+        wallet = BLAKE_WALLET
+
         if role != "alice":
             result["ready"] = False
             result["reasons"].append("fund-blake requires protocol Alice")
@@ -15043,7 +15845,6 @@ def _reconcile_execution_readiness(
         cli = blake_cli
         chain_name = "BLAKE"
         balance_unit = "BLAKE"
-        wallet = BLAKE_WALLET
 
         fee_reserve = Decimal(
             os.environ.get(
@@ -15068,6 +15869,8 @@ def _reconcile_execution_readiness(
         )
 
     else:
+        wallet = BTC_WALLET
+
         if role != "bob":
             result["ready"] = False
             result["reasons"].append("fund-btc requires protocol Bob")
@@ -15076,7 +15879,6 @@ def _reconcile_execution_readiness(
         cli = btc_cli
         chain_name = "Bitcoin"
         balance_unit = "BTC"
-        wallet = BTC_WALLET
 
         fee_reserve_sats = int(
             os.environ.get(
@@ -15109,8 +15911,6 @@ def _reconcile_execution_readiness(
                 "2",
             )
         )
-
-    result["wallet"] = wallet
 
     if minimum_blocks < 1:
         raise ValueError(
@@ -15190,12 +15990,13 @@ def _reconcile_execution_readiness(
 
     return result
 
-
 def build_reconcile_report(swap):
     """Build a machine-readable, read-only protocol report."""
+
     negotiation_status, negotiation_reason = (
         _reconcile_negotiation_status(swap)
     )
+
 
     try:
         role, me, counterparty = _reconcile_local_role(swap)
@@ -15268,10 +16069,55 @@ def build_reconcile_report(swap):
         }
 
     blake_height = int(blake_cli("getblockcount"))
+
     btc_height = int(btc_cli("getblockcount"))
 
     blake = _reconcile_observe_htlc(swap, "blake")
-    btc = _reconcile_observe_htlc(swap, "btc")
+
+    state = State(swap.state)
+
+    #
+    # Do not perform an expensive forensic Bitcoin funding scan when
+    # current protocol state already has a cheaper, unambiguous next step.
+    #
+    # OFFERED + confirmed BLAKE means the durable checkpoint is stale:
+    # synchronize BLAKE funding first, then reconcile again.
+    #
+    # BLAKE_FUNDED + no recorded Bitcoin outpoint is the normal waiting
+    # condition while Bob's Bitcoin funding window remains open.  Treat it
+    # as absent for ordinary reconciliation.  Once that window closes,
+    # fall back to full chain discovery before any refund decision so that
+    # "Bitcoin was never funded" is independently established.
+    #
+    if (
+        state == State.OFFERED
+        and blake.get("status") == "funded"
+    ):
+        btc = {
+            "status": "not-evaluated",
+            "reason": (
+                "Bitcoin observation deferred until confirmed "
+                "BLAKE funding is synchronized locally"
+            ),
+        }
+
+    elif (
+        state == State.BLAKE_FUNDED
+        and swap.btc_funding_txid is None
+        and swap.btc_funding_vout is None
+        and btc_height < int(swap.btc_timeout)
+    ):
+        btc = {
+            "status": "absent",
+            "discovery_deferred": True,
+            "reason": (
+                "no Bitcoin funding outpoint is recorded and "
+                "the Bitcoin funding window remains open"
+            ),
+        }
+
+    else:
+        btc = _reconcile_observe_htlc(swap, "btc")
 
     secret_value = None
     secret_source = "none"
@@ -15294,6 +16140,7 @@ def build_reconcile_report(swap):
                 "SECURITY FAILURE: locally known secret does not match swap hash"
             )
 
+
     action, reason = _reconcile_next_action(
         swap,
         role,
@@ -15303,6 +16150,8 @@ def build_reconcile_report(swap):
         btc_height,
     )
 
+
+
     readiness = _reconcile_execution_readiness(
         swap,
         role,
@@ -15310,6 +16159,7 @@ def build_reconcile_report(swap):
         blake_height,
         btc_height,
     )
+
 
     return {
         "swap_id": swap.swap_id,
@@ -15352,7 +16202,6 @@ def build_reconcile_report(swap):
         "readiness": readiness,
         "read_only": True,
     }
-
 
 def command_reconcile(args):
     """Read-only protocol brain: observe, derive, recommend; never act."""

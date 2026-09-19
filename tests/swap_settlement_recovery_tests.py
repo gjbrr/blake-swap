@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
+import importlib.util
 import sys
 import time
+from types import SimpleNamespace
 
 import swap_protocol_tests as h
 
@@ -603,6 +606,261 @@ def test_blake_refund():
     print("swap:", swap_id)
 
 
+def test_confirmed_recorded_refund_without_txindex():
+    """
+    Regression for the live settlement-recovery failure:
+
+    A locally broadcast settlement can be confirmed while durable state
+    still records its txid but no blockhash.  A node without txindex may
+    then fail getrawtransaction(txid).
+
+    Reconciliation must fall through to the hardened wallet recovery
+    path, independently decode the exact recorded transaction, prove
+    that it spends this swap's HTLC via the expected branch, and report
+    confirmed chain truth rather than pending-or-ambiguous.
+    """
+
+    h.banner(
+        "RECONCILE REGRESSION: CONFIRMED REFUND WITHOUT TXINDEX"
+    )
+
+    spec = importlib.util.spec_from_file_location(
+        "swap_v2_no_txindex_regression",
+        str(h.SWAP_V2),
+    )
+
+    h.require(
+        spec is not None and spec.loader is not None,
+        "could not create import spec for swap_v2.py",
+    )
+
+    engine = importlib.util.module_from_spec(spec)
+
+    # swap_v2.py imports sibling modules from src/, so reproduce the
+    # normal script import environment while loading it in-process.
+    src_dir = str(h.SWAP_V2.parent)
+    inserted_src = False
+
+    if src_dir not in sys.path:
+        sys.path.insert(0, src_dir)
+        inserted_src = True
+
+    # dataclasses and similar module machinery expect the module to be
+    # registered while its top-level code executes.
+    sys.modules[spec.name] = engine
+
+    try:
+        spec.loader.exec_module(engine)
+
+        funding_txid = "11" * 32
+        funding_vout = 1
+        funding_blockhash = "aa" * 32
+
+        refund_txid = "22" * 32
+        refund_blockhash = "bb" * 32
+
+        secret = bytes.fromhex("33" * 32)
+        secret_hash = hashlib.sha256(secret).hexdigest()
+
+        swap = SimpleNamespace(
+            swap_id="regression-no-txindex",
+
+            blake_funding_txid=funding_txid,
+            blake_funding_vout=funding_vout,
+            blake_funding_blockhash=funding_blockhash,
+
+            blake_claim_txid=None,
+            blake_claim_blockhash=None,
+
+            # Exact settlement identity was persisted immediately after
+            # broadcast, but the process has not yet synchronized the
+            # subsequently confirmed blockhash.
+            blake_refund_txid=refund_txid,
+            blake_refund_blockhash=None,
+
+            secret_hash=secret_hash,
+
+            # These are not expected to be used in this spent-output path,
+            # but keeping realistic swap fields makes accidental future
+            # dependencies fail clearly rather than mysteriously.
+            blake_amount=0.0001,
+            btc_sats=2850,
+        )
+
+        calls = []
+
+        def fake_blake_cli(*args, wallet=None):
+            h.require(
+                bool(args),
+                "mock BLAKE RPC called without method",
+            )
+
+            method = args[0]
+            calls.append(
+                (method, args[1:], wallet)
+            )
+
+            if method == "gettxout":
+                h.require(
+                    args[1] == funding_txid,
+                    "gettxout used wrong funding txid",
+                )
+                h.require(
+                    int(args[2]) == funding_vout,
+                    "gettxout used wrong funding vout",
+                )
+
+                # Funding outpoint is gone: settlement has spent it.
+                return None
+
+            if method == "getrawtransaction":
+                h.require(
+                    args[1] == refund_txid,
+                    "direct settlement lookup used wrong txid",
+                )
+
+                # This is the production condition we are freezing:
+                # no txindex / exact tx unavailable by this RPC route.
+                raise RuntimeError(
+                    "No such mempool or blockchain transaction. "
+                    "Use -txindex or provide a block hash."
+                )
+
+            if method == "gettransaction":
+                h.require(
+                    args[1] == refund_txid,
+                    "wallet recovery used wrong settlement txid",
+                )
+                h.require(
+                    wallet == "mock-blake-wallet",
+                    "wallet recovery used wrong wallet",
+                )
+
+                return {
+                    "hex": "deadbeef",
+                    "confirmations": 3,
+                    "blockhash": refund_blockhash,
+                }
+
+            if method == "decoderawtransaction":
+                h.require(
+                    args[1] == "deadbeef",
+                    "wallet recovery decoded unexpected transaction hex",
+                )
+
+                return {
+                    "txid": refund_txid,
+                    "vin": [
+                        {
+                            "txid": funding_txid,
+                            "vout": funding_vout,
+
+                            # No 32-byte witness item hashes to secret_hash,
+                            # so classify_htlc_spend() must identify refund.
+                            "txinwitness": [
+                                "00",
+                                "51",
+                            ],
+                        }
+                    ],
+                }
+
+            raise h.TestFailure(
+                f"unexpected mock BLAKE RPC method: {method}"
+            )
+
+        original_blake_cli = engine.blake_cli
+        original_blake_wallet = engine.BLAKE_WALLET
+
+        try:
+            engine.blake_cli = fake_blake_cli
+            engine.BLAKE_WALLET = "mock-blake-wallet"
+
+            observed = engine._reconcile_observe_htlc(
+                swap,
+                "blake",
+            )
+
+        finally:
+            engine.blake_cli = original_blake_cli
+            engine.BLAKE_WALLET = original_blake_wallet
+
+        h.require(
+            observed.get("status") == "spent",
+            (
+                "confirmed recorded refund was not recovered as spent: "
+                f"{observed}"
+            ),
+        )
+
+        h.require(
+            observed.get("branch") == "refund",
+            (
+                "confirmed recorded refund recovered wrong branch: "
+                f"{observed}"
+            ),
+        )
+
+        h.require(
+            observed.get("spend_txid") == refund_txid,
+            (
+                "confirmed recorded refund recovered wrong txid: "
+                f"{observed}"
+            ),
+        )
+
+        h.require(
+            observed.get("spend_blockhash") == refund_blockhash,
+            (
+                "confirmed recorded refund recovered wrong blockhash: "
+                f"{observed}"
+            ),
+        )
+
+        h.require(
+            observed.get("status") != "pending-or-ambiguous",
+            (
+                "no-txindex recovery regressed to pending-or-ambiguous: "
+                f"{observed}"
+            ),
+        )
+
+        methods = [
+            method
+            for method, _args, _wallet
+            in calls
+        ]
+
+        h.require(
+            "gettransaction" in methods,
+            (
+                "regression did not exercise wallet gettransaction "
+                "fallback"
+            ),
+        )
+
+        h.require(
+            "decoderawtransaction" in methods,
+            (
+                "regression did not independently decode wallet tx"
+            ),
+        )
+
+        h.ok(
+            "confirmed recorded BLAKE refund recovered without txindex"
+        )
+
+    finally:
+        sys.modules.pop(spec.name, None)
+
+        if inserted_src:
+            try:
+                sys.path.remove(src_dir)
+            except ValueError:
+                pass
+
+
+
 def main():
     h.PASS_COUNT = 0
     h.FAIL_COUNT = 0
@@ -614,6 +872,10 @@ def main():
         ("BLAKE CLAIM", test_blake_claim),
         ("BTC REFUND", test_btc_refund),
         ("BLAKE REFUND", test_blake_refund),
+        (
+            "CONFIRMED REFUND WITHOUT TXINDEX",
+            test_confirmed_recorded_refund_without_txindex,
+        ),
     ]
 
     try:

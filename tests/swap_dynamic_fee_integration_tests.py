@@ -1,14 +1,19 @@
 import os
+from decimal import Decimal
 
 import swap_v2
 
 
 def fake_btc_cli(method, *args, **kwargs):
     if method == "estimatesmartfee":
-        assert args == (2,)
+        assert len(args) == 1
+        target = int(args[0])
+
+        assert target in (1, 2, 3)
+
         return {
             "feerate": 0.00001190,
-            "blocks": 2,
+            "blocks": target,
         }
 
     if method == "getmempoolinfo":
@@ -28,6 +33,7 @@ def main():
     names = [
         "BLAKE_SWAP_BTC_SPEND_FEE_SATS",
         "BLAKE_SWAP_FEE_TARGET_BLOCKS",
+        "BLAKE_SWAP_BTC_FUNDING_FEE_TARGET_BLOCKS",
         "BLAKE_SWAP_FEE_RATE_MULTIPLIER",
         "BLAKE_SWAP_BTC_SETTLEMENT_VSIZE_ESTIMATE",
     ]
@@ -42,6 +48,21 @@ def main():
 
         for name in names:
             os.environ.pop(name, None)
+
+        # BTC funding is intentionally more urgent than settlement:
+        # one-block target by default.
+        assert swap_v2.btc_funding_fee_target_blocks() == 1
+
+        os.environ[
+            "BLAKE_SWAP_BTC_FUNDING_FEE_TARGET_BLOCKS"
+        ] = "3"
+
+        assert swap_v2.btc_funding_fee_target_blocks() == 3
+
+        os.environ.pop(
+            "BLAKE_SWAP_BTC_FUNDING_FEE_TARGET_BLOCKS",
+            None,
+        )
 
         # 200 vB × 1.19 sat/vB = 238 sats,
         # therefore minimum trade = 239 sats.

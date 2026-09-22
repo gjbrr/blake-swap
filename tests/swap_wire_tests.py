@@ -168,8 +168,10 @@ def main():
     ):
         del legacy[field]
 
-    validate_message(legacy)
-    ok("legacy offer accepted structurally")
+    expect_reject(
+        "versionless timeout offer rejected",
+        legacy,
+    )
 
     partial_legacy = dict(legacy)
     partial_legacy[

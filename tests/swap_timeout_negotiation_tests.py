@@ -242,6 +242,47 @@ def test_unknown_policy():
 
 # =====================================================================
 # CASE 3
+# Versionless offer / timeout-policy downgrade attempt
+# =====================================================================
+
+def test_versionless_offer():
+    banner(
+        "TIME MALLORY 3: VERSIONLESS TIMEOUT OFFER"
+    )
+
+    swap_id, path = publish_policy_offer()
+
+    def strip_policy_metadata(message):
+        for field in (
+            "timeout_policy_version",
+            "btc_timeout_window_seconds",
+            "blake_timeout_window_seconds",
+            "bob_recovery_seconds",
+        ):
+            message.pop(
+                field,
+                None,
+            )
+
+    mutate_offer(
+        path,
+        strip_policy_metadata,
+    )
+
+    require_rejected_cleanly(
+        swap_id,
+        contains=(
+            "timeout policy version"
+        ),
+    )
+
+    h.ok(
+        "versionless timeout-policy downgrade rejected"
+    )
+
+
+# =====================================================================
+# CASE 4
 # Missing recovery metadata
 # =====================================================================
 
@@ -273,7 +314,7 @@ def test_missing_recovery():
 
 
 # =====================================================================
-# CASE 4
+# CASE 5
 # Expired Bitcoin deadline
 # =====================================================================
 
@@ -311,7 +352,7 @@ def test_expired_btc():
 
 
 # =====================================================================
-# CASE 5
+# CASE 6
 # Expired BLAKE deadline
 # =====================================================================
 
@@ -349,7 +390,7 @@ def test_expired_blake():
 
 
 # =====================================================================
-# CASE 6
+# CASE 7
 # Bitcoin deadline still future, but far too short
 # =====================================================================
 
@@ -388,7 +429,7 @@ def test_short_btc_window():
 
 
 # =====================================================================
-# CASE 7
+# CASE 8
 # Actual BLAKE recovery gap one block below Bob's requirement.
 # =====================================================================
 
@@ -476,7 +517,7 @@ def test_short_recovery_gap():
 
 
 # =====================================================================
-# CASE 8
+# CASE 9
 # Metadata claims an internally impossible safety relationship.
 # Actual heights may still be safe; signed description is dishonest.
 # =====================================================================
@@ -548,6 +589,7 @@ def main():
     tests = [
         test_valid_offer,
         test_unknown_policy,
+        test_versionless_offer,
         test_missing_recovery,
         test_expired_btc,
         test_expired_blake,

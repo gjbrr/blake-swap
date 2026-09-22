@@ -336,22 +336,33 @@ def parse_swap_id(output: str) -> str:
 
 
 def make_fresh_swap(*, blake=0.1, sats=25_000) -> str:
-    btc_height = int(btc_cli("getblockcount"))
-    blake_height = int(blake_cli("getblockcount"))
-
-    # Regtest-only spacing, matching the current swap_v2 policy.
-    btc_timeout = btc_height + 8
-    blake_timeout = max(blake_height + 16, btc_timeout + 30)
-
+    #
+    # All negotiable test swaps use the same mandatory v1.5
+    # timeout-policy path as production.  Absolute BTC and BLAKE
+    # heights are independent; tests that need expiry should read
+    # the persisted deadlines and mine to them explicitly.
+    #
     p = swap_cmd(
         "new",
         "--blake", str(blake),
         "--sats", str(sats),
-        "--btc-timeout", str(btc_timeout),
-        "--blake-timeout", str(blake_timeout),
         role="alice",
     )
-    swap_id = parse_swap_id(p.stdout)
+
+    swap_id = parse_swap_id(
+        p.stdout
+    )
+
+    state = load_state(
+        swap_id,
+        "alice",
+    )
+
+    require(
+        state.get("timeout_policy_version") == "1.5",
+        "fresh test swap did not use mandatory v1.5 timeout policy",
+    )
+
     return swap_id
 
 

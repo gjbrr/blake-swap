@@ -1,0 +1,96 @@
+#!/usr/bin/env python3
+
+import base64
+import json
+import ssl
+import sys
+import urllib.parse
+import urllib.request
+from pathlib import Path
+
+CONFIG = Path.home() / ".blake-swap-live" / "start9-blake-rpc.json"
+
+cfg = json.loads(CONFIG.read_text())
+
+base_url = cfg["url"].rstrip("/")
+username = cfg["username"]
+password = cfg["password"]
+
+wallet = None
+args = []
+
+for arg in sys.argv[1:]:
+    if arg in ("-regtest", "-mainnet"):
+        # Compatibility shim:
+        # swap_v2.py currently injects -regtest into BLAKE CLI calls.
+        # This adapter deliberately targets Start9 BLAKE mainnet.
+        continue
+
+    if arg.startswith("-datadir="):
+        continue
+
+    if arg.startswith("-rpcwallet="):
+        wallet = arg.split("=", 1)[1]
+        continue
+
+    if arg.startswith("-"):
+        raise SystemExit(f"unsupported bitcoin-cli option: {arg}")
+
+    args.append(arg)
+
+if not args:
+    raise SystemExit("RPC method required")
+
+method = args[0]
+
+def parse_param(value):
+    try:
+        return json.loads(value)
+    except Exception:
+        return value
+
+params = [parse_param(x) for x in args[1:]]
+
+url = base_url
+if wallet:
+    url += "/wallet/" + urllib.parse.quote(wallet, safe="")
+
+payload = json.dumps({
+    "jsonrpc": "1.0",
+    "id": "blake-swap",
+    "method": method,
+    "params": params,
+}).encode()
+
+token = base64.b64encode(
+    f"{username}:{password}".encode()
+).decode()
+
+req = urllib.request.Request(
+    url,
+    data=payload,
+    headers={
+        "Authorization": f"Basic {token}",
+        "Content-Type": "text/plain",
+    },
+)
+
+# Prototype LAN connection to StartOS local certificate.
+ctx = ssl._create_unverified_context()
+
+try:
+    with urllib.request.urlopen(req, context=ctx, timeout=30) as response:
+        result = json.loads(response.read().decode())
+except Exception as e:
+    raise SystemExit(f"BLAKE RPC failed: {e}")
+
+if result.get("error") is not None:
+    print(json.dumps(result["error"]), file=sys.stderr)
+    raise SystemExit(1)
+
+value = result.get("result")
+
+if isinstance(value, str):
+    print(value)
+else:
+    print(json.dumps(value, separators=(",", ":")))

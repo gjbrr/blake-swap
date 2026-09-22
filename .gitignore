@@ -8,3 +8,30 @@ __pycache__/
 
 # Generated participant profile
 scripts/participant-env
+
+# Local development backups / scratch artifacts
+*.before-*
+*.after-*
+asyncio
+protocol
+
+# Live participant/runtime configuration
+scripts/participant-live-env
+
+# Local state / secrets / wallet material
+*.key
+*.pem
+*.cookie
+*.wallet
+.env.*
+state/
+swaps/
+messages/
+nostr/
+wallets/
+
+# Local UI/install scratch copies
+install_blake_web_ui_v1.sh
+install_blake_web_ui_v1_1.sh
+blake_web_ui.py
+blake-ui

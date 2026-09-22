@@ -343,12 +343,6 @@ class Swap:
                     "Stored secret does not match secret_hash"
                 )
 
-        if self.blake_timeout <= self.btc_timeout:
-            raise ValueError(
-                "Unsafe timeout ordering: "
-                "BLAKE timeout must be later than BTC timeout"
-            )
-
         if self.blake_amount <= 0:
             raise ValueError("BLAKE amount must be positive")
 
@@ -938,10 +932,16 @@ def find_confirmed_htlc_spend(
             f"Swap has no {chain_name} funding vout"
         )
 
-    if not funding_blockhash:
-        raise ValueError(
-            f"Swap has no {chain_name} funding blockhash"
-        )
+    #
+    # A funding blockhash is useful as a precise historical scan
+    # starting point, but it is not required to identify this HTLC.
+    # The durable funding txid:vout is the authoritative outpoint.
+    #
+    # Production state may persist the funding outpoint while pending
+    # and then miss the later funding blockhash before the output is
+    # spent. Recovery must still be possible from confirmed spender
+    # evidence.
+    #
 
     #
     # Fast path: if durable state already records the exact confirmed
@@ -1170,15 +1170,39 @@ def find_confirmed_htlc_spend(
             "branch": actual_branch,
         }
 
-    funding_block = cli(
-        "getblock",
-        funding_blockhash,
-        1,
-    )
+    if funding_blockhash:
+        funding_block = cli(
+            "getblock",
+            funding_blockhash,
+            1,
+        )
 
-    start_height = int(
-        funding_block["height"]
-    )
+        start_height = int(
+            funding_block["height"]
+        )
+
+    else:
+        anchor_name = (
+            "btc_scan_start_height"
+            if chain == "btc"
+            else "blake_scan_start_height"
+        )
+
+        start_height = getattr(
+            swap,
+            anchor_name,
+            None,
+        )
+
+        if start_height is None:
+            raise RuntimeError(
+                "SECURITY FAILURE: "
+                f"{chain_name} funding blockhash is unknown and "
+                f"{anchor_name} is unavailable; refusing an "
+                "unbounded spender scan"
+            )
+
+        start_height = int(start_height)
 
     tip_height = int(
         cli("getblockcount")
@@ -3749,10 +3773,15 @@ def validate_v15_offer_timeouts(message):
     )
 
     #
-    # No version means legacy/regtest offer.
+    # Timeout safety is mandatory.  BTC and BLAKE heights belong
+    # to independent chains, so there is no safe legacy fallback
+    # based on comparing their raw CLTV heights.
     #
     if version is None:
-        return None
+        raise RuntimeError(
+            "SECURITY FAILURE: timeout policy version "
+            "is required"
+        )
 
     if version != "1.5":
         raise RuntimeError(
@@ -4949,10 +4978,24 @@ def command_fund_btc(args):
             swap.btc_sats,
         )
 
+        funding_target = btc_funding_fee_target_blocks()
+
+        print(
+            "Bitcoin funding confirmation target:",
+            funding_target,
+            "block(s)",
+        )
+
         txid = btc_cli(
             "sendtoaddress",
             address,
             f"{amount_btc:.8f}",
+            "",
+            "",
+            "false",
+            "true",
+            str(funding_target),
+            "conservative",
             wallet=BTC_WALLET,
         )
 
@@ -4993,6 +5036,19 @@ def command_fund_btc(args):
     )
 
     if not blockhash:
+        # Persist the exact broadcast outpoint immediately, while
+        # deliberately keeping the protocol checkpoint at BLAKE_FUNDED.
+        # Reconciliation can then distinguish a known pending funding
+        # transaction from genuinely absent Bitcoin funding.
+        swap.btc_funding_txid = txid
+        swap.btc_funding_vout = contract_vout
+        swap.btc_funding_blockhash = None
+
+        save_swap(
+            swap,
+            role="bob",
+        )
+
         print()
         print("BITCOIN FUNDING BROADCAST")
         print("=========================")
@@ -9287,6 +9343,23 @@ def settlement_fee_target_blocks():
     if target < 1:
         raise ValueError(
             "BLAKE_SWAP_FEE_TARGET_BLOCKS must be >= 1"
+        )
+
+    return target
+
+
+def btc_funding_fee_target_blocks():
+    target = int(
+        os.environ.get(
+            "BLAKE_SWAP_BTC_FUNDING_FEE_TARGET_BLOCKS",
+            "1",
+        )
+    )
+
+    if target < 1:
+        raise ValueError(
+            "BLAKE_SWAP_BTC_FUNDING_FEE_TARGET_BLOCKS "
+            "must be >= 1"
         )
 
     return target
@@ -15425,12 +15498,14 @@ def _reconcile_observe_htlc(swap, chain):
                     "discovered": discovered,
                 }
 
-        return {
-            "status": "unknown",
-            "txid": txid,
-            "vout": vout,
-            "reason": "outpoint unavailable and funding blockhash is unknown",
-        }
+        #
+        # The funding blockhash may never have been synchronized before
+        # this HTLC was spent.  Missing funding blockhash therefore does
+        # not prove ambiguity: continue to settlement-spender recovery
+        # below.  find_confirmed_htlc_spend() can establish the exact
+        # confirmed claim/refund independently, including through the
+        # hardened wallet/block fallback on nodes without txindex.
+        #
 
     #
     # The local participant may already have broadcast its expected
@@ -16102,7 +16177,8 @@ def build_reconcile_report(swap):
         }
 
     elif (
-        state == State.BLAKE_FUNDED
+        role == "bob"
+        and state == State.BLAKE_FUNDED
         and swap.btc_funding_txid is None
         and swap.btc_funding_vout is None
         and btc_height < int(swap.btc_timeout)
@@ -16984,98 +17060,7 @@ def command_next(args):
         return
 
     # --------------------------------------------------------------
-    # D. No coordination action exists. Check whether an Alice swap
-    #    is now fully authenticated and ready for explicit funding.
-    # --------------------------------------------------------------
-    funding_ready = []
-
-    for path in sorted(BASE_SWAP_DIR.glob("*.json")):
-        if len(path.stem) != 12:
-            continue
-
-        try:
-            swap = load_swap(
-                path.stem,
-                role=os.environ.get(
-                    "BLAKE_SWAP_ROLE",
-                    "alice",
-                ),
-            )
-        except Exception:
-            continue
-
-        if swap.state != State.OFFERED.value:
-            continue
-
-        try:
-            protocol_role, _, _ = _reconcile_local_role(swap)
-        except Exception:
-            continue
-
-        # BLAKE funding is always the protocol-Alice commitment,
-        # regardless of which local participant profile created or
-        # imported the swap.
-        if protocol_role != "alice":
-            continue
-
-        if not (
-            swap.nostr_bob_pub
-            and swap.blake_bob_pub
-            and swap.btc_bob_pub
-        ):
-            continue
-
-        funding_ready.append(swap)
-
-    if len(funding_ready) == 1:
-        swap = funding_ready[0]
-
-        print()
-        print("READY TO FUND")
-        print("=============")
-        print("swap: ", swap.swap_id)
-        print("trade:", swap.blake_amount, "BLAKE /", f"{swap.btc_sats:,}", "sats")
-        print()
-        print(
-            "All authenticated negotiation and settlement "
-            "keys are in place."
-        )
-        print()
-        print(
-            "STOP: funding is an explicit economic commitment."
-        )
-        print("Run:")
-        print("  scripts/blake fund")
-        print()
-        print("PASS: next did not move funds")
-        return
-
-    if len(funding_ready) > 1:
-        print()
-        print("MULTIPLE FUNDING-READY SWAPS")
-        print("============================")
-        print(
-            "More than one trade is ready for an explicit "
-            "BLAKE commitment. Refusing to choose."
-        )
-        print()
-
-        for swap in funding_ready:
-            print(
-                f"{swap.swap_id}  "
-                f"{swap.blake_amount} BLAKE / "
-                f"{swap.btc_sats:,} sats"
-            )
-
-        print()
-        print(
-            "Use `fund-blake <swap-id>` for an explicit choice."
-        )
-        print("PASS: no funds moved")
-        return
-
-    # --------------------------------------------------------------
-    # E. Finally, report live post-funding work. `next` does not
+    # D. Prioritize live post-funding work. `next` does not
     #    execute settlement economics; the existing resume policy does.
     # --------------------------------------------------------------
     resumable = []
@@ -17202,6 +17187,97 @@ def command_next(args):
             "Use `scripts/blake swaps` or "
             "`scripts/blake resume <swap-prefix>`."
         )
+        return
+
+    # --------------------------------------------------------------
+    # E. No post-funding work exists. Check whether an Alice swap
+    #    is now fully authenticated and ready for explicit funding.
+    # --------------------------------------------------------------
+    funding_ready = []
+
+    for path in sorted(BASE_SWAP_DIR.glob("*.json")):
+        if len(path.stem) != 12:
+            continue
+
+        try:
+            swap = load_swap(
+                path.stem,
+                role=os.environ.get(
+                    "BLAKE_SWAP_ROLE",
+                    "alice",
+                ),
+            )
+        except Exception:
+            continue
+
+        if swap.state != State.OFFERED.value:
+            continue
+
+        try:
+            protocol_role, _, _ = _reconcile_local_role(swap)
+        except Exception:
+            continue
+
+        # BLAKE funding is always the protocol-Alice commitment,
+        # regardless of which local participant profile created or
+        # imported the swap.
+        if protocol_role != "alice":
+            continue
+
+        if not (
+            swap.nostr_bob_pub
+            and swap.blake_bob_pub
+            and swap.btc_bob_pub
+        ):
+            continue
+
+        funding_ready.append(swap)
+
+    if len(funding_ready) == 1:
+        swap = funding_ready[0]
+
+        print()
+        print("READY TO FUND")
+        print("=============")
+        print("swap: ", swap.swap_id)
+        print("trade:", swap.blake_amount, "BLAKE /", f"{swap.btc_sats:,}", "sats")
+        print()
+        print(
+            "All authenticated negotiation and settlement "
+            "keys are in place."
+        )
+        print()
+        print(
+            "STOP: funding is an explicit economic commitment."
+        )
+        print("Run:")
+        print("  scripts/blake fund")
+        print()
+        print("PASS: next did not move funds")
+        return
+
+    if len(funding_ready) > 1:
+        print()
+        print("MULTIPLE FUNDING-READY SWAPS")
+        print("============================")
+        print(
+            "More than one trade is ready for an explicit "
+            "BLAKE commitment. Refusing to choose."
+        )
+        print()
+
+        for swap in funding_ready:
+            print(
+                f"{swap.swap_id}  "
+                f"{swap.blake_amount} BLAKE / "
+                f"{swap.btc_sats:,} sats"
+            )
+
+        print()
+        print(
+            "Use `fund-blake <swap-id>` for an explicit choice."
+        )
+        print("PASS: no funds moved")
         return
 
     print()

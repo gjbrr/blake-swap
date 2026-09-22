@@ -321,6 +321,75 @@ def test_no_funding_announcements():
     )
 
     #
+    # Alice is still locally BLAKE_FUNDED and does not know
+    # Bob's Bitcoin funding outpoint.  Reconcile/next must NOT
+    # defer Bitcoin discovery merely because the timeout has
+    # not expired.  That optimization is valid only for Bob,
+    # who is the participant responsible for funding Bitcoin.
+    #
+    alice_before = h.load_state(
+        swap_id,
+        "alice",
+    )
+
+    h.require(
+        alice_before.get(
+            "btc_funding_txid"
+        ) is None,
+        (
+            "Alice unexpectedly knew BTC funding txid "
+            "before chain discovery"
+        ),
+    )
+
+    h.require(
+        alice_before.get(
+            "btc_funding_vout"
+        ) is None,
+        (
+            "Alice unexpectedly knew BTC funding vout "
+            "before chain discovery"
+        ),
+    )
+
+    proc = h.swap_cmd(
+        "next",
+        role="alice",
+    )
+
+    output = (
+        (proc.stdout or "")
+        + "\n"
+        + (proc.stderr or "")
+    )
+
+    h.require(
+        "SETTLEMENT WORK AVAILABLE" in output,
+        (
+            "Alice did not surface confirmed Bitcoin "
+            "funding as resumable work"
+        ),
+    )
+
+    h.require(
+        "sync-funding" in output,
+        (
+            "Alice deferred Bitcoin funding discovery "
+            "instead of surfacing sync-funding"
+        ),
+    )
+
+    h.assert_state(
+        swap_id,
+        "alice",
+        "BLAKE_FUNDED",
+    )
+
+    h.ok(
+        "Alice surfaces BTC chain discovery before timeout"
+    )
+
+    #
     # Alice discovers the exact Bitcoin HTLC herself.
     #
     sync_funding(

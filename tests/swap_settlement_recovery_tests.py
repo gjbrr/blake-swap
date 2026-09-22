@@ -654,7 +654,10 @@ def test_confirmed_recorded_refund_without_txindex():
 
         funding_txid = "11" * 32
         funding_vout = 1
-        funding_blockhash = "aa" * 32
+        # Regression also covers the live condition where funding was
+        # recorded while pending, but its later confirmed blockhash was
+        # never synchronized before the HTLC was spent.
+        funding_blockhash = None
 
         refund_txid = "22" * 32
         refund_blockhash = "bb" * 32
@@ -715,12 +718,16 @@ def test_confirmed_recorded_refund_without_txindex():
 
             if method == "getrawtransaction":
                 h.require(
-                    args[1] == refund_txid,
-                    "direct settlement lookup used wrong txid",
+                    args[1] in {
+                        funding_txid,
+                        refund_txid,
+                    },
+                    "direct lookup used unexpected txid",
                 )
 
-                # This is the production condition we are freezing:
-                # no txindex / exact tx unavailable by this RPC route.
+                # Neither the spent funding transaction nor the confirmed
+                # settlement is available through this no-txindex route.
+                # Recovery must continue through spender/wallet evidence.
                 raise RuntimeError(
                     "No such mempool or blockchain transaction. "
                     "Use -txindex or provide a block hash."
@@ -847,7 +854,255 @@ def test_confirmed_recorded_refund_without_txindex():
         )
 
         h.ok(
-            "confirmed recorded BLAKE refund recovered without txindex"
+            "confirmed recorded BLAKE refund recovered with missing "
+            "funding blockhash and without txindex"
+        )
+
+    finally:
+        sys.modules.pop(spec.name, None)
+
+        if inserted_src:
+            try:
+                sys.path.remove(src_dir)
+            except ValueError:
+                pass
+
+
+def test_unknown_btc_spender_without_funding_blockhash():
+    """
+    Regression for live Bob recovery:
+
+    Bob knows the exact Bitcoin funding txid:vout, but durable state never
+    learned the funding blockhash before Alice spent the HTLC. Bob also
+    does not yet know Alice's claim txid.
+
+    Reconciliation must use the persisted Bitcoin scan anchor, discover
+    the confirmed spender directly from blocks, classify the claim branch,
+    and report spent chain truth.
+    """
+
+    h.banner(
+        "RECONCILE REGRESSION: UNKNOWN BTC SPENDER "
+        "WITHOUT FUNDING BLOCKHASH"
+    )
+
+    spec = importlib.util.spec_from_file_location(
+        "swap_v2_unknown_btc_spender_regression",
+        str(h.SWAP_V2),
+    )
+
+    h.require(
+        spec is not None and spec.loader is not None,
+        "could not create import spec for swap_v2.py",
+    )
+
+    engine = importlib.util.module_from_spec(spec)
+
+    src_dir = str(h.SWAP_V2.parent)
+    inserted_src = False
+
+    if src_dir not in sys.path:
+        sys.path.insert(0, src_dir)
+        inserted_src = True
+
+    sys.modules[spec.name] = engine
+
+    try:
+        spec.loader.exec_module(engine)
+
+        funding_txid = "44" * 32
+        funding_vout = 0
+
+        claim_txid = "55" * 32
+        claim_blockhash = "66" * 32
+
+        secret = bytes.fromhex("77" * 32)
+        secret_hash = hashlib.sha256(secret).hexdigest()
+
+        swap = SimpleNamespace(
+            swap_id="regression-unknown-btc-spender",
+
+            btc_funding_txid=funding_txid,
+            btc_funding_vout=funding_vout,
+
+            # Exact live condition: Bob persisted the pending outpoint
+            # but never synchronized the later funding blockhash.
+            btc_funding_blockhash=None,
+
+            btc_claim_txid=None,
+            btc_claim_blockhash=None,
+            btc_refund_txid=None,
+            btc_refund_blockhash=None,
+
+            # Independent bounded recovery anchor captured during
+            # negotiation.
+            btc_scan_start_height=100,
+
+            secret_hash=secret_hash,
+            btc_sats=3000,
+            blake_amount=0.0001,
+        )
+
+        calls = []
+
+        def fake_btc_cli(*args, wallet=None):
+            h.require(
+                bool(args),
+                "mock Bitcoin RPC called without method",
+            )
+
+            method = args[0]
+            calls.append(
+                (method, args[1:], wallet)
+            )
+
+            if method == "gettxout":
+                h.require(
+                    args[1] == funding_txid,
+                    "gettxout used wrong funding txid",
+                )
+                h.require(
+                    int(args[2]) == funding_vout,
+                    "gettxout used wrong funding vout",
+                )
+
+                # Alice already spent the HTLC.
+                return None
+
+            if method == "getrawtransaction":
+                h.require(
+                    args[1] == funding_txid,
+                    "unexpected direct transaction lookup",
+                )
+
+                # Simulate a provider/node without txindex access to the
+                # now-spent funding transaction.
+                raise RuntimeError(
+                    "No such mempool or blockchain transaction. "
+                    "Use -txindex or provide a block hash."
+                )
+
+            if method == "getblockcount":
+                return 101
+
+            if method == "getblockhash":
+                height = int(args[1])
+
+                if height == 100:
+                    return "88" * 32
+
+                if height == 101:
+                    return claim_blockhash
+
+                raise h.TestFailure(
+                    f"unexpected Bitcoin block height: {height}"
+                )
+
+            if method == "getblock":
+                blockhash = args[1]
+
+                if blockhash == "88" * 32:
+                    return {
+                        "height": 100,
+                        "tx": [],
+                    }
+
+                if blockhash == claim_blockhash:
+                    return {
+                        "height": 101,
+                        "tx": [
+                            {
+                                "txid": claim_txid,
+                                "vin": [
+                                    {
+                                        "txid": funding_txid,
+                                        "vout": funding_vout,
+                                        "txinwitness": [
+                                            "00",
+                                            secret.hex(),
+                                            "51",
+                                        ],
+                                    }
+                                ],
+                            }
+                        ],
+                    }
+
+                raise h.TestFailure(
+                    f"unexpected Bitcoin blockhash: {blockhash}"
+                )
+
+            raise h.TestFailure(
+                f"unexpected mock Bitcoin RPC method: {method}"
+            )
+
+        original_btc_cli = engine.btc_cli
+
+        try:
+            engine.btc_cli = fake_btc_cli
+
+            observed = engine._reconcile_observe_htlc(
+                swap,
+                "btc",
+            )
+
+        finally:
+            engine.btc_cli = original_btc_cli
+
+        h.require(
+            observed.get("status") == "spent",
+            (
+                "unknown Bitcoin spender was not recovered as spent: "
+                f"{observed}"
+            ),
+        )
+
+        h.require(
+            observed.get("branch") == "claim",
+            (
+                "unknown Bitcoin spender recovered wrong branch: "
+                f"{observed}"
+            ),
+        )
+
+        h.require(
+            observed.get("spend_txid") == claim_txid,
+            (
+                "unknown Bitcoin spender recovered wrong txid: "
+                f"{observed}"
+            ),
+        )
+
+        h.require(
+            observed.get("spend_blockhash") == claim_blockhash,
+            (
+                "unknown Bitcoin spender recovered wrong blockhash: "
+                f"{observed}"
+            ),
+        )
+
+        methods = [
+            method
+            for method, _args, _wallet
+            in calls
+        ]
+
+        h.require(
+            "getblockcount" in methods,
+            "regression did not exercise bounded block scan",
+        )
+
+        h.require(
+            methods.count("getblockhash") == 2,
+            (
+                "spender recovery did not stay bounded to scan anchor: "
+                f"{methods}"
+            ),
+        )
+
+        h.ok(
+            "unknown confirmed BTC claim recovered from scan anchor "
+            "without funding blockhash"
         )
 
     finally:
@@ -875,6 +1130,10 @@ def main():
         (
             "CONFIRMED REFUND WITHOUT TXINDEX",
             test_confirmed_recorded_refund_without_txindex,
+        ),
+        (
+            "UNKNOWN BTC SPENDER WITHOUT FUNDING BLOCKHASH",
+            test_unknown_btc_spender_without_funding_blockhash,
         ),
     ]
 

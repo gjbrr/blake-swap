@@ -270,6 +270,12 @@ def test_pending_btc_funding():
         "first production BTC funding did not report pending confirmation",
     )
 
+    h.require(
+        "bitcoin funding confirmation target:"
+        in first.stdout.lower(),
+        "production BTC funding did not use urgent confirmation target",
+    )
+
     state = h.load_state(
         swap_id,
         "bob",

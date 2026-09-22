@@ -402,13 +402,9 @@ def _validate_offer(message: dict) -> None:
     )
 
     if version is None:
-        if present_metadata:
-            raise WireError(
-                "timeout metadata requires "
-                "timeout_policy_version"
-            )
-
-        return
+        raise WireError(
+            "timeout_policy_version is required"
+        )
 
     if version != "1.5":
         raise WireError(

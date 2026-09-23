@@ -8365,7 +8365,12 @@ def nostr_prior_market_take(
     return None
 
 
-def resolve_cached_nostr_prefix(value, expected_type=None, label="Nostr event"):
+def resolve_cached_nostr_prefix(
+    value,
+    expected_type=None,
+    label="Nostr event",
+    announce=True,
+):
     import json
 
     if not isinstance(value, str):
@@ -8439,7 +8444,10 @@ def resolve_cached_nostr_prefix(value, expected_type=None, label="Nostr event"):
         )
 
     resolved = matches[0]
-    print(f"Resolved {label.lower()} prefix {value} -> {resolved}")
+
+    if announce:
+        print(f"Resolved {label.lower()} prefix {value} -> {resolved}")
+
     return resolved
 
 
@@ -10458,18 +10466,20 @@ async def nostr_fetch_market_takes(
 
 def command_market_takes(args):
     import asyncio
+    import json
     from coincurve import PrivateKey
 
-    if len(args.offer_id) != 64:
-        raise ValueError(
-            "offer_id must be the full "
-            "64-character Nostr event ID"
-        )
+    offer_id = resolve_cached_nostr_prefix(
+        args.offer_id,
+        expected_type="market-offer",
+        label="market offer",
+        announce=not args.json,
+    )
 
     original, offer_message, takes = (
         asyncio.run(
             nostr_fetch_market_takes(
-                args.offer_id,
+                offer_id,
                 limit=args.limit,
                 allow_matched=True,
             )
@@ -10500,11 +10510,26 @@ def command_market_takes(args):
             "by the current Alice identity"
         )
 
+    result = {
+        "offer_id": offer_id,
+        "takes": takes,
+    }
+
+    if args.json:
+        print(
+            json.dumps(
+                result,
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return
+
     print()
     print("TAKES FOR MARKET OFFER")
     print("======================")
     print()
-    print("offer:", args.offer_id)
+    print("offer:", offer_id)
     print(
         "selling:",
         offer_message["blake_amount"],
@@ -13325,6 +13350,7 @@ def command_accept_only_take(args):
         args.offer_id,
         expected_type="market-offer",
         label="market offer",
+        announce=not args.json,
     )
 
     original, offer_message, valid_takes = asyncio.run(
@@ -18767,6 +18793,12 @@ def main():
         "--limit",
         type=int,
         default=100,
+    )
+
+    p.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit machine-readable JSON",
     )
 
     p.set_defaults(

@@ -18114,7 +18114,8 @@ def command_resume(args):
 
     command_run(
         SimpleNamespace(
-            swap_id=swap.swap_id
+            swap_id=swap.swap_id,
+            max_steps=int(getattr(args, "max_steps", 6)),
         )
     )
 
@@ -18444,7 +18445,10 @@ def command_run(args):
     print("RUN RESULT")
     print("==========")
     print("maximum reconciliation steps reached")
-    print("Manual attention required before any further action.")
+    print(
+        "Step budget exhausted normally; reconcile again before "
+        "deciding whether another action is appropriate."
+    )
 
 
 def main():
@@ -19185,6 +19189,16 @@ def main():
         help=(
             "Optional short swap-ID prefix when more "
             "than one live swap exists"
+        ),
+    )
+
+    p.add_argument(
+        "--max-steps",
+        type=int,
+        default=6,
+        help=(
+            "Maximum reconcile/action cycles before stopping "
+            "(default: 6)"
         ),
     )
 

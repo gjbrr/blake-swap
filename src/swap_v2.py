@@ -17492,6 +17492,73 @@ def command_dashboard(args):
         except Exception:
             return "-"
 
+    def swap_json_item(item):
+        swap = item["swap"]
+        report = item["report"]
+
+        blake_report = report.get("blake", {})
+        btc_report = report.get("btc", {})
+
+        return {
+            "swap_id": swap.swap_id,
+            "state": swap.state,
+            "protocol_role": report.get("protocol_role"),
+            "decision_class": report.get("decision_class"),
+            "next_action": report.get("next_action"),
+            "reason": report.get("reason"),
+            "status": outcome_label(swap, report),
+            "action": action_text(report),
+            "trade": {
+                "blake_amount": swap.blake_amount,
+                "btc_sats": swap.btc_sats,
+            },
+            "chains": {
+                "blake_status": blake_report.get("status"),
+                "btc_status": btc_report.get("status"),
+            },
+            "transactions": {
+                "blake_funding_txid": swap.blake_funding_txid,
+                "btc_funding_txid": swap.btc_funding_txid,
+                "btc_claim_txid": swap.btc_claim_txid,
+                "blake_claim_txid": swap.blake_claim_txid,
+                "btc_refund_txid": swap.btc_refund_txid,
+                "blake_refund_txid": swap.blake_refund_txid,
+            },
+        }
+
+    if getattr(args, "json", False):
+        result = {
+            "version": 1,
+            "active": [
+                swap_json_item(item)
+                for item in active
+            ],
+            "attention": [
+                swap_json_item(item)
+                for item in attention
+            ],
+            "settled": [
+                swap_json_item(item)
+                for item in settled
+            ],
+            "archived": archived,
+            "summary": {
+                "active": len(active),
+                "attention": len(attention),
+                "settled": len(settled),
+                "archived": len(archived),
+            },
+        }
+
+        print(
+            json.dumps(
+                result,
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return
+
     print()
     print("BLAKE SWAP DASHBOARD")
     print("====================")
@@ -19183,6 +19250,12 @@ def main():
             "Show active, attention, settled, and archived "
             "swaps using read-only reconciliation"
         ),
+    )
+
+    p.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit machine-readable dashboard JSON",
     )
 
     p.set_defaults(

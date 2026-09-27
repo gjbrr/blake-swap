@@ -417,6 +417,17 @@ Initial BLAKE funding is **never** automatic. It requires an explicit
 `fund` command, because it is the first irreversible economic
 commitment.
 
+The autonomous driver is **bounded**. `run` performs at most
+`--max-steps` reconcile/act cycles (default 6), and `resume` forwards an
+explicit step budget when it hands a swap to the driver. A swap that is
+not resolved within the budget stops and reports rather than looping
+indefinitely; the operator reconciles again before deciding whether
+another action is appropriate.
+
+`next` is bounded by construction: it performs **one** unambiguous
+coordination step, or none at all, and refuses to choose when more than
+one step is available.
+
 ---
 
 ## 9. Security properties and known limitations

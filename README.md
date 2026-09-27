@@ -156,7 +156,7 @@ scripts/
   stability-check          static safety-invariant checks
   wire_inventory.py        regenerate the wire message inventory
 
-tests/                     31 suites: unit tests and regtest integration
+tests/                     35 suites: unit tests and regtest integration
 tools/minimal_*.py         independent wire-message producers
 checkpoints/v1.5/          frozen earlier snapshot with SHA256SUMS
 ```
@@ -171,7 +171,7 @@ Node-free unit suites run anywhere:
 ./scripts/test.sh --unit-only
 ```
 
-The full suite covers all 31 test files, including the regtest
+The full suite covers all 35 test files, including the regtest
 integration suites and the independent-implementation wire suites:
 
 ```bash
@@ -196,6 +196,8 @@ prerequisites are missing, and `test.sh` reports such suites as
 | `docs/WIRE_PROTOCOL.md` | transport bindings, every settlement and market message, validation rules, verification obligations |
 | `docs/REGTEST_TWO_HOST.md` | step-by-step two-host reproduction, health checks, troubleshooting |
 | `docs/PERFORMANCE_AND_RECOVERY.md` | why live coordination, historical recovery, and chain settlement are separated |
+| `tests/README.md` | test suite inventory, prerequisites, and node configuration |
+| `CONTRIBUTOR_ORIENTATION.md` | orientation for new contributors |
 
 ---
 

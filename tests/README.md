@@ -36,12 +36,16 @@ List suites and their prerequisites:
 
 | Class | Needs | Count |
 |---|---|---|
-| `unit` | nothing | 9 |
+| `unit` | nothing (some need the declared Python deps) | 13 |
 | `regtest` | reachable Bitcoin + BLAKE regtest nodes | 20 |
 | `nostr` | regtest nodes, real relays, two participant keys | 2 |
 
 The two `nostr` suites publish to real relays and are therefore
 **opt-in** via `--with-nostr`.
+
+A `unit` suite needs no nodes and no relays. A few of them exercise the
+engine's signing path and therefore need `coincurve`, which is a declared
+dependency; those skip cleanly when it is unavailable.
 
 ---
 
@@ -161,7 +165,7 @@ scripts/test.sh --help
 
 ## Suite inventory
 
-### Unit suites — no prerequisites (9)
+### Unit suites — no prerequisites (13)
 
 | Suite | Covers |
 |---|---|
@@ -174,6 +178,10 @@ scripts/test.sh --help
 | `swap_wire_tests.py` | the standalone wire validator: schemas, canonical encoding, duplicate-key and `secret_hex` rejection |
 | `market_state_tests.py` | OFFER/TAKE/MATCH/CANCEL parsing and OPEN/MATCHED/CANCELLED/EXPIRED derivation, including terminal-event tie-breaks |
 | `docs_alignment_tests.py` | the documentation still matches the implementation: message types, states, transitions, HTLC clauses, timeout numbers, wrapper subcommands, and referenced paths |
+| `cli_wiring_tests.py` | every `args.<attr>` a command reads is defined by that subcommand's parser, so a flag copied to a sibling command cannot leave a latent `AttributeError` |
+| `swap_dashboard_json_tests.py` | `dashboard --json` emits the reconciled swap set and preserves the human-readable output |
+| `swap_market_takes_json_tests.py` | `market-takes` resolves offer-ID prefixes and emits validated JSON (needs `coincurve`) |
+| `swap_resume_step_budget_tests.py` | `resume --max-steps` forwards an explicit step budget to the driver |
 
 ### Regtest suites — need chain nodes (20)
 

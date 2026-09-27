@@ -7,6 +7,7 @@ import time
 
 from swap_timeout_policy import (
     TimeoutPlan,
+    describe_plan,
     TimeoutPolicy,
     alice_btc_window_seconds,
     bob_recovery_budget_seconds,
@@ -244,6 +245,63 @@ def test_expired_deadlines():
     )
 
 
+def test_defaults_and_height_bounds():
+    banner(
+        "TIMEOUT PLAN DEFAULTS AND BOUNDS"
+    )
+
+    # No policy supplied: the defaults must produce a valid plan.
+    default_plan = build_timeout_plan(
+        btc_height=100,
+        blake_height=200,
+    )
+
+    require(
+        default_plan.btc_blocks > 0,
+        "the default plan has no Bitcoin window",
+    )
+
+    require(
+        default_plan.blake_blocks > 0,
+        "the default plan has no BLAKE window",
+    )
+
+    ok("a default plan is built and valid")
+
+    for name, kwargs in (
+        (
+            "a negative Bitcoin height",
+            {"btc_height": -1, "blake_height": 10},
+        ),
+        (
+            "a negative BLAKE height",
+            {"btc_height": 10, "blake_height": -1},
+        ),
+    ):
+        expect_reject(
+            name + " is rejected",
+            lambda kwargs=kwargs: build_timeout_plan(**kwargs),
+        )
+
+    # describe_plan is the operator-facing rendering; it must describe
+    # the plan it was given rather than a generic shape.
+    described = describe_plan(default_plan)
+
+    for expected in (
+        "TIMEOUT SAFETY PLAN",
+        str(default_plan.btc_start_height),
+        str(default_plan.btc_timeout_height),
+        str(default_plan.blake_start_height),
+        str(default_plan.blake_timeout_height),
+    ):
+        require(
+            expected in described,
+            f"describe_plan omitted {expected!r}: {described}",
+        )
+
+    ok("describe_plan renders the plan's own heights")
+
+
 def test_bad_policy():
     banner(
         "TIME MALLORY: MALFORMED POLICY"
@@ -411,6 +469,7 @@ def main():
 
     tests = [
         test_independent_heights,
+        test_defaults_and_height_bounds,
         test_exact_boundary,
         test_expired_deadlines,
         test_bad_policy,

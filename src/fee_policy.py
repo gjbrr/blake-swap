@@ -46,7 +46,14 @@ def choose_fee_rate_sat_vb(
                 candidates.append(
                     coin_per_kvb_to_sat_vb(value)
                 )
-            except (ValueError, TypeError):
+            except (ValueError, TypeError, ArithmeticError):
+                #
+                # ArithmeticError covers decimal.InvalidOperation, which
+                # is what a non-numeric node field produces. It is not a
+                # ValueError, so without it a malformed feerate would
+                # escape and abort the whole settlement instead of being
+                # ignored in favour of the policy floor.
+                #
                 pass
 
     if isinstance(mempool_info, dict):
@@ -63,7 +70,7 @@ def choose_fee_rate_sat_vb(
                 candidates.append(
                     coin_per_kvb_to_sat_vb(value)
                 )
-            except (ValueError, TypeError):
+            except (ValueError, TypeError, ArithmeticError):
                 pass
 
     if not candidates:

@@ -6,6 +6,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+import signal
 import subprocess
 import sys
 import time
@@ -358,7 +359,22 @@ def bob_step(
     )
 
 
+def _graceful_termination(signum, frame):
+    """
+    Shut down through normal unwinding on SIGTERM/SIGINT.
+
+    Python's default SIGTERM handling terminates immediately, without
+    running atexit hooks. Raising SystemExit instead means the process
+    exits cleanly and any registered shutdown work (coverage flushing,
+    for one) actually runs.
+    """
+    raise SystemExit(0)
+
+
 def main():
+    signal.signal(signal.SIGTERM, _graceful_termination)
+    signal.signal(signal.SIGINT, _graceful_termination)
+
     parser = argparse.ArgumentParser()
 
     parser.add_argument(

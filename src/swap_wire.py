@@ -58,6 +58,13 @@ BASE_FIELDS = {
 
 SCHEMAS = {
     "offer": {
+        #
+        # The v1.5 timeout metadata is mandatory, not optional:
+        # _validate_offer rejects an offer without it, and the engine's
+        # validate_v15_offer_timeouts does the same. It is listed here as
+        # required so that a consumer building from SCHEMAS alone cannot
+        # produce an offer the protocol will refuse.
+        #
         "required": {
             "type",
             "swap_id",
@@ -69,13 +76,12 @@ SCHEMAS = {
             "created_at",
             "blake_alice_pub",
             "btc_alice_pub",
-        },
-        "optional": {
             "timeout_policy_version",
             "btc_timeout_window_seconds",
             "blake_timeout_window_seconds",
             "bob_recovery_seconds",
         },
+        "optional": set(),
     },
 
     "accept": {
@@ -390,36 +396,15 @@ def _validate_offer(message: dict) -> None:
         "timeout_policy_version"
     )
 
-    timeout_metadata = {
-        "btc_timeout_window_seconds",
-        "blake_timeout_window_seconds",
-        "bob_recovery_seconds",
-    }
-
-    present_metadata = (
-        timeout_metadata
-        & set(message)
-    )
-
-    if version is None:
-        raise WireError(
-            "timeout_policy_version is required"
-        )
-
+    #
+    # The four v1.5 fields are `required` in SCHEMAS["offer"], so the
+    # generic required-field check has already proved that the version is
+    # present and that the three window fields are. Only the version's
+    # *value* is left to check here.
+    #
     if version != "1.5":
         raise WireError(
             "unsupported timeout_policy_version"
-        )
-
-    missing = (
-        timeout_metadata
-        - set(message)
-    )
-
-    if missing:
-        raise WireError(
-            "v1.5 offer missing timeout field(s): "
-            + ", ".join(sorted(missing))
         )
 
     btc_window = _require_positive_int(

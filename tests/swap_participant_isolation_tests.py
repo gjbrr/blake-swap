@@ -146,26 +146,24 @@ def main():
 
         swap_id = m.group(1)
 
-        alice_state = (
-            alice_root
-            / "alice"
-            / f"{swap_id}.json"
-        )
-
-        bob_state_in_alice_root = (
-            alice_root
-            / "bob"
-            / f"{swap_id}.json"
-        )
+        #
+        # A participant's state root is already participant-local:
+        # BLAKE_SWAP_STATE_DIR is the private root, so swap records live
+        # directly in it and the protocol role is not a directory level.
+        #
+        alice_state = alice_root / f"{swap_id}.json"
 
         require(
             alice_state.exists(),
             "Alice local state was not created",
         )
 
+        #
+        # Nothing role-scoped may appear, and in particular no Bob state.
+        #
         require(
-            not bob_state_in_alice_root.exists(),
-            "Alice root already contains Bob state",
+            not (alice_root / "bob").exists(),
+            "Alice root contains a role-scoped Bob directory",
         )
 
         ok("Alice state exists only in Alice root")
@@ -173,26 +171,9 @@ def main():
         #
         # Bob's root must know nothing yet.
         #
-        bob_state = (
-            bob_root
-            / "bob"
-            / f"{swap_id}.json"
-        )
-
-        alice_state_in_bob_root = (
-            bob_root
-            / "alice"
-            / f"{swap_id}.json"
-        )
-
         require(
-            not bob_state.exists(),
+            not (bob_root / f"{swap_id}.json").exists(),
             "Bob already has swap state before negotiation",
-        )
-
-        require(
-            not alice_state_in_bob_root.exists(),
-            "Bob root contains Alice private state",
         )
 
         ok("Bob root contains no Alice or Bob swap state initially")

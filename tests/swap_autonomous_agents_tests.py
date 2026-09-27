@@ -72,6 +72,23 @@ def start_agent(
     env = os.environ.copy()
 
     #
+    # The agent is a separate process, so it inherits nothing the
+    # harness resolved for itself. Point it at the same nodes.
+    #
+    for variable, value in h.node_env().items():
+        env.setdefault(variable, value)
+
+    env.setdefault(
+        "PYTHONPATH",
+        ":".join(
+            [
+                str(h.PROJECT_DIR / "src"),
+                str(h.PROJECT_DIR / "tests"),
+            ]
+        ),
+    )
+
+    #
     # Autonomous Alice and Bob now have independent
     # participant state roots.
     #

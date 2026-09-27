@@ -60,9 +60,24 @@ def load_message(
         f"missing message file: {path}",
     )
 
-    return json.loads(
+    data = json.loads(
         path.read_text()
     )
+
+    #
+    # FILE transport wraps the settlement message in a v2 envelope
+    # carrying the sender identity. The wire validator is concerned only
+    # with the settlement message itself, so unwrap it here exactly as
+    # file_receive_message does.
+    #
+    if (
+        isinstance(data, dict)
+        and data.get("_file_transport_version") == 2
+        and isinstance(data.get("message"), dict)
+    ):
+        return data["message"]
+
+    return data
 
 
 def validate_real(

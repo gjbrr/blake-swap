@@ -71,8 +71,10 @@ Start with:
 - `src/fee_policy.py`
   - dynamic settlement fee policy
 
-- `src/install_reconcile.py`
-  - reconciliation integration/support
+The reconciliation command itself lives in `src/swap_v2.py`
+(`command_reconcile`, `build_reconcile_report`, `_reconcile_*`).
+`tools/historical/` holds spent one-shot source-patching scripts from the
+development of that layer; they are not runtime code and must not be run.
 
 The `scripts/` directory contains operator-facing entry points.
 

@@ -1,0 +1,40 @@
+# Coverage configuration for the blake-swap test suites.
+#
+# The suites drive the engine as a *subprocess* (`python src/swap_v2.py ...`),
+# so subprocess coverage is mandatory: `parallel = True` writes a separate
+# data file per process, and COVERAGE_PROCESS_START plus the startup hook
+# installed by uv make each child process record its own coverage.
+# `scripts/coverage.sh` sets the environment and combines the results.
+
+[run]
+source = src
+branch = True
+parallel = True
+
+# Do not record coverage of the test suites or tools themselves.
+omit =
+    tests/*
+    tools/*
+    checkpoints/*
+
+[paths]
+source =
+    src
+    */blake-swap/src
+
+[report]
+exclude_lines =
+    pragma: no cover
+    if __name__ == .__main__.:
+    raise NotImplementedError
+    if TYPE_CHECKING:
+
+show_missing = True
+skip_covered = False
+precision = 1
+
+[html]
+directory = htmlcov
+
+[xml]
+output = coverage.xml

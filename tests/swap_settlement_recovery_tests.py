@@ -762,10 +762,13 @@ def test_confirmed_recorded_refund_without_txindex():
                             "txid": funding_txid,
                             "vout": funding_vout,
 
-                            # No 32-byte witness item hashes to secret_hash,
-                            # so classify_htlc_spend() must identify refund.
+                            # A realistic refund-branch witness:
+                            #   <sig> <empty or_i selector> <witnessScript>
+                            # The empty selector takes OP_ELSE and no
+                            # preimage is present, so this is a refund.
                             "txinwitness": [
-                                "00",
+                                "30" * 71,
+                                "",
                                 "51",
                             ],
                         }
@@ -1017,9 +1020,13 @@ def test_unknown_btc_spender_without_funding_blockhash():
                                     {
                                         "txid": funding_txid,
                                         "vout": funding_vout,
+                                        # A realistic claim-branch witness:
+                                        #   <preimage> <sig> <01> <witnessScript>
+                                        # The 0x01 selector takes OP_IF.
                                         "txinwitness": [
-                                            "00",
                                             secret.hex(),
+                                            "30" * 71,
+                                            "01",
                                             "51",
                                         ],
                                     }

@@ -165,11 +165,11 @@ def load_state(
     role,
     swap_id,
 ):
-    path = (
-        root
-        / role
-        / f"{swap_id}.json"
-    )
+    #
+    # BLAKE_SWAP_STATE_DIR is already the participant-local root, so
+    # the protocol role is not a directory level.
+    #
+    path = root / f"{swap_id}.json"
 
     require(
         path.exists(),
@@ -320,9 +320,16 @@ def main():
         #
         # Bob discovers Alice's Nostr offer and accepts.
         #
+        # This suite exercises the direct (non-market) handshake, where
+        # there is no maker-signed market match to authenticate the
+        # author. The expected author is established out of band by the
+        # test itself installing Alice's key, so the unpinned path is
+        # chosen explicitly here.
+        #
         run_swap(
             "accept-offer",
             swap_id,
+            "--allow-unpinned-author",
             role="bob",
             state_dir=bob_root,
         )

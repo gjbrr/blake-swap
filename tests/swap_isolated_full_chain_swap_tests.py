@@ -140,11 +140,13 @@ def install_key(root, role):
 
 
 def state_path(root, role, swap_id):
-    return (
-        root
-        / role
-        / f"{swap_id}.json"
-    )
+    """
+    Local swap record path.
+
+    BLAKE_SWAP_STATE_DIR is already the participant-local root, so the
+    protocol role is not a directory level.
+    """
+    return root / f"{swap_id}.json"
 
 
 def load_state(root, role, swap_id):
@@ -169,22 +171,33 @@ def assert_no_peer_state(
     bob_root,
     swap_id,
 ):
+    #
+    # Both hosts legitimately hold a record for the same swap ID, so
+    # isolation is proven by content and by key material rather than by
+    # the file name: Alice's record carries the secret, Bob's must not,
+    # and neither host holds the other's Nostr private key.
+    #
+    alice = load_state(alice_root, "alice", swap_id)
+    bob = load_state(bob_root, "bob", swap_id)
+
     require(
-        not state_path(
-            alice_root,
-            "bob",
-            swap_id,
-        ).exists(),
-        "Alice root contains Bob state",
+        bool(alice.get("secret_hex")),
+        "Alice record does not hold the swap secret",
     )
 
     require(
-        not state_path(
-            bob_root,
-            "alice",
-            swap_id,
-        ).exists(),
-        "Bob root contains Alice state",
+        not bob.get("secret_hex"),
+        "Bob record holds the swap secret",
+    )
+
+    require(
+        not (alice_root / "nostr-keys" / "bob.key").exists(),
+        "Alice root contains Bob's Nostr private key",
+    )
+
+    require(
+        not (bob_root / "nostr-keys" / "alice.key").exists(),
+        "Bob root contains Alice's Nostr private key",
     )
 
 
@@ -280,9 +293,16 @@ def main():
             state_dir=alice_root,
         )
 
+        #
+        # Direct (non-market) handshake: no maker-signed market match
+        # authenticates the author, and the expected author is
+        # established out of band by this test installing Alice's key.
+        # The unpinned path is therefore chosen explicitly.
+        #
         run_swap(
             "accept-offer",
             swap_id,
+            "--allow-unpinned-author",
             role="bob",
             state_dir=bob_root,
         )

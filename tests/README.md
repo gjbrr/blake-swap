@@ -1,6 +1,6 @@
 # BLAKE Swap Test Suites
 
-31 suites covering the atomic-swap engine, the wire format, the market
+45 suites covering the atomic-swap engine, the wire format, the market
 state machine, crash recovery, reorganization safety,
 independent-implementation compatibility, and documentation alignment.
 
@@ -36,8 +36,8 @@ List suites and their prerequisites:
 
 | Class | Needs | Count |
 |---|---|---|
-| `unit` | nothing (some need the declared Python deps) | 13 |
-| `regtest` | reachable Bitcoin + BLAKE regtest nodes | 20 |
+| `unit` | nothing (some need the declared Python deps) | 20 |
+| `regtest` | reachable Bitcoin + BLAKE regtest nodes | 23 |
 | `nostr` | regtest nodes, real relays, two participant keys | 2 |
 
 The two `nostr` suites publish to real relays and are therefore
@@ -53,7 +53,27 @@ dependency; those skip cleanly when it is unavailable.
 
 The integration suites resolve their nodes at run time; nothing is
 hardcoded to a particular host. Values are taken from the environment
-first and then from conventional locations.
+first, then from a running local rig, then from conventional locations.
+
+### The local two-chain rig (recommended)
+
+`scripts/test-nodes` builds a disposable Bitcoin Core + Bitcoin Knots
+regtest rig, funds it, and publishes its location so the suites find it
+with no environment variables at all:
+
+```bash
+scripts/test-nodes start        # start both nodes, mine, publish state
+scripts/test.sh                 # every suite, including the regtest ones
+scripts/test-nodes stop         # stop; the node-backed suites then SKIP
+scripts/test-nodes reset        # stop and delete both datadirs
+```
+
+`start` writes `$BLAKE_SWAP_TEST_ROOT/rig-env.json`; `tests/node_config.py`
+reads it. That is what makes a running rig authoritative: a **stopped**
+rig produces a `SKIP` naming the rig, rather than a suite that connects
+to nothing and fails, or one that quietly runs against an unrelated
+datadir. To override it, set the environment variables below in the
+usual way.
 
 | Variable | Purpose |
 |---|---|
@@ -63,6 +83,11 @@ first and then from conventional locations.
 | `BLAKE_SWAP_BLAKE_CLI` | BLAKE `bitcoin-cli` path |
 | `BLAKE_SWAP_BLAKE_DATADIR` | BLAKE data directory |
 | `BLAKE_SWAP_BLAKE_RPC_ARGS` | extra `bitcoin-cli` arguments (remote nodes) |
+| `BLAKE_SWAP_RPC_TIMEOUT_SECONDS` | per-RPC timeout; a hung node fails closed instead of blocking (default 120) |
+| `BLAKE_SWAP_IGNORED_MATCH_TTL_SECONDS` | lifetime of an `ignore-match` tombstone; 0 never expires (default 0) |
+| `BLAKE_SWAP_TEST_ROOT` | location of the `scripts/test-nodes` rig (default `$HOME/.blake-swap-test`) |
+| `BLAKE_SWAP_TEST_BTC_CLI` | `bitcoin-cli` the rig starts for Bitcoin Core |
+| `BLAKE_SWAP_TEST_BLAKE_CLI` | `bitcoin-cli` the rig starts for Bitcoin Knots |
 
 These are the same variables the engine reads, so the harness and the
 engine always agree on which nodes to use. `scripts/test.sh`
@@ -71,11 +96,17 @@ deliberately does **not** unset them.
 ### Resolution order
 
 1. the environment variable, if set;
-2. for the Bitcoin CLI: `$HOME/bitcoin-core/build/bin/bitcoin-cli`,
+2. a running `scripts/test-nodes` rig, from `rig-env.json`;
+3. for the Bitcoin CLI: `$HOME/s/bitcoin-core/bin/bitcoin-cli`,
+   `$HOME/bitcoin-core/build/bin/bitcoin-cli`,
    `$HOME/bitcoin/build/bin/bitcoin-cli`, `/usr/local/bin/bitcoin-cli`,
    `/usr/bin/bitcoin-cli`, then `bitcoin-cli` on `PATH`;
-3. for the BLAKE CLI: `$HOME/bitcoin-blake-rc2/build-rc2/bin/bitcoin-cli`
-   and similar build locations, then the historical author-host path.
+4. for the BLAKE CLI: `$HOME/s/bitcoin-knots/bin/bitcoin-cli`, then
+   `$HOME/bitcoin-blake-rc2/build-rc2/bin/bitcoin-cli` and similar build
+   locations.
+5. for a datadir: the rig, then `$HOME/bitcoin-swap-regtest`, then
+   `$HOME/.bitcoin` (Bitcoin); the rig, then `$HOME/blake-swap-regtest`
+   and `$HOME/.blake-swap-regtest` (BLAKE).
 
 The BLAKE CLI is deliberately **not** resolved through `PATH`: a generic
 `bitcoin-cli` is almost certainly Bitcoin Core, and using it for the
@@ -163,9 +194,37 @@ scripts/test.sh --help
 
 ---
 
+## Coverage
+
+`scripts/coverage.sh` runs the same suites under coverage and reports
+line **and branch** coverage for `src/`:
+
+```
+scripts/coverage.sh                     report only
+scripts/coverage.sh --fail-under 80     enforce a threshold (exit 1 below it)
+scripts/coverage.sh --html              also write htmlcov/
+scripts/coverage.sh --xml               also write coverage.xml
+scripts/coverage.sh --unit-only         node-free suites only
+```
+
+The suites drive the engine as a **subprocess**, so coverage is collected
+from child processes as well: `.coveragerc` sets `parallel = True`,
+`coverage.sh` exports `COVERAGE_PROCESS_START`, and the startup hook
+installed in `.venv` makes each child record its own data file, which
+`coverage combine` then merges. `exit 2` means coverage itself could not
+run (missing `.venv`, nothing collected); `exit 1` means the threshold
+was not met.
+
+`--fail-under 80` is the project's gate, and the suite set currently
+meets it. A suite that cannot run in the current environment inflates
+nothing: it reports `SKIP` and contributes no coverage, which is the
+honest reading — run `scripts/test-nodes start` first.
+
+---
+
 ## Suite inventory
 
-### Unit suites — no prerequisites (13)
+### Unit suites — no prerequisites (20)
 
 | Suite | Covers |
 |---|---|
@@ -176,14 +235,21 @@ scripts/test.sh --help
 | `btc_dynamic_settlement_tests.py` | dynamic settlement against a stubbed node (estimatesmartfee, mempool, decoderawtransaction) |
 | `swap_dynamic_fee_integration_tests.py` | dynamic fee path with `swap_v2.btc_cli` monkeypatched |
 | `swap_wire_tests.py` | the standalone wire validator: schemas, canonical encoding, duplicate-key and `secret_hex` rejection |
+| `command_surface_tests.py` | `resume-all` ownership/stem filtering, `dismiss` ownership refusal, `run` step-budget validation and failure containment, ignored-match tombstone expiry, and env-knob validation |
 | `market_state_tests.py` | OFFER/TAKE/MATCH/CANCEL parsing and OPEN/MATCHED/CANCELLED/EXPIRED derivation, including terminal-event tie-breaks |
 | `docs_alignment_tests.py` | the documentation still matches the implementation: message types, states, transitions, HTLC clauses, timeout numbers, wrapper subcommands, and referenced paths |
 | `cli_wiring_tests.py` | every `args.<attr>` a command reads is defined by that subcommand's parser, so a flag copied to a sibling command cannot leave a latent `AttributeError` |
+| `nostr_market_tests.py` | the coordination layer against an in-process relay stub: message round-trip, author pinning, event cache, prefix resolution, and the full offer → take → match → cancel market lifecycle. Needs no nodes and no network. |
 | `swap_dashboard_json_tests.py` | `dashboard --json` emits the reconciled swap set and preserves the human-readable output |
 | `swap_market_takes_json_tests.py` | `market-takes` resolves offer-ID prefixes and emits validated JSON (needs `coincurve`) |
 | `swap_resume_step_budget_tests.py` | `resume --max-steps` forwards an explicit step budget to the driver |
+| `agent_policy_tests.py` | the autonomous agent's (state → command) table for both roles, the child-process environment and output forwarding, escalation of a child's `SECURITY FAILURE`, the give-up bound on consecutive failures, and clean SIGTERM unwinding |
+| `driver_policy_tests.py` | the autonomous driver's decision table, driven directly through its only input (the reconciliation report) with every action executor replaced by a recorder: `claim-btc`, `fund-btc`, `refund-btc` and `refund-blake` are attempted exactly when protocol role, checkpoint, chain status, secret provenance and timeout margin all permit, and never otherwise; a violated precondition is a contained, reported step failure |
+| `chain_cli_transport_tests.py` | the chain-RPC transport: ordinary arguments stay in argv, an argument above `MAX_ARG_STRLEN` switches the whole call to `bitcoin-cli -stdin`, booleans still render as `true`/`false`, and a failed exec becomes a named error. Also performs a real `decoderawtransaction` through the stdin transport when chain nodes are reachable |
+| `node_config_tests.py` | node resolution: environment first, then a running rig, then conventional paths; a stopped or corrupt rig state file degrades to a skip instead of a wrong target |
+| `fail_closed_tests.py` | refusal behaviour when preconditions fail: corrupted state files, unknown swap IDs, mismatched chain identities, missing preimages, and unconfirmed settlements all stop the command instead of acting on a guess, and no on-disk state is mutated |
 
-### Regtest suites — need chain nodes (20)
+### Regtest suites — need chain nodes (23)
 
 **Core protocol**
 
@@ -192,6 +258,9 @@ scripts/test.sh --help
 | `swap_protocol_tests.py` | the black-box harness. See below. |
 | `swap_timeout_negotiation_tests.py` | Bob's independent v1.5 timeout validation ("Time Mallory"): unknown policy, versionless offers, missing recovery, expired windows, short windows, dishonest metadata |
 | `pre_btc_refund_tests.py` | Alice must be able to abort and refund BLAKE before Bob funds Bitcoin |
+| `swap_reverse_market_flow_tests.py` | the **reverse** (`btc-for-blake`) market path, where the maker is protocol Bob and the **taker** creates the secret: proves the maker reserves the swap and signs the match without ever holding S |
+| `swap_driver_surface_tests.py` | the operator/driver surface on a live swap: `next` converging one safe step at a time, refusing to fund, and refusing to choose between two negotiations or two funding-ready trades, `dashboard` and `dashboard --json`, read-only `reconcile` (JSON and human), `show`/`list`, `ignore-match` tombstones, `dismiss` archiving only provably unfunded swaps, `sync-funding` discovering funding from the chain, and `resume` driving settlement to COMPLETE |
+| `swap_market_flow_tests.py` | the **marketplace** path end to end on regtest over the local relay stub: publish-market-offer → take → accept-market-take → accept-market-match → settle to COMPLETE, plus a cancel flow and read-only reconciliation |
 | `swap_participant_isolation_tests.py` | distinct participant state roots and no cross-participant state |
 
 **Recovery and safety**
@@ -298,6 +367,19 @@ The two `test_reorg_btc_claim`/`test_reorg_btc_refund` scenarios run only
 under `all`.
 
 ---
+
+## The local relay stub
+
+`tests/nostr_relay_stub.py` is a minimal in-memory NIP-01 relay that runs on its
+own event loop inside the test process. Pointing `BLAKE_SWAP_NOSTR_RELAYS` at it
+lets the transport, marketplace, and event-cache paths be exercised **without
+contacting any public relay**, which is faster and avoids publishing test traffic.
+
+It is a stub, not a relay: it has no auth, no persistence, and accepts whatever it
+is given, so the *client's* signature and schema verification is what gets tested.
+A `limit` returns the **newest** events, matching real relay behaviour.
+
+`tests/nostr_market_tests.py` drives the full market lifecycle against it.
 
 ## The shared node-configuration helper
 

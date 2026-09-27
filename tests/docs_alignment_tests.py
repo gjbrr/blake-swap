@@ -16,7 +16,9 @@ It checks, without needing chain nodes or relays:
   * the documented HTLC descriptor clauses match the engine's templates;
   * the documented default timeout plan matches the computed plan;
   * every scripts/blake subcommand named in the docs exists;
-  * every doc referenced from README.md exists.
+  * every doc referenced from README.md exists;
+  * the suite counts the READMEs state match scripts/test.sh;
+  * every registered suite has an inventory row in tests/README.md.
 
 Exit status: 0 pass, 1 fail.
 """
@@ -364,6 +366,173 @@ def test_readme_doc_links_exist(docs):
     check("README documentation index is complete", problems)
 
 
+#
+# Suite counts are asserted in prose in both READMEs. They went stale
+# three times during the test work, each time because a suite was added
+# without the numbers following it. Derive them from the runner instead.
+#
+SUITE_CLASSES = ("UNIT", "REGTEST", "NOSTR")
+
+COUNT_PATTERNS = (
+    # README.md: "tests/                     41 suites: unit tests ..."
+    (ROOT / "README.md", r"tests/\s+(\d+) suites:"),
+    # tests/README.md: "41 suites covering the atomic-swap engine"
+    (ROOT / "tests" / "README.md", r"^(\d+) suites covering"),
+    # tests/README.md: "| `unit` | ... | 17 |"
+    (ROOT / "tests" / "README.md", r"\|\s*`unit`\s*\|[^|]*\|\s*(\d+)\s*\|"),
+    (
+        ROOT / "tests" / "README.md",
+        r"\|\s*`regtest`\s*\|[^|]*\|\s*(\d+)\s*\|",
+    ),
+    (
+        ROOT / "tests" / "README.md",
+        r"\|\s*`nostr`\s*\|[^|]*\|\s*(\d+)\s*\|",
+    ),
+    # tests/README.md section headings
+    (
+        ROOT / "tests" / "README.md",
+        r"### Unit suites — no prerequisites \((\d+)\)",
+    ),
+    (
+        ROOT / "tests" / "README.md",
+        r"### Regtest suites — need chain nodes \((\d+)\)",
+    ),
+)
+
+
+def manifest_counts():
+    """
+    Parse scripts/test.sh for how many suites each class declares.
+
+    Read as text rather than sourced, so a malformed runner is reported
+    as a mismatch rather than executed.
+    """
+
+    text = (ROOT / "scripts" / "test.sh").read_text()
+    counts = {}
+
+    for name in SUITE_CLASSES:
+        match = re.search(
+            rf"^{name}_SUITES=\((.*?)^\)",
+            text,
+            re.MULTILINE | re.DOTALL,
+        )
+
+        if match is None:
+            counts[name] = None
+            continue
+
+        counts[name] = len(
+            re.findall(r"tests/[A-Za-z0-9_]+\.py", match.group(1))
+        )
+
+    return counts
+
+
+def test_documented_suite_counts_match_manifest(docs):
+    counts = manifest_counts()
+
+    total = sum(value for value in counts.values() if value is not None)
+
+    expected = {
+        "unit": counts.get("UNIT"),
+        "regtest": counts.get("REGTEST"),
+        "nostr": counts.get("NOSTR"),
+        "total": total,
+    }
+
+    problems = [
+        f"scripts/test.sh declares no {name}_SUITES list"
+        for name in SUITE_CLASSES
+        if counts.get(name) is None
+    ]
+
+    for path, pattern in COUNT_PATTERNS:
+        text = path.read_text()
+
+        for match in re.finditer(pattern, text, re.MULTILINE):
+            documented = int(match.group(1))
+
+            if documented in expected.values():
+                continue
+
+            problems.append(
+                f"{path.relative_to(ROOT)}: documents {documented} suites, "
+                f"but the runner declares "
+                f"{expected['unit']} unit / {expected['regtest']} regtest / "
+                f"{expected['nostr']} nostr ({total} total)"
+            )
+
+    check(
+        f"documented suite counts match the runner "
+        f"({total} suites)",
+        problems,
+    )
+
+
+def manifest_suite_files():
+    """Every tests/*_tests.py the runner declares."""
+
+    text = (ROOT / "scripts" / "test.sh").read_text()
+    files = []
+
+    for name in SUITE_CLASSES:
+        match = re.search(
+            rf"^{name}_SUITES=\((.*?)^\)",
+            text,
+            re.MULTILINE | re.DOTALL,
+        )
+
+        if match is None:
+            continue
+
+        files.extend(
+            re.findall(r"tests/([A-Za-z0-9_]+\.py)", match.group(1))
+        )
+
+    return sorted(set(files))
+
+
+def test_suite_inventory_is_complete():
+    """
+    Every registered suite must have a row in the tests/README.md
+    inventory, so a new suite cannot appear in the runner while being
+    invisible to the person reading about it.
+    """
+
+    inventory = (ROOT / "tests" / "README.md").read_text()
+
+    documented = set(
+        re.findall(r"\| `([a-z0-9_]+_tests\.py)` \|", inventory)
+    )
+
+    problems = []
+
+    for suite in manifest_suite_files():
+        if suite not in documented:
+            problems.append(
+                f"tests/README.md has no inventory row for {suite}"
+            )
+
+    on_disk = sorted(
+        path.name for path in (ROOT / "tests").glob("*_tests.py")
+    )
+
+    registered = set(manifest_suite_files())
+
+    for suite in on_disk:
+        if suite not in registered:
+            problems.append(
+                f"{suite} exists on disk but is not registered in "
+                "scripts/test.sh"
+            )
+
+    check(
+        f"all {len(registered)} registered suites are documented",
+        problems,
+    )
+
+
 def main():
     missing = [p for p in DOC_PATHS if not p.exists()]
 
@@ -406,6 +575,8 @@ def main():
 
     test_wrapper_subcommands_documented(docs)
     test_readme_doc_links_exist(docs)
+    test_documented_suite_counts_match_manifest(docs)
+    test_suite_inventory_is_complete()
 
     print()
     print("=" * 72)

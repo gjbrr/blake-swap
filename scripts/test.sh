@@ -66,10 +66,17 @@ UNIT_SUITES=(
     tests/swap_wire_tests.py
     tests/market_state_tests.py
     tests/cli_wiring_tests.py
+    tests/command_surface_tests.py
+    tests/nostr_market_tests.py
     tests/docs_alignment_tests.py
     tests/swap_dashboard_json_tests.py
     tests/swap_market_takes_json_tests.py
     tests/swap_resume_step_budget_tests.py
+    tests/fail_closed_tests.py
+    tests/node_config_tests.py
+    tests/chain_cli_transport_tests.py
+    tests/driver_policy_tests.py
+    tests/agent_policy_tests.py
 )
 
 REGTEST_SUITES=(
@@ -92,7 +99,10 @@ REGTEST_SUITES=(
     tests/swap_cross_impl_btc_claimed_tests.py
     tests/swap_cross_impl_blake_claimed_tests.py
     tests/swap_cross_impl_full_happy_tests.py
+    tests/swap_market_flow_tests.py
+    tests/swap_reverse_market_flow_tests.py
     tests/swap_participant_isolation_tests.py
+    tests/swap_driver_surface_tests.py
 )
 
 NOSTR_SUITES=(

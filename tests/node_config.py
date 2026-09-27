@@ -24,6 +24,7 @@ unset.
 
 from __future__ import annotations
 
+import json
 import os
 import shlex
 import shutil
@@ -34,6 +35,18 @@ from pathlib import Path
 HOME = Path.home()
 
 PROJECT_DIR = Path(__file__).resolve().parent.parent
+
+#
+# The local two-chain rig created by scripts/test-nodes. When it is
+# running, its nodes are the preferred target: they are disposable,
+# regtest-only, and already funded, so a suite can never accidentally be
+# pointed at a mainnet datadir by a bare `bitcoin-cli` on PATH.
+#
+RIG_ROOT = Path(
+    os.environ.get("BLAKE_SWAP_TEST_ROOT", HOME / ".blake-swap-test")
+).expanduser()
+
+RIG_ENV_FILE = RIG_ROOT / "rig-env.json"
 
 SWAP_V2 = Path(
     os.environ.get(
@@ -149,6 +162,40 @@ def _resolve_datadir(env_var, candidates):
     return None, None
 
 
+def _rig_env():
+    """
+    Read the state file that scripts/test-nodes writes when it starts.
+
+    Returns ``{}`` when no rig has been started from this checkout. The
+    file, rather than the mere existence of a datadir, is what makes the
+    rig authoritative: a stopped rig must produce a SKIP, not a suite
+    that connects to nothing and fails.
+    """
+    try:
+        with RIG_ENV_FILE.open("r", encoding="utf-8") as handle:
+            state = json.load(handle)
+    except (OSError, ValueError):
+        return {}
+
+    return state if isinstance(state, dict) else {}
+
+
+RIG = _rig_env()
+
+RIG_RUNNING = bool(RIG.get("running"))
+
+
+def _rig_candidates(key, default):
+    """Rig paths, but only while the rig reports itself as running."""
+
+    if not RIG_RUNNING:
+        return []
+
+    value = RIG.get(key) or default
+
+    return [Path(str(value)).expanduser()]
+
+
 BTC_RPC_ARGS = tuple(
     shlex.split(os.environ.get("BLAKE_SWAP_BTC_RPC_ARGS", ""))
 )
@@ -161,6 +208,11 @@ BLAKE_RPC_ARGS = tuple(
 BTC_CLI, BTC_CLI_SOURCE = _resolve_executable(
     "BLAKE_SWAP_BTC_CLI",
     [
+        # A running scripts/test-nodes rig, then the conventional
+        # clone-and-symlink layout it is installed from.
+        *_rig_candidates("btc_cli", HOME / "s" / "bitcoin-core" / "bin" / "bitcoin-cli"),
+        HOME / "s" / "bitcoin-core" / "bin" / "bitcoin-cli",
+        HOME / "s" / "bitcoin" / "bin" / "bitcoin-cli",
         HOME / "bitcoin-core" / "build" / "bin" / "bitcoin-cli",
         HOME / "bitcoin" / "build" / "bin" / "bitcoin-cli",
         "/usr/local/bin/bitcoin-cli",
@@ -180,6 +232,8 @@ BTC_CLI, BTC_CLI_SOURCE = _resolve_executable(
 BLAKE_CLI, BLAKE_CLI_SOURCE = _resolve_executable(
     "BLAKE_SWAP_BLAKE_CLI",
     [
+        *_rig_candidates("blake_cli", HOME / "s" / "bitcoin-knots" / "bin" / "bitcoin-cli"),
+        HOME / "s" / "bitcoin-knots" / "bin" / "bitcoin-cli",
         HOME / "bitcoin-blake-rc2" / "build-rc2" / "bin" / "bitcoin-cli",
         HOME / "bitcoin-blake-rc2" / "build" / "bin" / "bitcoin-cli",
         HOME / "bitcoin-blake" / "build" / "bin" / "bitcoin-cli",
@@ -187,9 +241,16 @@ BLAKE_CLI, BLAKE_CLI_SOURCE = _resolve_executable(
     ],
 )
 
+#
+# Order matters: the disposable rig first, then explicit regtest
+# datadirs, and a general Bitcoin datadir last. A regtest run out of
+# ``~/.bitcoin`` is legitimate, but it must never outrank a dedicated
+# test datadir.
+#
 BTC_DATADIR, BTC_DATADIR_SOURCE = _resolve_datadir(
     "BLAKE_SWAP_BTC_DATADIR",
     [
+        *_rig_candidates("btc_datadir", RIG_ROOT / "btc"),
         HOME / "bitcoin-swap-regtest",
         HOME / ".bitcoin",
         "/home/gary/bitcoin-swap-regtest",
@@ -199,6 +260,7 @@ BTC_DATADIR, BTC_DATADIR_SOURCE = _resolve_datadir(
 BLAKE_DATADIR, BLAKE_DATADIR_SOURCE = _resolve_datadir(
     "BLAKE_SWAP_BLAKE_DATADIR",
     [
+        *_rig_candidates("blake_datadir", RIG_ROOT / "blake"),
         HOME / "blake-swap-regtest",
         HOME / ".blake-swap-regtest",
         "/home/gary/blake-swap-regtest",
@@ -232,6 +294,18 @@ def node_config_problems():
     a remote node needs ``-regtest`` and connection arguments instead.
     """
     problems = []
+
+    #
+    # A checkout that has a rig state file saying "stopped" must skip
+    # rather than quietly fall through to some other datadir: the rig is
+    # the intended target, and a generic `~/.bitcoin` is not a
+    # substitute for a regtest chain the suites can spend on.
+    #
+    if RIG and not RIG_RUNNING:
+        problems.append(
+            "The scripts/test-nodes rig is stopped. Start it with "
+            "`scripts/test-nodes start`."
+        )
 
     if BTC_CLI is None:
         problems.append(
@@ -287,6 +361,21 @@ def node_env():
         env["BLAKE_SWAP_BLAKE_RPC_ARGS"] = " ".join(BLAKE_RPC_ARGS)
 
     return env
+
+
+def install_into_environ():
+    """
+    Publish the resolved node configuration into ``os.environ``.
+
+    A suite that imports the engine *in process* must do this before the
+    import: the engine resolves its own chain paths from the environment
+    at import time, and would otherwise fall back to its built-in
+    author-host defaults even though this module resolved a rig.
+
+    Subprocess-driving suites do not need it -- the harness injects
+    :func:`node_env` into every child -- but it is harmless there too.
+    """
+    os.environ.update(node_env())
 
 
 def require_node_config():

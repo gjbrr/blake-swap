@@ -44,9 +44,14 @@ MESSAGE_DIR = Path(
     )
 ).expanduser()
 
+# Verified Nostr event cache. Created once here, so that path
+# computations on read-only reconciliation paths have no side effects.
+NOSTR_EVENT_CACHE_DIR = BASE_SWAP_DIR / "nostr-event-cache"
+
 for directory in (
     BASE_SWAP_DIR,
     MESSAGE_DIR,
+    NOSTR_EVENT_CACHE_DIR,
 ):
     directory.mkdir(parents=True, exist_ok=True)
 
@@ -118,11 +123,6 @@ BTC_WALLET = os.environ.get(
     LOCAL_WALLET,
 )
 
-# BLAKE-side keys
-ALICE_PUB = "03c2b0716765cce0ad45843be950aba370feecd46d127c8888d3c69dd653606356"
-BOB_PUB = "02670525ad0c200edcc985e0523fc8691703e62808a2dc0d493a20b1b18a0dce44"
-
-
 MARKET_DIRECTION_BLAKE_FOR_BTC = "blake-for-btc"
 MARKET_DIRECTION_BTC_FOR_BLAKE = "btc-for-blake"
 
@@ -130,6 +130,11 @@ MARKET_DIRECTIONS = {
     MARKET_DIRECTION_BLAKE_FOR_BTC,
     MARKET_DIRECTION_BTC_FOR_BLAKE,
 }
+
+# Tolerated clock skew for a counterparty-signed event whose created_at
+# lies in the future. Applies to every automatic-action freshness test,
+# so an event dated far ahead cannot be treated as permanently "fresh".
+FUTURE_SKEW_SECONDS = 300
 
 
 def market_protocol_roles(direction):
@@ -227,6 +232,44 @@ ALLOWED_TRANSITIONS = {
     State.BLAKE_REFUNDED: set(),
 }
 
+#
+# Backward corrections that ONLY reorganization recovery may perform.
+#
+# ALLOWED_TRANSITIONS models forward protocol progress. A reorganization
+# can prove that an earlier checkpoint is authoritative again, which
+# requires a reverse edge that the forward-only table deliberately does
+# not contain. Those edges are enumerated here as data so they are
+# auditable and testable, instead of living as ad-hoc state assignments.
+#
+REORG_TRANSITIONS = {
+    State.BLAKE_CLAIMED: {
+        State.BTC_CLAIMED,
+    },
+    State.BLAKE_REFUNDED: {
+        State.BTC_REFUNDED,
+    },
+}
+
+
+def apply_reorg_transition(swap, target):
+    """
+    Move durable state backward as part of reorganization recovery.
+
+    Refuses any edge not listed in REORG_TRANSITIONS, so a recovery path
+    cannot invent a transition. Normal forward progress must keep using
+    Swap.transition().
+    """
+    current = State(swap.state)
+    target = State(target)
+
+    if target not in REORG_TRANSITIONS.get(current, set()):
+        raise RuntimeError(
+            "SECURITY FAILURE: reorganization transition "
+            f"{current.value} -> {target.value} is not permitted"
+        )
+
+    swap.state = target.value
+
 
 @dataclass
 class Swap:
@@ -263,8 +306,12 @@ class Swap:
     blake_scan_start_height: int | None = None
     btc_scan_start_height: int | None = None
 
+    # Funding transactions.
     blake_funding_txid: str | None = None
+    blake_funding_vout: int | None = None
+    blake_funding_blockhash: str | None = None
 
+    btc_funding_txid: str | None = None
     btc_funding_vout: int | None = None
     btc_funding_blockhash: str | None = None
 
@@ -279,10 +326,6 @@ class Swap:
     nostr_bob_pub: str | None = None
 
     revealed_secret_hex: str | None = None
-
-    btc_funding_txid: str | None = None
-    blake_funding_vout: int | None = None
-    blake_funding_blockhash: str | None = None 
 
     btc_claim_txid: str | None = None
     btc_claim_blockhash: str | None = None
@@ -567,11 +610,28 @@ def print_swap(swap):
     print("--------")
     print("BTC timeout:   ", swap.btc_timeout)
     print("BLAKE timeout: ", swap.blake_timeout)
-    print(
-        "safety gap:    ",
-        swap.blake_timeout - swap.btc_timeout,
-        "blocks",
-    )
+
+    #
+    # Deliberately do NOT print a difference between the two CLTV
+    # heights. They are absolute heights on independent blockchains and
+    # have no ordering relationship; see
+    # swap_timeout_policy.validate_timeout_plan. The v1.5 policy records
+    # the safety margins as wall-clock seconds, which is the only
+    # meaningful comparison.
+    #
+    if swap.timeout_policy_version == "1.5":
+        print(
+            "BTC window:    ",
+            f"{swap.btc_timeout_window_seconds or 0} s",
+        )
+        print(
+            "Bob recovery:  ",
+            f"{swap.bob_recovery_seconds or 0} s",
+        )
+        print(
+            "BLAKE window:  ",
+            f"{swap.blake_timeout_window_seconds or 0} s",
+        )
 
     print()
     print("TRANSACTIONS")
@@ -593,6 +653,184 @@ def print_swap(swap):
         swap.blake_claim_txid or "-"
     )
 
+def rpc_timeout_seconds():
+    """
+    Chain RPC timeout, in seconds.
+
+    A hung node must not hang the engine forever. Override with
+    BLAKE_SWAP_RPC_TIMEOUT_SECONDS.
+    """
+    raw = os.environ.get(
+        "BLAKE_SWAP_RPC_TIMEOUT_SECONDS",
+        "120",
+    )
+
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        raise RuntimeError(
+            "BLAKE_SWAP_RPC_TIMEOUT_SECONDS must be a number"
+        ) from None
+
+    if value <= 0:
+        raise RuntimeError(
+            "BLAKE_SWAP_RPC_TIMEOUT_SECONDS must be positive"
+        )
+
+    return value
+
+
+def funding_scan_override_enabled():
+    """
+    Whether an unanchored (genesis) funding scan is permitted.
+
+    Off by default: a missing anchor means the scan cannot be bounded,
+    and an unbounded historical scan is an operational hazard rather
+    than a recovery feature. Opt in with
+    BLAKE_SWAP_ALLOW_UNANCHORED_FUNDING_SCAN=1 for a legacy state.
+    """
+    raw = os.environ.get(
+        "BLAKE_SWAP_ALLOW_UNANCHORED_FUNDING_SCAN",
+        "",
+    ).strip().lower()
+
+    return raw in {"1", "true", "yes", "on"}
+
+
+def funding_scan_max_blocks():
+    """
+    Maximum number of blocks a single funding scan may cover.
+
+    Anchors are recorded when a swap is created, so a scan far larger
+    than the swap's age means the anchor is wrong, not that the swap is
+    long-lived. Override with BLAKE_SWAP_MAX_FUNDING_SCAN_BLOCKS.
+    """
+    raw = os.environ.get(
+        "BLAKE_SWAP_MAX_FUNDING_SCAN_BLOCKS",
+        "100000",
+    )
+
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        raise RuntimeError(
+            "BLAKE_SWAP_MAX_FUNDING_SCAN_BLOCKS must be an integer"
+        ) from None
+
+    if value < 1:
+        raise RuntimeError(
+            "BLAKE_SWAP_MAX_FUNDING_SCAN_BLOCKS must be positive"
+        )
+
+    return value
+
+
+#
+# Linux caps a single argv element at MAX_ARG_STRLEN (32 pages, 128 KiB
+# on x86-64). Any argument kept below this bound is safe in argv; above
+# it, the kernel refuses to exec at all with E2BIG. Transaction hex is
+# the only argument here that can grow without bound: a wallet that has
+# to consolidate a few hundred inputs produces a funding transaction
+# whose hex alone exceeds the cap.
+#
+ARGV_SAFE_LENGTH = 100_000
+
+
+def run_chain_cli(label, cmd, stdin_text=None):
+    """
+    Run one chain RPC command and decode its JSON result.
+
+    ``stdin_text``, when given, is fed to the CLI's standard input. That
+    is how oversized arguments are delivered: bitcoin-cli's ``-stdin``
+    mode reads the command and its arguments from stdin, so the value
+    never touches argv.
+
+    Fails closed with a named diagnostic when the node does not answer
+    in time, rather than blocking indefinitely.
+    """
+    timeout = rpc_timeout_seconds()
+
+    try:
+        p = subprocess.run(
+            cmd,
+            text=True,
+            capture_output=True,
+            timeout=timeout,
+            input=stdin_text,
+        )
+    except subprocess.TimeoutExpired as e:
+        raise RuntimeError(
+            f"{label} RPC timed out after {timeout:g}s "
+            f"(BLAKE_SWAP_RPC_TIMEOUT_SECONDS): {cmd[0]}"
+        ) from e
+    except OSError as e:
+        #
+        # E2BIG (argument list too long) and ENOENT both surface here.
+        # A raw OSError from deep inside subprocess is not a useful
+        # diagnostic for an operator, and the caller's `except Exception`
+        # guards would swallow it into a generic failure.
+        #
+        raise RuntimeError(
+            f"{label} RPC could not be executed: {e}"
+        ) from e
+
+    if p.returncode != 0:
+        raise RuntimeError(p.stderr.strip())
+
+    out = p.stdout.strip()
+
+    try:
+        return json.loads(out)
+    except json.JSONDecodeError:
+        return out
+
+
+def _rpc_argument(x):
+    """
+    Render one Python value as a bitcoin-cli argument.
+
+    The engine passes Python booleans for the JSON booleans the RPC
+    expects, and ``str(True)`` is not ``"true"``.
+    """
+    if x is True:
+        return "true"
+    if x is False:
+        return "false"
+    return str(x)
+
+
+def _call_chain_cli(label, base_cmd, wallet, args):
+    """
+    Invoke a chain CLI, choosing argv or stdin transport automatically.
+
+    The two are interchangeable to the node: ``-stdin`` reads the same
+    command and arguments from standard input, one per line. Choosing
+    per call keeps every RPC call site unchanged and keeps huge
+    transaction hexes out of argv.
+    """
+    rendered = [_rpc_argument(x) for x in args]
+
+    cmd = list(base_cmd)
+
+    if wallet:
+        cmd.append(f"-rpcwallet={wallet}")
+
+    oversized = any(len(value) > ARGV_SAFE_LENGTH for value in rendered)
+
+    if oversized:
+        cmd.append("-stdin")
+
+        return run_chain_cli(
+            label,
+            cmd,
+            stdin_text="\n".join(rendered) + "\n",
+        )
+
+    cmd.extend(rendered)
+
+    return run_chain_cli(label, cmd)
+
+
 def blake_cli(*args, wallet=None):
     cmd = [
         BLAKE_CLI,
@@ -606,33 +844,7 @@ def blake_cli(*args, wallet=None):
 
     cmd.extend(BLAKE_RPC_ARGS)
 
-    if wallet:
-        cmd.append(f"-rpcwallet={wallet}")
-
-    def rpc_arg(x):
-        if x is True:
-            return "true"
-        if x is False:
-            return "false"
-        return str(x)
-
-    cmd.extend(rpc_arg(x) for x in args)
-
-    p = subprocess.run(
-        cmd,
-        text=True,
-        capture_output=True,
-    )
-
-    if p.returncode != 0:
-        raise RuntimeError(p.stderr.strip())
-
-    out = p.stdout.strip()
-
-    try:
-        return json.loads(out)
-    except json.JSONDecodeError:
-        return out
+    return _call_chain_cli("BLAKE", cmd, wallet, args)
 
 def btc_cli(*args, wallet=None):
     cmd = [
@@ -646,33 +858,7 @@ def btc_cli(*args, wallet=None):
 
     cmd.extend(BTC_RPC_ARGS)
 
-    if wallet:
-        cmd.append(f"-rpcwallet={wallet}")
-
-    def rpc_arg(x):
-        if x is True:
-            return "true"
-        if x is False:
-            return "false"
-        return str(x)
-
-    cmd.extend(rpc_arg(x) for x in args)
-
-    p = subprocess.run(
-        cmd,
-        text=True,
-        capture_output=True,
-    )
-
-    if p.returncode != 0:
-        raise RuntimeError(p.stderr.strip())
-
-    out = p.stdout.strip()
-
-    try:
-        return json.loads(out)
-    except json.JSONDecodeError:
-        return out
+    return _call_chain_cli("Bitcoin", cmd, wallet, args)
 
 def get_blake_contract_descriptor(swap):
     if not swap.blake_alice_pub:
@@ -709,28 +895,6 @@ def derive_blake_contract_address(desc):
     )
 
     return result[0]
-
-def get_btc_contract_descriptor(swap):
-    if not swap.btc_alice_pub:
-        raise ValueError("Swap has no Bitcoin Alice pubkey")
-
-    if not swap.btc_bob_pub:
-        raise ValueError("Swap has no Bitcoin Bob pubkey")
-
-    body = (
-        "wsh(or_i("
-        f"and_v(v:pk({swap.btc_alice_pub}),sha256({swap.secret_hash})),"
-        f"and_v(v:after({swap.btc_timeout}),pk({swap.btc_bob_pub}))"
-        "))"
-    )
-
-    info = btc_cli(
-        "getdescriptorinfo",
-        body,
-    )
-
-    return info["descriptor"]
-
 
 def get_btc_contract_descriptor(swap):
     if not swap.btc_alice_pub:
@@ -844,11 +1008,25 @@ def classify_htlc_spend(
     """
     Classify a confirmed spend of our exact HTLC outpoint.
 
-    For our two-branch Miniscript contracts:
-      - presence of the valid SHA256 preimage => claim branch
-      - otherwise => refund branch
+    The contract is a two-branch Miniscript HTLC:
 
-    The spend itself has already been accepted by consensus.
+        wsh(or_i(and_v(v:pk(CLAIMER), sha256(H)),
+                 and_v(v:after(T), pk(REFUNDER))))
+
+    A P2WSH spend of it has one of exactly two shapes, with the or_i
+    selector immediately before the witness script:
+
+        claim:   <preimage(32B)> <signature> <01> <witnessScript>
+        refund:  <signature> <0-or-empty> <witnessScript>
+
+    The branch is therefore decided from the witness STRUCTURE, not
+    merely from the absence of a preimage. A witness matching neither
+    shape returns "unknown", and callers must treat that as a
+    mismatch and fail closed rather than assuming a refund.
+
+    The spend itself has already been accepted by consensus, and the
+    caller has already tied it to our exact HTLC outpoint, so the script
+    bytes need not be re-derived here.
     """
     htlc_input = None
 
@@ -877,6 +1055,16 @@ def classify_htlc_spend(
             "has no witness"
         )
 
+    #
+    # Need at least: <arg> <selector> <witnessScript>.
+    #
+    if len(witness) < 3:
+        return "unknown"
+
+    selector = witness[-2]
+
+    preimage_present = False
+
     for item in witness:
         if len(item) != 64:
             continue
@@ -887,9 +1075,25 @@ def classify_htlc_spend(
             continue
 
         if hashlib.sha256(candidate).hexdigest() == secret_hash:
+            preimage_present = True
+            break
+
+    if selector == "01":
+        # OP_IF taken: the claim branch, which must carry the preimage.
+        if preimage_present:
             return "claim"
 
-    return "refund"
+        return "unknown"
+
+    if selector in ("", "00"):
+        # OP_ELSE taken: the refund branch, which must not carry the
+        # preimage.
+        if preimage_present:
+            return "unknown"
+
+        return "refund"
+
+    return "unknown"
 
 
 def find_confirmed_htlc_spend(
@@ -1272,6 +1476,28 @@ def find_confirmed_htlc_spend(
 
     return None
 
+def transaction_in_mempool(cli, txid):
+    """
+    Return the node's mempool entry for txid, or None when the node does
+    not have it in its mempool.
+
+    Callers must branch on presence/absence rather than on the wording
+    of an error message, which varies by node version and locale. A node
+    that is genuinely unreachable fails loudly on the next RPC call, so
+    treating an error here as "not in mempool" does not mask an outage.
+    """
+    if not txid:
+        return None
+
+    try:
+        return cli(
+            "getmempoolentry",
+            txid,
+        )
+    except RuntimeError:
+        return None
+
+
 def require_recovered_branch(
     swap,
     chain,
@@ -1322,12 +1548,15 @@ def require_recovered_branch(
     # rebroadcast against an unavailable outpoint.
     #
     if recorded_txid:
-        try:
-            cli(
-                "getmempoolentry",
-                recorded_txid,
-            )
+        #
+        # Branch on the *presence* of a mempool entry rather than on the
+        # wording of an error message: node text varies by version and
+        # locale. A node that is genuinely unreachable fails loudly on
+        # the next RPC call, so this does not mask an outage.
+        #
+        entry = transaction_in_mempool(cli, recorded_txid)
 
+        if entry is not None:
             tx = cli(
                 "getrawtransaction",
                 recorded_txid,
@@ -1348,10 +1577,6 @@ def require_recovered_branch(
                 )
 
             return "pending"
-
-        except RuntimeError as e:
-            if "Transaction not in mempool" not in str(e):
-                raise
 
     found = find_confirmed_htlc_spend(
         swap,
@@ -1681,6 +1906,88 @@ def clear_funding_intent(swap_id, chain):
         pass
 
 
+def reconcile_funding_intent(swap, chain):
+    """
+    Resolve a funding intent against this participant's own wallet.
+
+    An intent is written before money may move and cleared once the
+    outpoint is durable. A crash between those two points leaves an
+    orphan that would otherwise block timeout refresh forever, because
+    an existing intent means a spend may have started.
+
+    Read-only with respect to the chains: it never broadcasts, never
+    mines, and never clears an unresolved intent. Returns:
+
+        "none"       no intent exists; nothing to resolve
+        "confirmed"  the exact payment is confirmed, so the funding
+                     happened and the swap's own record is the authority
+                     from here on; the intent was cleared
+        "pending"    the exact payment exists but is unconfirmed, so a
+                     broadcast is genuinely in flight
+        "absent"     no payment to the intent's address is known to this
+                     wallet, which is consistent with a crash before the
+                     broadcast -- but not proof, since a replaced wallet
+                     would look the same
+        "unknown"    an intent exists but is unreadable or incomplete
+
+    "pending", "absent" and "unknown" all require an operator decision;
+    only "confirmed" is resolved automatically.
+    """
+    path = funding_intent_path(swap.swap_id, chain)
+
+    if not path.exists():
+        return "none"
+
+    try:
+        with open(path) as f:
+            intent = json.load(f)
+    except Exception:
+        return "unknown"
+
+    if not isinstance(intent, dict):
+        return "unknown"
+
+    address = intent.get("address")
+
+    if not address:
+        return "unknown"
+
+    if chain == "blake":
+        found = find_wallet_payment(
+            blake_cli,
+            BLAKE_WALLET,
+            address,
+            swap.blake_amount,
+        )
+    elif chain == "btc":
+        found = find_wallet_payment(
+            btc_cli,
+            BTC_WALLET,
+            address,
+            swap.btc_sats,
+            sats=True,
+        )
+    else:
+        return "unknown"
+
+    if not found:
+        #
+        # No payment this wallet ever made to that address. That is
+        # consistent with a crash before the broadcast, but it is not
+        # proof: a replaced or restored wallet would look the same. Do
+        # not clear it here; --clear-stale-intent exists for the
+        # operator to assert that no funding was broadcast.
+        #
+        return "absent"
+
+    _txid, _vout, blockhash = found
+
+    if blockhash:
+        clear_funding_intent(swap.swap_id, chain)
+        return "confirmed"
+
+    return "pending"
+
 
 FUNDING_LOCK_DIR = BASE_SWAP_DIR / "funding-locks"
 
@@ -1707,6 +2014,17 @@ def protocol_failpoint(name):
 
 
 
+#
+# Funding locks held by *this* process, keyed by (swap_id, chain).
+#
+# flock(2) locks belong to the open file description, not the process,
+# so acquiring the same lock twice in one process would block forever.
+# Tracking the keys we already hold turns that latent deadlock into an
+# immediate, named error.
+#
+_HELD_FUNDING_LOCKS = set()
+
+
 def serialized_funding(chain):
     """
     Serialize one local funding operation per swap+chain.
@@ -1717,6 +2035,14 @@ def serialized_funding(chain):
     """
     def decorate(fn):
         def wrapped(args):
+            key = (args.swap_id, chain)
+
+            if key in _HELD_FUNDING_LOCKS:
+                raise RuntimeError(
+                    "SECURITY FAILURE: nested funding lock for "
+                    f"{args.swap_id} on {chain} would deadlock"
+                )
+
             FUNDING_LOCK_DIR.mkdir(
                 parents=True,
                 exist_ok=True,
@@ -1733,9 +2059,13 @@ def serialized_funding(chain):
                     fcntl.LOCK_EX,
                 )
 
+                _HELD_FUNDING_LOCKS.add(key)
+
                 try:
                     return fn(args)
                 finally:
+                    _HELD_FUNDING_LOCKS.discard(key)
+
                     fcntl.flock(
                         lock_file.fileno(),
                         fcntl.LOCK_UN,
@@ -2324,6 +2654,46 @@ def command_new(args):
             args.btc_timeout,
         )
 
+        #
+        # Explicit heights are a test/regtest override, but the offer
+        # they produce must still be well formed: a peer refuses an
+        # offer with no v1.5 metadata, so an explicit swap could never
+        # be accepted. Advertise the wall-clock windows that the
+        # supplied heights actually imply, measured from the chain tips
+        # make_swap just recorded.
+        #
+        # This does not weaken the peer's safety check: Bob still
+        # validates the advertised windows AND the real heights against
+        # his own policy, so an explicit offer that leaves too little
+        # recovery time is rejected exactly as a derived one would be.
+        #
+        policy = TimeoutPolicy()
+
+        btc_reference_height = int(
+            swap.btc_scan_start_height
+        )
+        blake_reference_height = int(
+            swap.blake_scan_start_height
+        )
+
+        btc_window = max(
+            0,
+            swap.btc_timeout - btc_reference_height,
+        ) * policy.btc_block_seconds
+
+        blake_window = max(
+            0,
+            swap.blake_timeout - blake_reference_height,
+        ) * policy.blake_block_seconds
+
+        swap.timeout_policy_version = "1.5"
+        swap.btc_timeout_window_seconds = btc_window
+        swap.blake_timeout_window_seconds = blake_window
+        swap.bob_recovery_seconds = max(
+            0,
+            blake_window - btc_window,
+        )
+
     else:
         #
         # v1.5 production-style construction.
@@ -2503,21 +2873,47 @@ def command_refresh_timeouts(args):
             )
 
     #
-    # Funding intents are written before money may move.
-    # Their existence means a crash-window funding action
-    # may have started even if canonical state is still OFFERED.
+    # Funding intents are written before money may move. Their
+    # existence means a crash-window funding action may have started
+    # even if canonical state is still OFFERED.
+    #
+    # A confirmed funding resolves itself. Anything else refuses by
+    # default, so an orphan cannot silently block refresh forever: the
+    # operator is given an explicit, deliberate way out that they may
+    # use only after verifying no funding was broadcast.
     #
     for chain in ("blake", "btc"):
-        intent = funding_intent_path(
-            swap.swap_id,
+        status = reconcile_funding_intent(
+            swap,
             chain,
         )
 
-        if intent.exists():
-            raise RuntimeError(
-                "SECURITY FAILURE: cannot refresh "
-                f"timeouts while {chain} funding intent exists"
+        if status in ("none", "confirmed"):
+            continue
+
+        if getattr(args, "clear_stale_intent", False):
+            if status == "pending":
+                raise RuntimeError(
+                    "SECURITY FAILURE: refusing to clear the "
+                    f"{chain} funding intent: a funding broadcast is "
+                    "still pending. Let it confirm or be replaced first."
+                )
+
+            clear_funding_intent(swap.swap_id, chain)
+
+            print(
+                "CLEARED STALE FUNDING INTENT:",
+                chain.upper(),
+                f"({status})",
             )
+            continue
+
+        raise RuntimeError(
+            "SECURITY FAILURE: cannot refresh timeouts while a "
+            f"{chain} funding intent exists ({status}). If you have "
+            "verified that no funding transaction was broadcast, "
+            "re-run with --clear-stale-intent."
+        )
 
     original_swap_id = swap.swap_id
     original_secret = swap.secret_hex
@@ -2879,9 +3275,9 @@ if not NOSTR_RELAYS:
         "No Nostr relays configured"
     )
 
-# Transitional compatibility:
-# reads still use the first relay.
-NOSTR_RELAY = NOSTR_RELAYS[0]
+# Transitional compatibility: the *legacy environment variable*
+# BLAKE_SWAP_NOSTR_RELAY is still honoured above, but reads always use
+# every configured relay.
 
 
 def nostr_private_key_hex():
@@ -3038,6 +3434,25 @@ def verify_nostr_event(event):
     ):
         raise RuntimeError(
             "Nostr Schnorr signature verification failed"
+        )
+
+    #
+    # A valid signature proves authorship, not timeliness. Retrieval
+    # selects the latest event by (created_at, id), so an event dated far
+    # in the future would otherwise win every comparison and could be
+    # treated as permanently fresh. Bound the tolerated clock skew.
+    #
+    try:
+        created_at = int(event["created_at"])
+    except (TypeError, ValueError):
+        raise RuntimeError(
+            "Nostr event created_at is not an integer"
+        ) from None
+
+    if created_at > int(time.time()) + FUTURE_SKEW_SECONDS:
+        raise RuntimeError(
+            "Nostr event created_at is too far in the future "
+            f"(skew limit {FUTURE_SKEW_SECONDS}s)"
         )
 
 
@@ -4037,6 +4452,25 @@ def command_accept_offer(args):
     # In that case, constrain the Nostr query itself
     # to that exact signer instead of accepting an
     # arbitrary first-contact offer.
+    #
+    # Over Nostr, an unpinned author means accepting whichever signed
+    # offer the relay happens to return first — a public-relay peer
+    # could supply it. That must be chosen explicitly, not reached by
+    # omission. FILE transport is local and asserted rather than
+    # authenticated, so the requirement does not apply there.
+    #
+    if (
+        TRANSPORT == "nostr"
+        and expected_alice_pub is None
+        and not getattr(args, "allow_unpinned_author", False)
+    ):
+        raise RuntimeError(
+            "SECURITY FAILURE: accepting an offer over Nostr requires "
+            "the expected Alice identity. Pass --expected-alice-pub, or "
+            "pass --allow-unpinned-author to accept whichever author "
+            "the relay returns."
+        )
+
     if (
         TRANSPORT == "nostr"
         and expected_alice_pub is not None
@@ -4777,32 +5211,68 @@ def command_verify_btc(args):
     )
 
 def read_compact_size(buf, pos):
+    """
+    Decode one Bitcoin CompactSize integer.
+
+    Bounds-checked and minimality-checked: a truncated or non-canonical
+    buffer raises a clean ValueError rather than an IndexError or a
+    silent short read. Bitcoin Core's own PSBT parser likewise rejects
+    non-minimal encodings.
+    """
+    if pos < 0 or pos >= len(buf):
+        raise ValueError(
+            "malformed PSBT: compact-size read past end of buffer"
+        )
+
     first = buf[pos]
     pos += 1
 
     if first < 253:
         return first, pos
 
-    if first == 253:
-        return (
-            int.from_bytes(buf[pos:pos+2], "little"),
-            pos + 2,
+    width = {
+        253: 2,
+        254: 4,
+        255: 8,
+    }[first]
+
+    if pos + width > len(buf):
+        raise ValueError(
+            "malformed PSBT: truncated compact-size integer"
         )
 
-    if first == 254:
-        return (
-            int.from_bytes(buf[pos:pos+4], "little"),
-            pos + 4,
-        )
-
-    return (
-        int.from_bytes(buf[pos:pos+8], "little"),
-        pos + 8,
+    value = int.from_bytes(
+        buf[pos:pos + width],
+        "little",
     )
+
+    minimum = {
+        2: 253,
+        4: 0x10000,
+        8: 0x100000000,
+    }[width]
+
+    if value < minimum:
+        raise ValueError(
+            "malformed PSBT: non-minimal compact-size encoding"
+        )
+
+    return value, pos + width
 
 
 def find_map_end(buf, pos):
+    """
+    Return the offset of the 0x00 terminator of the map at `pos`.
+
+    Bounds-checked: a map that runs past the end of the buffer is a
+    malformed PSBT, not an infinite loop or an IndexError.
+    """
     while True:
+        if pos < 0 or pos >= len(buf):
+            raise ValueError(
+                "malformed PSBT: map is not terminated"
+            )
+
         keylen, p = read_compact_size(buf, pos)
 
         if keylen == 0:
@@ -4810,11 +5280,29 @@ def find_map_end(buf, pos):
 
         pos = p + keylen
 
+        if pos >= len(buf):
+            raise ValueError(
+                "malformed PSBT: key runs past end of buffer"
+            )
+
         vallen, p = read_compact_size(buf, pos)
         pos = p + vallen
 
 
-def add_sha256_preimage(psbt_b64, hash_hex, secret_hex):
+def add_sha256_preimage(
+    psbt_b64,
+    hash_hex,
+    secret_hex,
+    input_index=0,
+):
+    """
+    Add a BIP174 PSBT_IN_SHA256 record (the HTLC preimage) to a PSBT.
+
+    Only input 0 is supported, because every settlement transaction this
+    implementation builds has exactly one input. The restriction is
+    enforced so a future multi-input settlement cannot silently annotate
+    the wrong input.
+    """
     h = bytes.fromhex(hash_hex)
     secret = bytes.fromhex(secret_hex)
 
@@ -4835,6 +5323,21 @@ def add_sha256_preimage(psbt_b64, hash_hex, secret_hex):
 
     if raw[:5] != b"psbt\xff":
         raise ValueError("not a PSBT")
+
+    #
+    # This inserts into the FIRST input map only. Every settlement
+    # transaction this implementation builds has exactly one input, so
+    # that is correct today, but the assumption is enforced rather than
+    # implied: a future multi-input settlement must implement
+    # input-index selection explicitly instead of silently annotating
+    # the wrong input.
+    #
+    if input_index != 0:
+        raise NotImplementedError(
+            "PSBT hashlock injection only supports input 0; "
+            f"requested input {input_index}. Settlement PSBTs are "
+            "single-input by construction."
+        )
 
     global_end = find_map_end(raw, 5)
 
@@ -4997,6 +5500,15 @@ def command_fund_btc(args):
             str(funding_target),
             "conservative",
             wallet=BTC_WALLET,
+        )
+
+        #
+        # Money may now have moved, but the outpoint is not yet durable.
+        # This is the exact crash window the funding-intent file exists
+        # to cover, so expose it to the crash-recovery tests.
+        #
+        protocol_failpoint(
+            "after-btc-funding-broadcast-before-outpoint-record"
         )
 
         contract_vout, blockhash = (
@@ -7449,6 +7961,51 @@ def verify_final_blake_claim_active(swap):
     return True
 
 
+def recorded_settlement_confirmed(cli, txid, blockhash):
+    """
+    Read-only: is this exact transaction confirmed on the active chain?
+
+    Returns True only for an active-chain transaction with at least one
+    confirmation. A missing, unknown, or reorg-disconnected transaction
+    returns False. The recorded block hash is passed to
+    getrawtransaction so this works on nodes without a transaction
+    index.
+
+    Reorganization recovery needs this narrow question because
+    find_confirmed_htlc_spend() fails closed on a disconnected recorded
+    settlement. That is the right behaviour for an action path, but it
+    would make the recovery path unreachable, since a disconnected
+    transaction is precisely the input recovery exists to handle.
+    """
+    if not txid:
+        return False
+
+    try:
+        if blockhash:
+            tx = cli(
+                "getrawtransaction",
+                txid,
+                True,
+                blockhash,
+            )
+        else:
+            tx = cli(
+                "getrawtransaction",
+                txid,
+                True,
+            )
+    except Exception:
+        return False
+
+    if not isinstance(tx, dict):
+        return False
+
+    if tx.get("in_active_chain") is False:
+        return False
+
+    return int(tx.get("confirmations", 0) or 0) >= 1
+
+
 def recover_final_blake_claim_reorg(swap):
     """
     Recover from a reorg which removed Bob's final BLAKE claim.
@@ -7464,10 +8021,23 @@ def recover_final_blake_claim_reorg(swap):
     # First ask the active BLAKE chain what currently spends
     # the original HTLC.
     #
-    current_blake_spend = find_confirmed_htlc_spend(
-        swap,
-        "blake",
-    )
+    # A reorg-disconnected recorded claim is the normal input here, and
+    # find_confirmed_htlc_spend fails closed on exactly that, so ask the
+    # narrow question first. A conflicting confirmed spend is still
+    # caught below: the rollback path requires the HTLC outpoint to
+    # reappear ignoring mempool effects, and fails closed otherwise.
+    #
+    if recorded_settlement_confirmed(
+        blake_cli,
+        swap.blake_claim_txid,
+        swap.blake_claim_blockhash,
+    ):
+        current_blake_spend = find_confirmed_htlc_spend(
+            swap,
+            "blake",
+        )
+    else:
+        current_blake_spend = None
 
     if current_blake_spend is not None:
         #
@@ -7496,12 +8066,13 @@ def recover_final_blake_claim_reorg(swap):
     # to the mempool. If Bob's exact recorded final claim is
     # still pending there, do NOT roll durable state backward.
     #
-    try:
-        blake_cli(
-            "getmempoolentry",
-            swap.blake_claim_txid,
-        )
-
+    # Presence of a mempool entry is the test, not the wording of any
+    # error message.
+    #
+    if transaction_in_mempool(
+        blake_cli,
+        swap.blake_claim_txid,
+    ) is not None:
         pending_tx = blake_cli(
             "getrawtransaction",
             swap.blake_claim_txid,
@@ -7523,18 +8094,6 @@ def recover_final_blake_claim_reorg(swap):
             )
 
         return "pending"
-
-    except RuntimeError as e:
-        #
-        # "Transaction not in mempool" means genuine rollback
-        # remains possible. Any other validation failure above
-        # must fail closed.
-        #
-        if (
-            "Transaction not in mempool"
-            not in str(e)
-        ):
-            raise
 
     #
     # The recorded claim is neither confirmed nor pending.
@@ -7602,7 +8161,10 @@ def recover_final_blake_claim_reorg(swap):
     swap.blake_claim_txid = None
     swap.blake_claim_blockhash = None
 
-    swap.state = State.BTC_CLAIMED.value
+    apply_reorg_transition(
+        swap,
+        State.BTC_CLAIMED,
+    )
 
     return True
 
@@ -7629,10 +8191,23 @@ def recover_final_blake_refund_reorg(swap):
     #
     # First inspect confirmed active-chain truth.
     #
-    active = find_confirmed_htlc_spend(
-        swap,
-        "blake",
-    )
+    # A reorg-disconnected recorded refund is the normal input here, and
+    # find_confirmed_htlc_spend fails closed on exactly that, so ask the
+    # narrow question first. A conflicting confirmed spend is still
+    # caught below: the rollback path requires the HTLC outpoint to
+    # reappear ignoring mempool effects, and fails closed otherwise.
+    #
+    if recorded_settlement_confirmed(
+        blake_cli,
+        swap.blake_refund_txid,
+        swap.blake_refund_blockhash,
+    ):
+        active = find_confirmed_htlc_spend(
+            swap,
+            "blake",
+        )
+    else:
+        active = None
 
     if active is not None:
         if (
@@ -7652,12 +8227,13 @@ def recover_final_blake_refund_reorg(swap):
     # return to the mempool. If our exact refund is still there,
     # settlement is pending rather than rolled back.
     #
-    try:
-        blake_cli(
-            "getmempoolentry",
-            swap.blake_refund_txid,
-        )
-
+    # Presence of a mempool entry is the test, not the wording of any
+    # error message.
+    #
+    if transaction_in_mempool(
+        blake_cli,
+        swap.blake_refund_txid,
+    ) is not None:
         pending_tx = blake_cli(
             "getrawtransaction",
             swap.blake_refund_txid,
@@ -7678,10 +8254,6 @@ def recover_final_blake_refund_reorg(swap):
             )
 
         return "pending"
-
-    except RuntimeError as e:
-        if "Transaction not in mempool" not in str(e):
-            raise
 
     #
     # The exact refund is neither confirmed nor pending.
@@ -7714,9 +8286,14 @@ def recover_final_blake_refund_reorg(swap):
     swap.blake_refund_blockhash = None
 
     #
-    # This is deliberate reorg recovery, not a normal transition.
+    # This is deliberate reorg recovery, not a normal transition, so it
+    # goes through the explicit reverse-edge table rather than
+    # Swap.transition().
     #
-    swap.state = State.BTC_REFUNDED.value
+    apply_reorg_transition(
+        swap,
+        State.BTC_REFUNDED,
+    )
 
     return True
 
@@ -7837,9 +8414,19 @@ async def nostr_fetch_event_by_id_from_relay(
     return found
 
 
-def nostr_event_cache_path(event_id):
-    from pathlib import Path
+def nostr_event_cache_dir():
+    """
+    The verified-event cache directory.
 
+    Pure: the directory is created once at import (see
+    NOSTR_EVENT_CACHE_DIR). This helper is called from read-only
+    reconciliation paths, and a path computation must not have
+    filesystem side effects.
+    """
+    return NOSTR_EVENT_CACHE_DIR
+
+
+def nostr_event_cache_path(event_id):
     if (
         not isinstance(event_id, str)
         or len(event_id) != 64
@@ -7855,18 +8442,7 @@ def nostr_event_cache_path(event_id):
             "Nostr event ID is not hex"
         ) from e
 
-    cache_dir = (
-        BASE_SWAP_DIR
-        / "nostr-event-cache"
-    )
-
-    cache_dir.mkdir(
-        parents=True,
-        exist_ok=True,
-        mode=0o700,
-    )
-
-    return cache_dir / f"{event_id}.json"
+    return nostr_event_cache_dir() / f"{event_id}.json"
 
 
 def nostr_cache_event(event):
@@ -7892,6 +8468,16 @@ def nostr_cache_event(event):
 
     path = nostr_event_cache_path(event_id)
     temp_path = path.with_suffix(".json.tmp")
+
+    #
+    # The directory is created at import, but recreate it defensively
+    # in case it was removed while the process was running.
+    #
+    nostr_event_cache_dir().mkdir(
+        parents=True,
+        exist_ok=True,
+        mode=0o700,
+    )
 
     with open(temp_path, "w") as f:
         json.dump(
@@ -8009,82 +8595,6 @@ def nostr_market_cancellation_applies(
 
     return True
 
-
-
-def nostr_market_match_applies(
-    event,
-    offer_id,
-    maker_pubkey,
-):
-    import json
-
-    verify_nostr_event(event)
-
-    if event.get("kind") != 1:
-        return False
-
-    if not any(
-        len(tag) >= 2
-        and tag[0] == "t"
-        and tag[1] == "blake-swap-market-match"
-        for tag in event.get("tags", [])
-    ):
-        return False
-
-    if not any(
-        len(tag) >= 2
-        and tag[0] == "e"
-        and tag[1] == offer_id
-        for tag in event.get("tags", [])
-    ):
-        return False
-
-    if event.get("pubkey") != maker_pubkey:
-        return False
-
-    try:
-        message = json.loads(
-            event.get("content", "")
-        )
-    except Exception:
-        return False
-
-    if message.get("type") != "market-match":
-        return False
-
-    if message.get("offer_id") != offer_id:
-        return False
-
-    if message.get("maker") != maker_pubkey:
-        return False
-
-    take_id = message.get("take_id")
-
-    if (
-        not isinstance(take_id, str)
-        or len(take_id) != 64
-    ):
-        return False
-
-    try:
-        int(take_id, 16)
-    except ValueError:
-        return False
-
-    taker = message.get("taker")
-
-    if (
-        not isinstance(taker, str)
-        or len(taker) != 64
-    ):
-        return False
-
-    try:
-        int(taker, 16)
-    except ValueError:
-        return False
-
-    return True
 
 
 def nostr_derive_market_offer_state(
@@ -9265,79 +9775,6 @@ def build_market_offer_v2_event(
     )
 
     return event, message
-
-
-def build_market_offer_event(
-    blake_amount,
-    btc_sats,
-    minutes,
-):
-    import time
-    import secrets
-    from coincurve import PrivateKey
-
-    private_key = PrivateKey(
-        bytes.fromhex(
-            nostr_private_key_hex()
-        )
-    )
-
-    compressed = private_key.public_key.format(
-        compressed=True
-    )
-
-    pubkey_hex = compressed[1:].hex()
-
-    offer_nonce = secrets.token_hex(8)
-    created_at = int(time.time())
-
-    expires_at = (
-        created_at
-        + (minutes * 60)
-    )
-
-    message = {
-        "type": "market-offer",
-        "version": 1,
-        "base": "BLAKE",
-        "quote": "BTC",
-        "side": "sell",
-        "blake_amount": str(blake_amount),
-        "btc_sats": btc_sats,
-        "created_at": created_at,
-        "expires_at": expires_at,
-        "nonce": offer_nonce,
-    }
-
-    content = json.dumps(
-        message,
-        separators=(",", ":"),
-        sort_keys=True,
-    )
-
-    event = {
-        "pubkey": pubkey_hex,
-        "created_at": created_at,
-        "kind": 1,
-        "tags": [
-            ["t", "blake-swap-market"],
-            ["base", "BLAKE"],
-            ["quote", "BTC"],
-            ["side", "sell"],
-        ],
-        "content": content,
-    }
-
-    event_id = nostr_event_id(event)
-
-    event["id"] = event_id.hex()
-
-    event["sig"] = private_key.sign_schnorr(
-        event_id
-    ).hex()
-
-    return event, message
-
 
 
 def settlement_fee_target_blocks():
@@ -13505,6 +13942,13 @@ def command_accept_market_take(args):
     # All signature, schema, identity, term, and
     # later durable-state checks still run.
     #
+    # `allow_matched` is passed for the same reason as `allow_expired`:
+    # accepting this take is what matches the offer, so a retry after a
+    # crash sees a MATCHED offer and would otherwise be refused by the
+    # state gate above before the idempotent path below could report
+    # "MARKET TAKE ALREADY ACCEPTED". Without it, a retry failed with
+    # "Unknown market offer state: MATCHED" instead of being a no-op.
+    #
     original, offer_message, valid_takes = (
         asyncio.run(
             nostr_fetch_market_takes(
@@ -13512,6 +13956,7 @@ def command_accept_market_take(args):
                 limit=200,
                 extra_events=[take_event],
                 allow_expired=already_selected,
+                allow_matched=already_selected,
             )
         )
     )
@@ -14360,10 +14805,35 @@ def scan_chain_for_expected_funding(swap, chain):
         None,
     )
 
-    # Backward compatibility for old durable states. New swaps
-    # always have anchors; old checkpoints may legitimately not.
+    #
+    # A missing anchor must NOT silently become a scan from genesis.
+    # New swaps always record an anchor before funding is possible, and
+    # the spender scan (find_confirmed_htlc_spend) already refuses to
+    # scan unbounded in exactly this situation. Degrading to O(genesis)
+    # is an operational denial of service against the participant's own
+    # node and gives no warning.
+    #
+    # A genuinely ancient durable state can still be recovered by opting
+    # in explicitly, which logs loudly.
+    #
     if start_height is None:
-        start_height = 0
+        if funding_scan_override_enabled():
+            print(
+                "WARNING: no recorded "
+                f"{chain.upper()} funding scan anchor. "
+                "BLAKE_SWAP_ALLOW_UNANCHORED_FUNDING_SCAN is set, so "
+                "this will scan from genesis. This is slow and "
+                "unnecessary for any swap created by this version."
+            )
+            start_height = 0
+        else:
+            raise RuntimeError(
+                f"SECURITY FAILURE: no recorded "
+                f"{chain.upper()} funding scan anchor. Refusing to "
+                "scan from genesis. Set "
+                "BLAKE_SWAP_ALLOW_UNANCHORED_FUNDING_SCAN=1 to "
+                "force it for a legacy durable state."
+            )
 
     start_height = int(start_height)
 
@@ -14384,6 +14854,22 @@ def scan_chain_for_expected_funding(swap, chain):
     scan_blocks = (
         tip - start_height + 1
     )
+
+    #
+    # Bound the work. Anchors are recorded at swap creation, so a huge
+    # range means the anchor is wrong or stale, not that the swap is
+    # long-lived. Refuse rather than quietly spending hours of RPC.
+    #
+    max_scan_blocks = funding_scan_max_blocks()
+
+    if scan_blocks > max_scan_blocks:
+        raise RuntimeError(
+            f"SECURITY FAILURE: {chain.upper()} funding scan would "
+            f"cover {scan_blocks} blocks, above the "
+            f"{max_scan_blocks}-block limit "
+            "(BLAKE_SWAP_MAX_FUNDING_SCAN_BLOCKS). Refusing an "
+            "unbounded historical scan."
+        )
 
     print(
         "FUNDING SCAN:",
@@ -14704,6 +15190,20 @@ def command_sync_funding(args):
                 "state:",
                 swap.state,
             )
+
+            #
+            # A half-populated outpoint is corruption, not a normal
+            # condition. Fail closed here with a named diagnostic rather
+            # than relying on a later stage to notice.
+            #
+            if (
+                (swap.btc_funding_txid is None)
+                != (swap.btc_funding_vout is None)
+            ):
+                raise RuntimeError(
+                    "SECURITY FAILURE: incomplete recorded "
+                    "BTC funding outpoint"
+                )
 
             #
             # If Bitcoin funding is already recorded, continue around the
@@ -16422,23 +16922,85 @@ def _run_print_decision(report):
 
 
 
+def ignored_match_ttl_seconds():
+    """
+    Lifetime of a locally ignored market match, in seconds.
+
+    Zero (the default) means a tombstone never expires, which preserves
+    the original behaviour. A positive value bounds how long an ignored
+    match stays suppressed: an expired tombstone is both ignored and
+    removed when the tombstones are next read.
+
+    Override with BLAKE_SWAP_IGNORED_MATCH_TTL_SECONDS.
+    """
+    raw = os.environ.get(
+        "BLAKE_SWAP_IGNORED_MATCH_TTL_SECONDS",
+        "0",
+    )
+
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        raise RuntimeError(
+            "BLAKE_SWAP_IGNORED_MATCH_TTL_SECONDS must be an integer"
+        ) from None
+
+    if value < 0:
+        raise RuntimeError(
+            "BLAKE_SWAP_IGNORED_MATCH_TTL_SECONDS must not be negative"
+        )
+
+    return value
+
+
 def _ignored_market_match_ids():
     import json
+    import time
+
     ignore_dir = BASE_SWAP_DIR / "ignored-market-matches"
+
     if not ignore_dir.exists():
         return set()
+
+    ttl = ignored_match_ttl_seconds()
+    now = int(time.time())
+
     ignored = set()
+
     for path in ignore_dir.glob("*.json"):
         if len(path.stem) != 64:
             continue
+
         try:
             with open(path) as f:
                 data = json.load(f)
         except Exception:
             continue
+
         match_id = data.get("match_id")
-        if match_id == path.stem:
-            ignored.add(match_id)
+
+        if match_id != path.stem:
+            continue
+
+        if ttl > 0:
+            ignored_at = data.get("ignored_at")
+
+            if not isinstance(ignored_at, int):
+                # An undated tombstone cannot be aged; treat it as
+                # expired rather than suppressing a match forever.
+                ignored_at = 0
+
+            if now - ignored_at >= ttl:
+                # Expired: stop suppressing it and reclaim the file.
+                try:
+                    path.unlink()
+                except OSError:
+                    pass
+
+                continue
+
+        ignored.add(match_id)
+
     return ignored
 
 
@@ -16852,8 +17414,8 @@ def command_next(args):
 
                 if (
                     match_created_at <= 0
-                    or match_created_at > now + 300
-                    or now - match_created_at > 3600
+                    or match_created_at > now + FUTURE_SKEW_SECONDS
+                    or now - match_created_at > freshness_seconds
                 ):
                     continue
 
@@ -17696,13 +18258,23 @@ def command_dismiss(args):
 
     path = matches[0]
 
-    swap = load_swap(
-        path.stem,
-        role=os.environ.get(
-            "BLAKE_SWAP_ROLE",
-            "alice",
-        ),
-    )
+    swap = load_swap(path.stem)
+
+    #
+    # Dismissal archives a local record. Refuse to archive a swap this
+    # participant is not a party to, so a shared or mis-pointed state
+    # root cannot be used to retire somebody else's swap.
+    #
+    me = current_nostr_pubkey()
+
+    if me not in (
+        swap.nostr_alice_pub,
+        swap.nostr_bob_pub,
+    ):
+        raise RuntimeError(
+            "SECURITY FAILURE: refusing to dismiss a swap this "
+            "participant is not a party to"
+        )
 
     try:
         with contextlib.redirect_stdout(io.StringIO()):
@@ -17849,10 +18421,27 @@ def command_resume_all(args):
     import json as _json
     from types import SimpleNamespace
 
+    me = current_nostr_pubkey()
+
     candidates = []
     attention = []
 
     for path in sorted(BASE_SWAP_DIR.glob("*.json")):
+        #
+        # Only canonical local swap records belong here: a 12-hex stem
+        # that names the swap. Anything else in the state root is not
+        # ours to drive.
+        #
+        stem = path.stem
+
+        if len(stem) != 12:
+            continue
+
+        try:
+            int(stem, 16)
+        except ValueError:
+            continue
+
         try:
             with open(path) as f:
                 data = _json.load(f)
@@ -17862,12 +18451,31 @@ def command_resume_all(args):
             )
             continue
 
+        if not isinstance(data, dict):
+            attention.append((stem, "state file is not an object"))
+            continue
+
         swap_id = data.get("swap_id")
-        if not isinstance(swap_id, str):
+
+        if swap_id != stem:
+            attention.append(
+                (stem, "state file name does not match its swap_id")
+            )
+            continue
+
+        #
+        # Never drive a swap this participant is not a party to. The
+        # record's pinned Nostr identities are the authority; the local
+        # protocol role is derived from them elsewhere.
+        #
+        if me not in (
+            data.get("nostr_alice_pub"),
+            data.get("nostr_bob_pub"),
+        ):
             continue
 
         try:
-            swap = load_swap(swap_id, role="alice")
+            swap = load_swap(swap_id)
             report = build_reconcile_report(swap)
         except Exception as e:
             attention.append(
@@ -17950,19 +18558,6 @@ def command_resume_all(args):
 
 
 def command_resume(args):
-    requested_prefix = getattr(
-        args,
-        "swap_id",
-        None,
-    )
-
-    if requested_prefix is None:
-        requested_prefix = getattr(
-            args,
-            "swap_prefix",
-            None,
-        )
-
     import contextlib
     import io
     from types import SimpleNamespace
@@ -17972,18 +18567,31 @@ def command_resume(args):
     attention = []
     explicit = getattr(args, "swap_id", None)
 
+    #
+    # Validate the prefix before scanning. Doing it inside the loop made
+    # the guard dependent on there being at least one swap file, so with
+    # an empty state root a three-character prefix was reported as "no
+    # swap matches" instead of "prefix is too short".
+    #
+    requested_prefix = None
+
+    if explicit is not None:
+        requested_prefix = explicit.strip().lower()
+
+        if len(requested_prefix) < 4:
+            raise ValueError(
+                "swap ID prefix is too short; use at least 4 characters"
+            )
+
     for path in sorted(BASE_SWAP_DIR.glob("*.json")):
         if len(path.stem) != 12:
             continue
 
-        if explicit is not None:
-            prefix = explicit.strip().lower()
-            if len(prefix) < 4:
-                raise ValueError(
-                    "swap ID prefix is too short; use at least 4 characters"
-                )
-            if not path.stem.startswith(prefix):
-                continue
+        if (
+            requested_prefix is not None
+            and not path.stem.startswith(requested_prefix)
+        ):
+            continue
 
         try:
             swap = load_swap(
@@ -18255,290 +18863,287 @@ def command_run(args):
         "POLICY: BLAKE funding and Nostr publication are disabled"
     )
 
-    for step in range(1, max_steps + 1):
-        swap = load_swap(args.swap_id, role="alice")
-        report = build_reconcile_report(swap)
+    #
+    # Contain one step's failure so a mid-swap exception reports
+    # which step failed and stops cleanly, instead of unwinding the
+    # whole driver with a bare traceback after an unknown amount of
+    # progress.
+    #
+    current_step = 0
 
-        print()
-        print(f"RECONCILIATION {step}")
-        print("----------------")
-        _run_print_decision(report)
-
-        action = report.get("next_action")
-        decision_class = report.get("decision_class")
-        role = report.get("protocol_role")
-
-        if decision_class == "settled":
-            print()
-            print("RUN RESULT: settled; no action required")
-            return
-
-        if decision_class == "waiting":
-            print()
-            print("RUN RESULT: waiting for counterparty or chain condition")
-            return
-
-        if decision_class == "manual-attention":
-            print()
-            print("RUN RESULT: manual attention required")
-            print("PASS: runner refused to guess or mutate state")
-            return
-
-        if action in economic_actions:
-            print()
-            print("ACTION REQUIRED")
-            print("===============")
-            print(f"{action} is currently recommended by the reconciler")
-            print()
-            print("Automatic economic actions are disabled in this runner version.")
-            print("PASS: no funds were moved")
-            return
-
-
-        # Funding remains manual in this phase, but expose
-        # whether the local machine is actually capable of it.
-        if (
-            action in economic_actions
-            and report.get("readiness", {}).get("checked")
-        ):
-            readiness = report["readiness"]
+    try:
+        for step in range(1, max_steps + 1):
+            current_step = step
+            swap = load_swap(args.swap_id)
+            report = build_reconcile_report(swap)
 
             print()
-            print("EXECUTION READINESS")
-            print("-------------------")
-            print(
-                "ready:",
-                "yes" if readiness.get("ready") else "no",
-            )
+            print(f"RECONCILIATION {step}")
+            print("----------------")
+            _run_print_decision(report)
 
-            for item in readiness.get("reasons", []):
-                print(" -", item)
+            action = report.get("next_action")
+            decision_class = report.get("decision_class")
+            role = report.get("protocol_role")
 
-        if action not in safe_actions:
-            print()
-            print(
-                "RUN RESULT: refusing unrecognized or "
-                f"non-allowlisted action: {action!r}"
-            )
-            print("PASS: no automatic action was executed")
-            return
-
-        if role not in ("alice", "bob"):
-            print()
-            print(
-                "RUN RESULT: protocol role is not securely known; "
-                "refusing automatic action"
-            )
-            return
-
-        if action == "claim-btc":
-            if role != "alice":
-                raise RuntimeError(
-                    "SECURITY FAILURE: automatic claim-btc "
-                    "requires current participant to be protocol Alice"
-                )
-
-            if report.get("blake", {}).get("status") != "funded":
+            if decision_class == "settled":
                 print()
-                print("RUN RESULT: refusing automatic claim-btc")
-                print("reason: BLAKE HTLC is not confirmed and unspent")
+                print("RUN RESULT: settled; no action required")
                 return
 
-            if report.get("btc", {}).get("status") != "funded":
+            if decision_class == "waiting":
                 print()
-                print("RUN RESULT: refusing automatic claim-btc")
-                print("reason: Bitcoin HTLC is not confirmed and unspent")
+                print("RUN RESULT: waiting for counterparty or chain condition")
                 return
 
-            secret = report.get("secret", {})
-            if not (
-                secret.get("known")
-                and secret.get("source") == "locally-generated"
-                and secret.get("hash_matches") is True
-            ):
+            if decision_class == "manual-attention":
                 print()
-                print("RUN RESULT: refusing automatic claim-btc")
-                print("reason: protocol Alice secret preconditions are not proven")
+                print("RUN RESULT: manual attention required")
+                print("PASS: runner refused to guess or mutate state")
                 return
 
-            min_blocks = int(
-                os.environ.get(
-                    "BLAKE_SWAP_RUN_MIN_BTC_CLAIM_BLOCKS",
-                    "2",
-                )
-            )
-
-            if min_blocks < 1:
-                raise ValueError(
-                    "BLAKE_SWAP_RUN_MIN_BTC_CLAIM_BLOCKS must be >= 1"
-                )
-
-            remaining = int(
-                report.get("timeouts", {}).get(
-                    "btc_blocks_remaining",
-                    -1,
-                )
-            )
-
-            if remaining < min_blocks:
+            if action in economic_actions:
                 print()
-                print("RUN RESULT: refusing automatic claim-btc")
+                print("ACTION REQUIRED")
+                print("===============")
+                print(f"{action} is currently recommended by the reconciler")
+                print()
+                print("Automatic economic actions are disabled in this runner version.")
+                print("PASS: no funds were moved")
+                return
+
+            if action not in safe_actions:
+                print()
                 print(
-                    "reason: Bitcoin timeout margin is too small "
-                    f"({remaining} blocks remaining; minimum {min_blocks})"
+                    "RUN RESULT: refusing unrecognized or "
+                    f"non-allowlisted action: {action!r}"
                 )
+                print("PASS: no automatic action was executed")
                 return
 
-
-        if action == "fund-btc":
-            if role != "bob":
-                raise RuntimeError(
-                    "SECURITY FAILURE: automatic fund-btc "
-                    "requires current participant to be protocol Bob"
-                )
-
-            readiness = report.get("readiness", {})
-
-            if not readiness.get("checked"):
+            if role not in ("alice", "bob"):
                 print()
-                print("RUN RESULT: refusing automatic fund-btc")
-                print("reason: funding readiness was not evaluated")
-                return
-
-            if readiness.get("ready") is not True:
-                print()
-                print("RUN RESULT: refusing automatic fund-btc")
-                print("reason: local funding readiness did not pass")
-
-                for item in readiness.get("reasons", []):
-                    print(" -", item)
-
-                return
-
-            if report.get("blake", {}).get("status") != "funded":
-                print()
-                print("RUN RESULT: refusing automatic fund-btc")
-                print("reason: BLAKE HTLC is not confirmed and unspent")
-                return
-
-            if report.get("btc", {}).get("status") != "absent":
-                print()
-                print("RUN RESULT: refusing automatic fund-btc")
-                print("reason: Bitcoin funding is no longer absent")
-                return
-
-
-        if action == "refund-btc":
-            if role != "bob":
-                raise RuntimeError(
-                    "SECURITY FAILURE: automatic refund-btc "
-                    "requires current participant to be protocol Bob"
-                )
-
-            if report.get("checkpoint_state") != State.BTC_FUNDED.value:
-                print()
-                print("RUN RESULT: refusing automatic refund-btc")
-                print("reason: local checkpoint is not BTC_FUNDED")
-                return
-
-            if report.get("btc", {}).get("status") != "funded":
-                print()
-                print("RUN RESULT: refusing automatic refund-btc")
-                print("reason: Bitcoin HTLC is not confirmed and unspent")
-                return
-
-            if int(report.get("timeouts", {}).get("btc_blocks_remaining", 1)) > 0:
-                print()
-                print("RUN RESULT: refusing automatic refund-btc")
-                print("reason: Bitcoin refund timelock is not mature")
-                return
-
-        if action == "refund-blake":
-            if role != "alice":
-                raise RuntimeError(
-                    "SECURITY FAILURE: automatic refund-blake "
-                    "requires current participant to be protocol Alice"
-                )
-
-            if report.get("checkpoint_state") not in {
-                State.BLAKE_FUNDED.value,
-                State.BTC_REFUNDED.value,
-            }:
-                print()
-                print("RUN RESULT: refusing automatic refund-blake")
-                print("reason: local checkpoint is not refund-eligible")
-                return
-
-            if report.get("blake", {}).get("status") != "funded":
-                print()
-                print("RUN RESULT: refusing automatic refund-blake")
-                print("reason: BLAKE HTLC is not confirmed and unspent")
-                return
-
-            if (
-                report.get("checkpoint_state")
-                == State.BLAKE_FUNDED.value
-                and report.get("btc", {}).get("status") != "absent"
-            ):
-                print()
-                print("RUN RESULT: refusing automatic refund-blake")
                 print(
-                    "reason: pre-BTC refund requires "
-                    "Bitcoin funding to be independently absent"
+                    "RUN RESULT: protocol role is not securely known; "
+                    "refusing automatic action"
                 )
                 return
 
-            if int(report.get("timeouts", {}).get("blake_blocks_remaining", 1)) > 0:
-                print()
-                print("RUN RESULT: refusing automatic refund-blake")
-                print("reason: BLAKE refund timelock is not mature")
-                return
+            if action == "claim-btc":
+                if role != "alice":
+                    raise RuntimeError(
+                        "SECURITY FAILURE: automatic claim-btc "
+                        "requires current participant to be protocol Alice"
+                    )
 
-        print()
-        print("AUTOMATIC ACTION")
-        print("================")
-        print(action)
-        print()
+                if report.get("blake", {}).get("status") != "funded":
+                    print()
+                    print("RUN RESULT: refusing automatic claim-btc")
+                    print("reason: BLAKE HTLC is not confirmed and unspent")
+                    return
 
-        ns = SimpleNamespace(
-            swap_id=args.swap_id,
-            role=role,
-        )
+                if report.get("btc", {}).get("status") != "funded":
+                    print()
+                    print("RUN RESULT: refusing automatic claim-btc")
+                    print("reason: Bitcoin HTLC is not confirmed and unspent")
+                    return
 
-        if action == "sync-funding":
-            command_sync_funding(ns)
-        elif action == "sync-settlement":
-            command_sync_settlement(ns)
-        elif action == "complete":
-            command_complete(ns)
+                secret = report.get("secret", {})
+                if not (
+                    secret.get("known")
+                    and secret.get("source") == "locally-generated"
+                    and secret.get("hash_matches") is True
+                ):
+                    print()
+                    print("RUN RESULT: refusing automatic claim-btc")
+                    print("reason: protocol Alice secret preconditions are not proven")
+                    return
 
-        elif action == "claim-blake":
-            if role != "bob":
-                raise RuntimeError(
-                    "SECURITY FAILURE: automatic claim-blake "
-                    "requires current participant to be protocol Bob"
+                min_blocks = int(
+                    os.environ.get(
+                        "BLAKE_SWAP_RUN_MIN_BTC_CLAIM_BLOCKS",
+                        "2",
+                    )
                 )
 
-            command_claim_blake(ns)
+                if min_blocks < 1:
+                    raise ValueError(
+                        "BLAKE_SWAP_RUN_MIN_BTC_CLAIM_BLOCKS must be >= 1"
+                    )
 
-        elif action == "claim-btc":
-            command_claim_btc(ns)
+                remaining = int(
+                    report.get("timeouts", {}).get(
+                        "btc_blocks_remaining",
+                        -1,
+                    )
+                )
 
-        elif action == "fund-btc":
-            command_fund_btc(ns)
+                if remaining < min_blocks:
+                    print()
+                    print("RUN RESULT: refusing automatic claim-btc")
+                    print(
+                        "reason: Bitcoin timeout margin is too small "
+                        f"({remaining} blocks remaining; minimum {min_blocks})"
+                    )
+                    return
 
-        elif action == "refund-btc":
-            command_refund_btc(ns)
 
-        elif action == "refund-blake":
-            command_refund_blake(ns)
+            if action == "fund-btc":
+                if role != "bob":
+                    raise RuntimeError(
+                        "SECURITY FAILURE: automatic fund-btc "
+                        "requires current participant to be protocol Bob"
+                    )
 
-        else:
-            raise RuntimeError("Internal runner allowlist mismatch")
+                readiness = report.get("readiness", {})
 
+                if not readiness.get("checked"):
+                    print()
+                    print("RUN RESULT: refusing automatic fund-btc")
+                    print("reason: funding readiness was not evaluated")
+                    return
+
+                if readiness.get("ready") is not True:
+                    print()
+                    print("RUN RESULT: refusing automatic fund-btc")
+                    print("reason: local funding readiness did not pass")
+
+                    for item in readiness.get("reasons", []):
+                        print(" -", item)
+
+                    return
+
+                if report.get("blake", {}).get("status") != "funded":
+                    print()
+                    print("RUN RESULT: refusing automatic fund-btc")
+                    print("reason: BLAKE HTLC is not confirmed and unspent")
+                    return
+
+                if report.get("btc", {}).get("status") != "absent":
+                    print()
+                    print("RUN RESULT: refusing automatic fund-btc")
+                    print("reason: Bitcoin funding is no longer absent")
+                    return
+
+
+            if action == "refund-btc":
+                if role != "bob":
+                    raise RuntimeError(
+                        "SECURITY FAILURE: automatic refund-btc "
+                        "requires current participant to be protocol Bob"
+                    )
+
+                if report.get("checkpoint_state") != State.BTC_FUNDED.value:
+                    print()
+                    print("RUN RESULT: refusing automatic refund-btc")
+                    print("reason: local checkpoint is not BTC_FUNDED")
+                    return
+
+                if report.get("btc", {}).get("status") != "funded":
+                    print()
+                    print("RUN RESULT: refusing automatic refund-btc")
+                    print("reason: Bitcoin HTLC is not confirmed and unspent")
+                    return
+
+                if int(report.get("timeouts", {}).get("btc_blocks_remaining", 1)) > 0:
+                    print()
+                    print("RUN RESULT: refusing automatic refund-btc")
+                    print("reason: Bitcoin refund timelock is not mature")
+                    return
+
+            if action == "refund-blake":
+                if role != "alice":
+                    raise RuntimeError(
+                        "SECURITY FAILURE: automatic refund-blake "
+                        "requires current participant to be protocol Alice"
+                    )
+
+                if report.get("checkpoint_state") not in {
+                    State.BLAKE_FUNDED.value,
+                    State.BTC_REFUNDED.value,
+                }:
+                    print()
+                    print("RUN RESULT: refusing automatic refund-blake")
+                    print("reason: local checkpoint is not refund-eligible")
+                    return
+
+                if report.get("blake", {}).get("status") != "funded":
+                    print()
+                    print("RUN RESULT: refusing automatic refund-blake")
+                    print("reason: BLAKE HTLC is not confirmed and unspent")
+                    return
+
+                if (
+                    report.get("checkpoint_state")
+                    == State.BLAKE_FUNDED.value
+                    and report.get("btc", {}).get("status") != "absent"
+                ):
+                    print()
+                    print("RUN RESULT: refusing automatic refund-blake")
+                    print(
+                        "reason: pre-BTC refund requires "
+                        "Bitcoin funding to be independently absent"
+                    )
+                    return
+
+                if int(report.get("timeouts", {}).get("blake_blocks_remaining", 1)) > 0:
+                    print()
+                    print("RUN RESULT: refusing automatic refund-blake")
+                    print("reason: BLAKE refund timelock is not mature")
+                    return
+
+            print()
+            print("AUTOMATIC ACTION")
+            print("================")
+            print(action)
+            print()
+
+            ns = SimpleNamespace(
+                swap_id=args.swap_id,
+                role=role,
+            )
+
+            if action == "sync-funding":
+                command_sync_funding(ns)
+            elif action == "sync-settlement":
+                command_sync_settlement(ns)
+            elif action == "complete":
+                command_complete(ns)
+
+            elif action == "claim-blake":
+                if role != "bob":
+                    raise RuntimeError(
+                        "SECURITY FAILURE: automatic claim-blake "
+                        "requires current participant to be protocol Bob"
+                    )
+
+                command_claim_blake(ns)
+
+            elif action == "claim-btc":
+                command_claim_btc(ns)
+
+            elif action == "fund-btc":
+                command_fund_btc(ns)
+
+            elif action == "refund-btc":
+                command_refund_btc(ns)
+
+            elif action == "refund-blake":
+                command_refund_blake(ns)
+
+            else:
+                raise RuntimeError("Internal runner allowlist mismatch")
+
+            print()
+            print("PASS: automatic action completed; reconciling again")
+
+    except Exception as e:
         print()
-        print("PASS: automatic action completed; reconciling again")
-
+        print("RUN RESULT: step failed")
+        print(f"step:  {current_step} of {max_steps}")
+        print(f"error: {type(e).__name__}: {e}")
+        print("PASS: no further automatic action was attempted")
+        raise SystemExit(1) from e
     print()
     print("RUN RESULT")
     print("==========")
@@ -18680,6 +19285,16 @@ def main():
     )
 
     p.add_argument("swap_id")
+
+    p.add_argument(
+        "--clear-stale-intent",
+        action="store_true",
+        help=(
+            "Clear a funding intent that no confirmed payment "
+            "explains. Use only after verifying that no funding "
+            "transaction was broadcast."
+        ),
+    )
 
     p.set_defaults(
         func=command_refresh_timeouts
@@ -19022,6 +19637,27 @@ def main():
         help="Bob imports a published offer"
     )
     p.add_argument("swap_id")
+
+    p.add_argument(
+        "--expected-alice-pub",
+        default=None,
+        help=(
+            "Require the offer to be signed by this exact Nostr "
+            "identity. Required over Nostr unless "
+            "--allow-unpinned-author is given."
+        ),
+    )
+
+    p.add_argument(
+        "--allow-unpinned-author",
+        action="store_true",
+        help=(
+            "Over Nostr, accept whichever author the relay returns. "
+            "Only safe when the offer's author is authenticated by "
+            "another means, such as a maker-signed market match."
+        ),
+    )
+
     p.set_defaults(
         func=command_accept_offer
     )

@@ -365,6 +365,14 @@ def validate_timeout_plan(
             "recovery window is too short"
         )
 
+    #
+    # Defence in depth. This is currently unreachable, because
+    # bob_recovery_budget_seconds() already returns
+    # max(calculated, policy.minimum_recovery_seconds), so passing the
+    # check above implies passing this one. It is kept deliberately: it
+    # restates the absolute floor here, where the plan is accepted, so
+    # that a future change to the budget helper cannot quietly drop it.
+    #
     if (
         actual_recovery
         < policy.minimum_recovery_seconds

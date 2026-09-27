@@ -23,6 +23,8 @@ Exit status: 0 pass, 1 fail.
 from __future__ import annotations
 
 import ast
+import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -57,14 +59,19 @@ def dest_from_flag(flag):
 
 def collect_parser_attributes(main_node):
     """
-    Return {command_function_name: {allowed attribute names}}.
+    Return ``(allowed, subcommands)``.
+
+    ``allowed`` maps command function name -> allowed attribute names.
+    ``subcommands`` maps command function name -> the subcommand string
+    the parser advertises.
 
     Walks main() in source order, tracking the parser currently being
     configured and binding its accumulated arguments when
     ``p.set_defaults(func=...)`` is reached.
     """
     allowed = {}
-    state = {"current": None}
+    subcommands = {}
+    state = {"current": None, "current_name": None}
 
     def walk(statements):
         for stmt in statements:
@@ -83,6 +90,13 @@ def collect_parser_attributes(main_node):
                 ):
                     # A new subparser starts a fresh argument set.
                     state["current"] = set()
+                    state["current_name"] = (
+                        value.args[0].value
+                        if value.args
+                        and isinstance(value.args[0], ast.Constant)
+                        and isinstance(value.args[0].value, str)
+                        else None
+                    )
 
                 continue
 
@@ -118,9 +132,12 @@ def collect_parser_attributes(main_node):
                         state["current"] or set()
                     )
 
+                    if state["current_name"] is not None:
+                        subcommands[target] = state["current_name"]
+
     walk(main_node.body)
 
-    return allowed
+    return allowed, subcommands
 
 
 def direct_args_attributes(function_node):
@@ -141,6 +158,81 @@ def direct_args_attributes(function_node):
             used.add(node.attr)
 
     return used
+
+
+def live_surface(subcommands):
+    """
+    Compare the statically extracted surface with the real parser.
+
+    The static walk above and the parser itself can drift: a subcommand
+    registered through a helper, or an ``add_parser`` reached in a way
+    the walk does not model, would be invisible to the analysis. Asking
+    the engine to build its parser catches that, and it is the only
+    check in the test tree that exercises ``main()``.
+    """
+
+    node_config.require_coincurve()
+
+    completed = subprocess.run(
+        [sys.executable, str(SWAP_V2), "--help"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=120,
+        cwd=str(ROOT),
+        env={**node_config.node_env(), "PYTHONPATH": str(ROOT / "src")},
+    )
+
+    if completed.returncode != 0:
+        fail(
+            "the engine builds its argument parser",
+            "`swap_v2.py --help` exited "
+            f"{completed.returncode}:\n{completed.stderr}",
+        )
+        return
+
+    ok("the engine builds its argument parser")
+
+    match = re.search(r"^\s*\{([^}]*)\}\s*$", completed.stdout, re.MULTILINE)
+
+    if match is None:
+        fail(
+            "the help output advertises its subcommands",
+            "could not find a subcommand list in `swap_v2.py --help`",
+        )
+        return
+
+    advertised = {name.strip() for name in match.group(1).split(",") if name.strip()}
+    declared = set(subcommands.values())
+
+    missing = sorted(declared - advertised)
+    extra = sorted(advertised - declared)
+
+    problems = []
+
+    if missing:
+        problems.append(
+            "the static analysis found subcommands the parser does not "
+            f"advertise: {missing}"
+        )
+
+    if extra:
+        problems.append(
+            "the parser advertises subcommands the static analysis missed: "
+            f"{extra}"
+        )
+
+    check(
+        f"all {len(advertised)} advertised subcommands are accounted for",
+        problems,
+    )
+
+
+def check(name, problems):
+    if problems:
+        fail(name, problems[0] if len(problems) == 1 else "\n".join(problems))
+    else:
+        ok(name)
 
 
 def main():
@@ -169,7 +261,7 @@ def main():
         fail("main() is present", "could not find def main() in the engine")
         return 1
 
-    allowed = collect_parser_attributes(main_node)
+    allowed, subcommands = collect_parser_attributes(main_node)
 
     if not allowed:
         fail(
@@ -222,6 +314,8 @@ def main():
         ok(
             "every args attribute read by a command is defined by its parser"
         )
+
+    live_surface(subcommands)
 
     print()
     print("=" * 72)

@@ -141,8 +141,7 @@ def main():
         bob["blake_claim_blockhash"],
     ]
 
-    env = os.environ.copy()
-    env["PYTHONPATH"] = str(SRC)
+    env = h.tool_env()
 
     result = subprocess.run(
         cmd,
@@ -191,12 +190,15 @@ def main():
         "Alice accepted independent BLAKE claim announcement after chain verification"
     )
 
-    # Finish both sides.
+    # Finish both sides. Note both the engine's --role argument and the
+    # harness `role` keyword: the latter is what selects the
+    # participant's state root for the subprocess.
     h.swap_cmd(
         "complete",
         swap_id,
         "--role",
         "alice",
+        role="alice",
     )
 
     h.swap_cmd(
@@ -204,6 +206,7 @@ def main():
         swap_id,
         "--role",
         "bob",
+        role="bob",
     )
 
     require(

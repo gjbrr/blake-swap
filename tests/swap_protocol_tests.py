@@ -313,6 +313,22 @@ def swap_cmd(
     )
 
 
+def chain_rpc_arg(value):
+    """
+    Render one CLI argument the way the engine does.
+
+    bitcoin-cli requires JSON-style lowercase booleans; str(True) sends
+    "True", which the node rejects with "Error parsing JSON".
+    """
+    if value is True:
+        return "true"
+
+    if value is False:
+        return "false"
+
+    return str(value)
+
+
 def btc_cli(*args, wallet=None):
     #
     # Mirrors the engine's btc_cli: no hardcoded -regtest, so remote or
@@ -325,7 +341,7 @@ def btc_cli(*args, wallet=None):
         cmd.append(f"-datadir={BTC_DATADIR}")
     if wallet:
         cmd.append(f"-rpcwallet={wallet}")
-    cmd.extend(str(x) for x in args)
+    cmd.extend(chain_rpc_arg(x) for x in args)
     p = run(cmd)
     out = p.stdout.strip()
     try:
@@ -344,13 +360,44 @@ def blake_cli(*args, wallet=None):
         cmd.append(f"-datadir={BLAKE_DATADIR}")
     if wallet:
         cmd.append(f"-rpcwallet={wallet}")
-    cmd.extend(str(x) for x in args)
+    cmd.extend(chain_rpc_arg(x) for x in args)
     p = run(cmd)
     out = p.stdout.strip()
     try:
         return json.loads(out)
     except json.JSONDecodeError:
         return out
+
+
+def tool_env():
+    """
+    Environment for the independent-implementation tools in tools/.
+
+    Those tools are separate programs that address the FILE transport
+    themselves, so they must be told the same message directory the
+    engine under test is using. The runner deliberately exports no
+    message directory, so simply inheriting the environment is not
+    enough: the tool would write into the default state tree and the
+    engine would never see the message.
+    """
+    env = os.environ.copy()
+    env["BLAKE_SWAP_TRANSPORT"] = "file"
+    env["BLAKE_SWAP_MESSAGE_DIR"] = str(MESSAGE_DIR)
+    env["PYTHONPATH"] = os.pathsep.join([
+        str(PROJECT_DIR / "src"),
+        str(PROJECT_DIR / "tests"),
+    ])
+
+    #
+    # The tools address the chain themselves when they verify a
+    # settlement, so they need the same nodes the harness resolved.
+    # Without this they would fall back to the engine's built-in
+    # author-host defaults and fail on any other machine.
+    #
+    for variable, value in node_env().items():
+        env.setdefault(variable, value)
+
+    return env
 
 
 def ensure_wallet(cli, label: str, wallet: str) -> None:
@@ -383,10 +430,91 @@ def ensure_wallet(cli, label: str, wallet: str) -> None:
     cli("createwallet", wallet)
 
 
+def trusted_balance(cli, wallet: str) -> float:
+    """
+    Trusted (mature, spendable) balance of one wallet, in coins.
+
+    The engine refuses to fund an HTLC from untrusted balance, and
+    coinbase outputs need 100 confirmations before they mature, so the
+    bootstrap below has to mine a maturity run rather than a few blocks.
+    """
+    try:
+        info = cli("getbalances", wallet=wallet)
+
+        if isinstance(info, dict):
+            return float(info.get("mine", {}).get("trusted", 0.0))
+    except Exception:
+        pass
+
+    try:
+        info = cli("getwalletinfo", wallet=wallet)
+
+        if isinstance(info, dict):
+            return float(info.get("balance", 0.0))
+    except Exception:
+        pass
+
+    return 0.0
+
+
+def ensure_wallet_funds(cli, label: str, minimum: float = 10.0) -> None:
+    """
+    Give the alice and bob wallets mature, spendable coins on one chain.
+
+    The suites use the same node for both participants and rely on
+    separate funded wallets, so both must be able to fund an HTLC.
+    Alice is funded by mining a maturity run to her own address
+    (regtest coinbase matures after 100 blocks); Bob receives a
+    transfer, which is trusted after one confirmation.
+
+    Once both wallets are funded this is a no-op, so repeated runs
+    against a persistent rig stay cheap.
+    """
+    alice_ok = trusted_balance(cli, ALICE_WALLET) >= minimum
+    bob_ok = trusted_balance(cli, BOB_WALLET) >= minimum
+
+    if alice_ok and bob_ok:
+        return
+
+    if not alice_ok:
+        addr = cli("getnewaddress", "", "bech32", wallet=ALICE_WALLET)
+        cli("generatetoaddress", 101, addr)
+
+    if not bob_ok:
+        bob_addr = cli("getnewaddress", "", "bech32", wallet=BOB_WALLET)
+
+        try:
+            cli(
+                "sendtoaddress",
+                bob_addr,
+                f"{minimum:.8f}",
+                wallet=ALICE_WALLET,
+            )
+        except Exception as e:
+            raise TestFailure(
+                f"could not fund the {label} bob wallet from alice: {e}"
+            ) from e
+
+        # One confirmation makes the received amount trusted.
+        addr = cli("getnewaddress", "", "bech32", wallet=ALICE_WALLET)
+        cli("generatetoaddress", 1, addr)
+
+    print(
+        f"  {label}: alice="
+        f"{trusted_balance(cli, ALICE_WALLET):.8f} "
+        f"bob={trusted_balance(cli, BOB_WALLET):.8f}"
+    )
+
+
 def ensure_test_wallets() -> None:
     for wallet in (ALICE_WALLET, BOB_WALLET):
         ensure_wallet(btc_cli, "Bitcoin", wallet)
         ensure_wallet(blake_cli, "BLAKE", wallet)
+
+    # Both wallets must hold mature coins on both chains, otherwise the
+    # engine refuses to fund an HTLC.
+    ensure_wallet_funds(btc_cli, "Bitcoin")
+    ensure_wallet_funds(blake_cli, "BLAKE")
 
 
 def mine_btc(blocks: int) -> None:
@@ -930,7 +1058,6 @@ def test_happy() -> None:
     print("happy swap:", swap_id)
 
 
-
 def test_reorg_btc_claim() -> None:
     banner("REORG SAFETY: BTC CLAIM ROLLBACK")
 
@@ -1044,123 +1171,6 @@ def test_reorg_btc_claim() -> None:
         )
 
     print("reorg swap:", swap_id)
-
-
-
-def test_reorg_btc_claim() -> None:
-    banner("REORG SAFETY: BTC CLAIM ROLLBACK")
-
-    swap_id = make_fresh_swap()
-    print("swap:", swap_id)
-
-    handshake(swap_id)
-    fund_blake_and_sync(swap_id)
-    fund_btc_and_sync(swap_id)
-
-    swap_cmd(
-        "claim-btc",
-        swap_id,
-        role="alice",
-    )
-
-    alice = load_state(
-        swap_id,
-        "alice",
-    )
-
-    claim_blockhash = alice.get(
-        "btc_claim_blockhash"
-    )
-
-    require(
-        bool(claim_blockhash),
-        "Alice has no BTC claim blockhash",
-    )
-
-    swap_cmd(
-        "publish-btc-claimed",
-        swap_id,
-        role="alice",
-    )
-
-    swap_cmd(
-        "receive-btc-claimed",
-        swap_id,
-        role="bob",
-    )
-
-    swap_cmd(
-        "extract-secret",
-        swap_id,
-        role="bob",
-    )
-
-    bob = load_state(
-        swap_id,
-        "bob",
-    )
-
-    require(
-        bob["state"] == "BTC_CLAIMED",
-        "Bob did not reach BTC_CLAIMED",
-    )
-
-    require(
-        bool(bob.get("revealed_secret_hex")),
-        "Bob did not recover S",
-    )
-
-    btc_cli(
-        "invalidateblock",
-        claim_blockhash,
-    )
-
-    try:
-        proc = swap_cmd(
-            "claim-blake",
-            swap_id,
-            role="bob",
-            expect_ok=False,
-        )
-
-        output = (
-            (proc.stdout or "")
-            + "\n"
-            + (proc.stderr or "")
-        )
-
-        require(
-            proc.returncode != 0,
-            "Bob claimed BLAKE after BTC claim reorg",
-        )
-
-        require(
-            (
-                "Bitcoin claim is no longer on the active chain"
-                in output
-                or
-                "Bitcoin claim is not confirmed"
-                in output
-            ),
-            (
-                "claim-blake failed for unexpected reason:\n"
-                + output[-1600:]
-            ),
-        )
-
-        ok(
-            "Bob refuses BLAKE claim after "
-            "BTC claim confirmation rollback"
-        )
-
-    finally:
-        btc_cli(
-            "reconsiderblock",
-            claim_blockhash,
-        )
-
-    print("reorg swap:", swap_id)
-
 
 
 def test_reorg_btc_refund() -> None:
@@ -1374,7 +1384,6 @@ def test_refund() -> None:
     ok("refund path revealed no secret")
 
     print("refund swap:", swap_id)
-
 
 
 def message_file(swap_id: str, message_type: str) -> Path:
@@ -1913,6 +1922,13 @@ def test_race() -> None:
             ):
                 env.pop(key, None)
 
+            #
+            # Same node resolution as run(): the engine child must not
+            # fall back to its built-in author-host defaults.
+            #
+            for variable, value in node_env().items():
+                env.setdefault(variable, value)
+
             env["BLAKE_SWAP_TRANSPORT"] = "file"
             env["BLAKE_SWAP_NOSTR_RELAYS"] = "ws://127.0.0.1:1"
 
@@ -2141,7 +2157,6 @@ def test_race() -> None:
         "race swaps:",
         " ".join(race_swaps),
     )
-
 
 
 def test_market_take_retry_idempotence():
@@ -2426,7 +2441,6 @@ def test_market_take_retry_idempotence():
             )
 
 
-
 def preflight() -> None:
     """
     Verify that this suite can run.
@@ -2494,7 +2508,24 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "suite",
-        choices=["happy", "refund", "mallory", "recovery", "race", "market-retry", "market-roles", "reverse-market", "role-guard", "pending-btc-claim", "pending-blake-claim", "pending-btc-refund", "pending-blake-refund", "all"],
+        choices=[
+            "happy",
+            "refund",
+            "mallory",
+            "recovery",
+            "race",
+            "market-retry",
+            "market-roles",
+            "reverse-market",
+            "role-guard",
+            "pending-btc-claim",
+            "pending-blake-claim",
+            "pending-btc-refund",
+            "pending-blake-refund",
+            "reorg-btc-claim",
+            "reorg-btc-refund",
+            "all",
+        ],
         nargs="?",
         default="all",
     )
@@ -2646,7 +2677,7 @@ def main() -> int:
                 if args.suite != "all":
                     raise
 
-        if args.suite == "all":
+        if args.suite in ("reorg-btc-claim", "all"):
             try:
                 test_reorg_btc_claim()
             except Exception as e:
@@ -2654,8 +2685,10 @@ def main() -> int:
                     "BTC CLAIM REORG SAFETY",
                     str(e),
                 )
+                if args.suite != "all":
+                    raise
 
-        if args.suite == "all":
+        if args.suite in ("reorg-btc-refund", "all"):
             try:
                 test_reorg_btc_refund()
             except Exception as e:
@@ -2663,6 +2696,8 @@ def main() -> int:
                     "BTC REFUND REORG SAFETY",
                     str(e),
                 )
+                if args.suite != "all":
+                    raise
 
         if args.suite in ("refund", "all"):
             try:

@@ -132,12 +132,7 @@ def main():
         ),
     ]
 
-    env = os.environ.copy()
-    env["PYTHONPATH"] = (
-        str(SRC)
-        + os.pathsep
-        + str(TESTS)
-    )
+    env = h.tool_env()
 
     result = subprocess.run(
         cmd,

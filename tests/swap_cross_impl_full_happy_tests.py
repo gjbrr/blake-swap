@@ -84,7 +84,12 @@ def wire_write(
         ),
     ]
 
-    env = os.environ.copy()
+    #
+    # The writer addresses the FILE transport itself, so it must be
+    # told the same message directory the harness uses, and the same
+    # chain nodes for any value it has to verify.
+    #
+    env = h.tool_env()
     env["PYTHONPATH"] = str(SRC)
 
     p = subprocess.run(

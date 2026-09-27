@@ -156,7 +156,7 @@ scripts/
   stability-check          static safety-invariant checks
   wire_inventory.py        regenerate the wire message inventory
 
-tests/                     35 suites: unit tests and regtest integration
+tests/                     45 suites: unit tests and regtest integration
 tools/minimal_*.py         independent wire-message producers
 checkpoints/v1.5/          frozen earlier snapshot with SHA256SUMS
 ```
@@ -171,20 +171,32 @@ Node-free unit suites run anywhere:
 ./scripts/test.sh --unit-only
 ```
 
-The full suite covers all 35 test files, including the regtest
-integration suites and the independent-implementation wire suites:
+The full suite covers all 45 test files, including the regtest
+integration suites and the independent-implementation wire suites. The
+regtest suites need two chain nodes; `scripts/test-nodes` starts a
+disposable Bitcoin Core + Bitcoin Knots rig for them:
 
 ```bash
+./scripts/test-nodes start       # start both regtest nodes and fund them
 ./scripts/test.sh                # everything runnable on this host
 ./scripts/test.sh --list         # list suites and prerequisites
 ./scripts/test.sh --with-nostr   # also run the public-relay suites
+./scripts/test-nodes stop        # stop them again
 ```
 
+A running rig is discovered automatically, so nothing needs exporting.
+`scripts/coverage.sh` runs the same suites under coverage and reports
+line and branch coverage for `src/`; `--fail-under 80` enforces the
+project's coverage gate, which the current suite set meets.
+
+`scripts/test-nodes` and `scripts/coverage.sh` document their own
+options with `--help`.
+
 See `tests/README.md` for the suite inventory, prerequisites, and the
-environment variables that point the harness at your nodes. The
-integration harness fails closed with a clear diagnostic when its node
-prerequisites are missing, and `test.sh` reports such suites as
-`SKIP` rather than silently omitting them.
+environment variables that override node discovery. The integration
+harness fails closed with a clear diagnostic when its node prerequisites
+are missing, and `test.sh` reports such suites as `SKIP` rather than
+silently omitting them.
 
 ---
 

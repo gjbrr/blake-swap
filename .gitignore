@@ -35,3 +35,9 @@ install_blake_web_ui_v1.sh
 install_blake_web_ui_v1_1.sh
 blake_web_ui.py
 blake-ui
+
+# Coverage artifacts
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml

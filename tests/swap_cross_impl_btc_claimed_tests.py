@@ -170,8 +170,7 @@ def main():
         alice["btc_claim_blockhash"],
     ]
 
-    env = os.environ.copy()
-    env["PYTHONPATH"] = str(SRC)
+    env = h.tool_env()
 
     result = subprocess.run(
         cmd,

@@ -148,8 +148,7 @@ def main():
         str(alice["blake_funding_vout"]),
     ]
 
-    env = os.environ.copy()
-    env["PYTHONPATH"] = str(SRC)
+    env = h.tool_env()
 
     result = subprocess.run(
         cmd,

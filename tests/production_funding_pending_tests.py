@@ -29,12 +29,16 @@ def swap_cmd_with_env(
     env = {
         "BLAKE_SWAP_TRANSPORT": "file",
         "BLAKE_SWAP_MESSAGE_DIR": str(h.MESSAGE_DIR),
-        "BLAKE_SWAP_BTC_CLI": str(h.BTC_CLI),
-        "BLAKE_SWAP_BTC_DATADIR": str(h.BTC_DATADIR),
-        "BLAKE_SWAP_BLAKE_CLI": str(h.BLAKE_CLI),
-        "BLAKE_SWAP_BLAKE_DATADIR": str(h.BLAKE_DATADIR),
         "BLAKE_SWAP_ROLE": role,
     }
+
+    #
+    # Point the engine at the same resolved nodes the harness uses.
+    # Only resolved values are included, so an unresolved node path can
+    # never be passed on as the literal string "None" and shadow the
+    # engine's own defaults.
+    #
+    env.update(h.node_env())
 
     if role == "alice":
         env["BLAKE_SWAP_STATE_DIR"] = str(h.ALICE_BASE)
@@ -396,6 +400,9 @@ def test_pending_btc_funding():
 
 
 def main():
+    h.preflight()
+    h.ok("preflight")
+
     h.ensure_test_participant_keys()
 
     test_pending_blake_funding()

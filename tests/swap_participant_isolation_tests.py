@@ -9,6 +9,8 @@ import sys
 import tempfile
 from pathlib import Path
 
+import node_config
+
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
@@ -46,6 +48,12 @@ def run_swap(
         "PYTHONPATH": str(SRC),
     })
 
+    #
+    # Point the engine at the resolved chain nodes rather than its
+    # built-in defaults, which only exist on the author's host.
+    #
+    env.update(node_config.node_env())
+
     p = subprocess.run(
         [
             sys.executable,
@@ -66,7 +74,28 @@ def run_swap(
     return p
 
 
+def install_test_key(host_root, role, secret_hex):
+    """
+    Install a deterministic, non-production participant key.
+
+    These are throwaway regtest identities. The engine resolves an
+    unset BLAKE_SWAP_PARTICIPANT_KEY_FILE through
+    <BLAKE_SWAP_STATE_DIR>/nostr-keys/<role>.key, which is exactly
+    where this writes, so the suite is self-contained.
+    """
+    key_dir = host_root / "nostr-keys"
+    key_dir.mkdir(parents=True, exist_ok=True)
+
+    key_file = key_dir / f"{role}.key"
+    key_file.write_text(secret_hex + "\n")
+    key_file.chmod(0o600)
+
+    return key_file
+
+
 def main():
+    node_config.require_node_config()
+
     base = Path(
         tempfile.mkdtemp(
             prefix="blake-two-host-"
@@ -78,6 +107,9 @@ def main():
 
     alice_root.mkdir()
     bob_root.mkdir()
+
+    install_test_key(alice_root, "alice", "11" * 32)
+    install_test_key(bob_root, "bob", "22" * 32)
 
     try:
         require(

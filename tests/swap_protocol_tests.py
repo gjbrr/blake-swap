@@ -29,16 +29,20 @@ import tempfile
 import time
 from pathlib import Path
 
-HOME = Path.home()
+#
+# This module is also imported as a library by other suites. Make sure
+# its sibling helper module is importable regardless of the caller's
+# working directory or how the suite was invoked.
+#
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-PROJECT_DIR = Path(__file__).resolve().parent.parent
+import node_config  # noqa: E402
 
-SWAP_V2 = Path(
-    os.environ.get(
-        "SWAP_V2",
-        PROJECT_DIR / "src" / "swap_v2.py",
-    )
-)
+HOME = node_config.HOME
+
+PROJECT_DIR = node_config.PROJECT_DIR
+
+SWAP_V2 = node_config.SWAP_V2
 
 TEST_ROOT = Path(
     tempfile.mkdtemp(
@@ -59,11 +63,34 @@ BOB_DIR = BOB_BASE
 MESSAGE_DIR = TEST_ROOT / "messages"
 
 
-BTC_CLI = Path("/home/gary/bitcoin-core/build/bin/bitcoin-cli")
-BTC_DATADIR = Path("/home/gary/bitcoin-swap-regtest")
+#
+# Chain node configuration.
+#
+# Resolved by tests/node_config.py: environment first, then conventional
+# locations. The harness re-exports these names so dependent suites can
+# keep using h.BTC_CLI and friends. See tests/README.md.
+#
+# The BLAKE CLI is deliberately NOT resolved through PATH, because a
+# generic `bitcoin-cli` on PATH is almost certainly Bitcoin Core.
+#
+# Every resolved value is injected into each engine subprocess (see
+# `run`), so the harness and the engine always talk to the same nodes.
+#
+BTC_RPC_ARGS = node_config.BTC_RPC_ARGS
+BLAKE_RPC_ARGS = node_config.BLAKE_RPC_ARGS
 
-BLAKE_CLI = Path("/home/gary/bitcoin-blake-rc2/build-rc2/bin/bitcoin-cli")
-BLAKE_DATADIR = Path("/home/gary/blake-swap-regtest")
+BTC_CLI = node_config.BTC_CLI
+BLAKE_CLI = node_config.BLAKE_CLI
+BTC_DATADIR = node_config.BTC_DATADIR
+BLAKE_DATADIR = node_config.BLAKE_DATADIR
+
+SKIP_EXIT_CODE = node_config.SKIP_EXIT_CODE
+
+# Re-exported helpers.
+skip = node_config.skip
+node_env = node_config.node_env
+node_config_summary = node_config.node_config_summary
+node_config_problems = node_config.node_config_problems
 
 ALICE_WALLET = "alice"
 BOB_WALLET = "bob"
@@ -137,6 +164,17 @@ def run(cmd, *, env=None, expect_ok=True, echo=False) -> subprocess.CompletedPro
         "BLAKE_SWAP_NOSTR_KEY_DIR",
     ):
         merged.pop(key, None)
+
+    #
+    # Point every subprocess — engine or chain CLI — at exactly the same
+    # nodes this harness resolved for itself. Without this, the harness
+    # and the engine could silently use different nodes whenever the
+    # host layout differs from the engine's built-in defaults.
+    #
+    # setdefault, so an explicit `env` still wins.
+    #
+    for variable, value in node_env().items():
+        merged.setdefault(variable, value)
 
     merged["BLAKE_SWAP_TRANSPORT"] = "file"
 
@@ -276,10 +314,15 @@ def swap_cmd(
 
 
 def btc_cli(*args, wallet=None):
-    cmd = [
-        BTC_CLI,
-        f"-datadir={BTC_DATADIR}",
-    ]
+    #
+    # Mirrors the engine's btc_cli: no hardcoded -regtest, so remote or
+    # alternate-chain targets are reachable by putting the required
+    # arguments in BLAKE_SWAP_BTC_RPC_ARGS.
+    #
+    cmd = [str(BTC_CLI)]
+    cmd.extend(BTC_RPC_ARGS)
+    if BTC_DATADIR is not None:
+        cmd.append(f"-datadir={BTC_DATADIR}")
     if wallet:
         cmd.append(f"-rpcwallet={wallet}")
     cmd.extend(str(x) for x in args)
@@ -292,11 +335,13 @@ def btc_cli(*args, wallet=None):
 
 
 def blake_cli(*args, wallet=None):
-    cmd = [
-        BLAKE_CLI,
-        "-regtest",
-        f"-datadir={BLAKE_DATADIR}",
-    ]
+    #
+    # Mirrors the engine's blake_cli, which always targets regtest.
+    #
+    cmd = [str(BLAKE_CLI), "-regtest"]
+    cmd.extend(BLAKE_RPC_ARGS)
+    if BLAKE_DATADIR is not None:
+        cmd.append(f"-datadir={BLAKE_DATADIR}")
     if wallet:
         cmd.append(f"-rpcwallet={wallet}")
     cmd.extend(str(x) for x in args)
@@ -306,6 +351,42 @@ def blake_cli(*args, wallet=None):
         return json.loads(out)
     except json.JSONDecodeError:
         return out
+
+
+def ensure_wallet(cli, label: str, wallet: str) -> None:
+    """
+    Ensure `wallet` exists and is loaded on one chain.
+
+    The suites need two distinct signing wallets per chain (alice and
+    bob). Creating them here means a fresh regtest node is enough to run
+    the integration suites; no manual wallet setup is required.
+    """
+    loaded = cli("listwallets")
+
+    if isinstance(loaded, list) and wallet in loaded:
+        return
+
+    listing = cli("listwalletdir")
+    names = []
+
+    if isinstance(listing, dict):
+        names = [
+            entry.get("name")
+            for entry in listing.get("wallets", [])
+            if isinstance(entry, dict)
+        ]
+
+    if wallet in names:
+        cli("loadwallet", wallet)
+        return
+
+    cli("createwallet", wallet)
+
+
+def ensure_test_wallets() -> None:
+    for wallet in (ALICE_WALLET, BOB_WALLET):
+        ensure_wallet(btc_cli, "Bitcoin", wallet)
+        ensure_wallet(blake_cli, "BLAKE", wallet)
 
 
 def mine_btc(blocks: int) -> None:
@@ -2347,20 +2428,66 @@ def test_market_take_retry_idempotence():
 
 
 def preflight() -> None:
-    for path, label in [
-        (SWAP_V2, "swap_v2.py"),
-        (BTC_CLI, "Bitcoin CLI"),
-        (BLAKE_CLI, "BLAKE CLI"),
-    ]:
-        require(path.exists(), f"{label} not found: {path}")
+    """
+    Verify that this suite can run.
+
+    Missing node configuration or an unreachable node is a *prerequisite*
+    problem, not a test failure, so it skips with exit code 77 and an
+    actionable diagnostic. A broken repository or an engine that does
+    not compile is a genuine failure.
+    """
+
+    problems = node_config_problems()
+
+    if problems:
+        skip(
+            "chain node prerequisites are not satisfied",
+            details=node_config_summary() + [""] + problems,
+            hint=(
+                "See tests/README.md for how to point the suites at "
+                "your nodes."
+            ),
+        )
+
+    require(
+        SWAP_V2.exists(),
+        f"swap_v2.py not found: {SWAP_V2}",
+    )
 
     # Syntax check the target implementation before touching regtest.
     p = run([sys.executable, "-m", "py_compile", SWAP_V2])
     require(p.returncode == 0, "swap_v2.py does not compile")
 
-    # RPC reachability.
-    int(btc_cli("getblockcount"))
-    int(blake_cli("getblockcount"))
+    # RPC reachability: configured but not running is a prerequisite
+    # problem, not a test failure.
+    try:
+        int(btc_cli("getblockcount"))
+    except Exception as e:
+        skip(
+            "Bitcoin RPC is not reachable",
+            details=node_config_summary() + ["", str(e)],
+        )
+
+    try:
+        int(blake_cli("getblockcount"))
+    except Exception as e:
+        skip(
+            "BLAKE RPC is not reachable",
+            details=node_config_summary() + ["", str(e)],
+        )
+
+    #
+    # The suites need two separate signing wallets on each chain. Create
+    # them if they are missing so that a fresh regtest node is enough.
+    #
+    try:
+        ensure_test_wallets()
+    except Exception as e:
+        require(
+            False,
+            "could not create or load the alice/bob test wallets: "
+            f"{e}",
+        )
 
 
 def main() -> int:

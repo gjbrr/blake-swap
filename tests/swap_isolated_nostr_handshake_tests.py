@@ -11,20 +11,58 @@ import sys
 import tempfile
 from pathlib import Path
 
+import node_config
+
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
 
 SWAP_V2 = SRC / "swap_v2.py"
 
-OLD_KEYS = (
-    Path.home()
-    / ".blake-swaps-v2"
-    / "nostr-keys"
-)
+#
+# Source directory for the two participant Nostr identities this suite
+# uses. Override with BLAKE_SWAP_TEST_KEY_DIR (or BLAKE_SWAP_NOSTR_KEY_DIR).
+#
+# These keys sign real events published to real relays, so this suite
+# deliberately does NOT fabricate fallback keys: that would publish
+# events under a publicly-known private key.
+#
+OLD_KEYS = Path(
+    os.environ.get(
+        "BLAKE_SWAP_TEST_KEY_DIR",
+        os.environ.get(
+            "BLAKE_SWAP_NOSTR_KEY_DIR",
+            Path.home() / ".blake-swaps-v2" / "nostr-keys",
+        ),
+    )
+).expanduser()
+
+SKIP_EXIT_CODE = 77
 
 PASS = 0
 FAIL = 0
+
+
+def skip(reason):
+    """
+    Abort with the conventional "prerequisites absent" exit code.
+
+    SystemExit is not an Exception, so this passes through the
+    `except Exception` guards in main() unchanged.
+    """
+    print()
+    print("=" * 72)
+    print(f"SKIP: {reason}")
+    print("=" * 72)
+    print("This suite was NOT run. It negotiates over real Nostr relays")
+    print("and needs two existing participant keys.")
+    print()
+    print(f"  key directory: {OLD_KEYS}")
+    print()
+    print("Set BLAKE_SWAP_TEST_KEY_DIR to a directory containing")
+    print("alice.key and bob.key, then re-run. See tests/README.md.")
+    print()
+    raise SystemExit(SKIP_EXIT_CODE)
 
 
 def ok(name):
@@ -52,6 +90,12 @@ def run_swap(
         "BLAKE_SWAP_TRANSPORT": "nostr",
         "PYTHONPATH": str(SRC),
     })
+
+    #
+    # Point the engine at the resolved chain nodes rather than its
+    # built-in defaults, which only exist on the author's host.
+    #
+    env.update(node_config.node_env())
 
     #
     # Preserve any relay configuration already supplied
@@ -88,10 +132,10 @@ def install_key(
         / f"{role}.key"
     )
 
-    require(
-        source.exists(),
-        f"missing existing test key: {source}",
-    )
+    if not source.exists():
+        skip(
+            f"missing source Nostr key: {source}"
+        )
 
     key_dir = (
         host_root
@@ -138,6 +182,8 @@ def load_state(
 
 
 def main():
+    node_config.require_node_config()
+
     base = Path(
         tempfile.mkdtemp(
             prefix="blake-isolated-nostr-"

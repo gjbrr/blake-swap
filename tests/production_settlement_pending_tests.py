@@ -557,6 +557,9 @@ def test_pending_blake_refund():
 
 
 def main():
+    h.preflight()
+    h.ok("preflight")
+
     test_pending_btc_claim()
     test_pending_blake_claim()
     test_pending_btc_refund()

@@ -309,6 +309,27 @@ def require_node_config():
         )
 
 
+def require_coincurve():
+    """
+    Abort with a SKIP if coincurve is not importable.
+
+    The engine needs coincurve to sign Nostr events, so a suite that
+    exercises the signing path cannot run without it. This is a
+    dependency prerequisite rather than a node prerequisite.
+    """
+    try:
+        import coincurve  # noqa: F401
+    except ImportError:
+        skip(
+            "coincurve is not importable by this interpreter",
+            details=[f"interpreter: {sys.executable}"],
+            hint=(
+                "Install the declared dependencies with:\n"
+                f'  "{sys.executable}" -m pip install -r requirements.txt'
+            ),
+        )
+
+
 if __name__ == "__main__":
     print("CHAIN NODE CONFIGURATION")
     print("========================")

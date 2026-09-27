@@ -4,6 +4,7 @@ import json
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import node_config
 import swap_v2
 
 
@@ -127,6 +128,9 @@ def test_human_output_still_present():
 
 
 def main():
+    # Exercises the engine's signing path, so coincurve is required.
+    node_config.require_coincurve()
+
     test_json_output()
     print(
         "PASS: market-takes resolves offer prefixes and emits validated JSON"

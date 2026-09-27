@@ -13346,11 +13346,16 @@ def command_accept_only_take(args):
     import asyncio
     from types import SimpleNamespace
 
+    #
+    # accept-take is a state-changing coordination action, not a
+    # discovery command: it has no JSON output mode, so prefix
+    # resolution always announces. (market-takes is the machine-readable
+    # discovery command and suppresses the announcement for --json.)
+    #
     offer_id = resolve_cached_nostr_prefix(
         args.offer_id,
         expected_type="market-offer",
         label="market offer",
-        announce=not args.json,
     )
 
     original, offer_message, valid_takes = asyncio.run(

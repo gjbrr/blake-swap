@@ -65,7 +65,11 @@ UNIT_SUITES=(
     tests/swap_dynamic_fee_integration_tests.py
     tests/swap_wire_tests.py
     tests/market_state_tests.py
+    tests/cli_wiring_tests.py
     tests/docs_alignment_tests.py
+    tests/swap_dashboard_json_tests.py
+    tests/swap_market_takes_json_tests.py
+    tests/swap_resume_step_budget_tests.py
 )
 
 REGTEST_SUITES=(

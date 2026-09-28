@@ -14,6 +14,14 @@ from dataclasses import dataclass, asdict
 from enum import Enum
 from pathlib import Path
 
+#
+# The canonical wire schema. The dependency is one-way: this module may
+# import swap_wire, and swap_wire must never import this one, so the
+# schema stays usable by the independent tools that speak the protocol
+# without the engine.
+#
+import swap_wire
+
 from swap_timeout_policy import (
     TimeoutPolicy,
     build_timeout_plan,
@@ -3506,16 +3514,39 @@ def message_path(swap_id, message_type):
     )
 
 
+def _wire_view(message):
+    """
+    The wire fields of a message, without engine-internal annotations.
+
+    Receive paths attach the authenticated sender identity as
+    `_nostr_pubkey`, and the FILE envelope mirrors that. Those keys are
+    engine bookkeeping rather than protocol content, so the canonical
+    schema is applied to the message without them. A key is internal
+    exactly when it begins with an underscore, and no wire field does.
+    """
+    return {
+        key: value
+        for key, value in message.items()
+        if not key.startswith("_")
+    }
+
+
 def validate_transport_message(
     swap_id,
     message_type,
     message,
+    *,
+    allow_internal=False,
 ):
     """
     Validation shared by every transport backend.
 
     In particular, Alice's original secret S must never
     travel through the coordination layer.
+
+    `allow_internal` is set only by the receive path, where the transport
+    has already attached the authenticated sender. On the send path it
+    stays false, so an internal annotation can never be transmitted.
     """
 
     if message.get("type") != message_type:
@@ -3532,6 +3563,40 @@ def validate_transport_message(
         raise RuntimeError(
             "SECURITY FAILURE: refusing to transport secret_hex"
         )
+
+    #
+    # The canonical schema is authoritative for settlement messages.
+    #
+    # Checking the name `secret_hex` only catches a top-level key with
+    # exactly that name: a nested or renamed field would pass. The schema
+    # rejects *unknown fields*, so running it here enforces the invariant
+    # by shape rather than by one key name, and it means the engine and
+    # the wire specification cannot drift apart without a test failing.
+    #
+    # The explicit check above is kept as defence in depth, and because
+    # it reports a SECURITY FAILURE rather than a schema error.
+    #
+    if message_type in swap_wire.SETTLEMENT_TYPES:
+        internal = sorted(
+            key for key in message if key.startswith("_")
+        )
+
+        if internal and not allow_internal:
+            raise RuntimeError(
+                "SECURITY FAILURE: refusing to transmit engine-internal "
+                f"field(s) {internal} on the wire"
+            )
+
+        try:
+            swap_wire.validate_message(
+                _wire_view(message),
+                expected_type=message_type,
+            )
+        except swap_wire.WireError as e:
+            raise RuntimeError(
+                f"SECURITY FAILURE: {message_type} message does not "
+                f"satisfy the canonical wire schema: {e}"
+            ) from e
 
 
 def file_send_message(
@@ -4464,6 +4529,7 @@ def receive_message(
         swap_id,
         message_type,
         message,
+        allow_internal=True,
     )
 
     return message, location

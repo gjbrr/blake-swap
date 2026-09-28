@@ -228,11 +228,15 @@ def test_unknown_policy():
         ),
     )
 
+    #
+    # The canonical wire schema refuses an unsupported policy version
+    # before the engine's own v1.5 check runs, so the refusal is reported
+    # by the schema. Either layer naming the problem is a correct refusal:
+    # what matters is that it is refused, before any state or acceptance.
+    #
     require_rejected_cleanly(
         swap_id,
-        contains=(
-            "unsupported timeout policy version"
-        ),
+        contains="unsupported timeout_policy_version",
     )
 
     h.ok(
@@ -269,11 +273,14 @@ def test_versionless_offer():
         strip_policy_metadata,
     )
 
+    #
+    # The four v1.5 fields are `required` in the canonical schema, so a
+    # stripped offer is refused there, by name, before the engine's own
+    # v1.5 check.
+    #
     require_rejected_cleanly(
         swap_id,
-        contains=(
-            "timeout policy version"
-        ),
+        contains="timeout_policy_version",
     )
 
     h.ok(
@@ -303,9 +310,7 @@ def test_missing_recovery():
 
     require_rejected_cleanly(
         swap_id,
-        contains=(
-            "missing bob_recovery_seconds"
-        ),
+        contains="bob_recovery_seconds",
     )
 
     h.ok(
@@ -566,11 +571,7 @@ def test_dishonest_metadata():
 
     require_rejected_cleanly(
         swap_id,
-        contains=(
-            "advertised timeout metadata "
-            "does not preserve its own "
-            "recovery budget"
-        ),
+        contains="recovery budget",
     )
 
     h.ok(

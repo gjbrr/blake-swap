@@ -156,7 +156,7 @@ scripts/
   stability-check          static safety-invariant checks
   wire_inventory.py        regenerate the wire message inventory
 
-tests/                     46 suites: unit tests and regtest integration
+tests/                     47 suites: unit tests and regtest integration
 tools/minimal_*.py         independent wire-message producers
 checkpoints/v1.5/          frozen earlier snapshot with SHA256SUMS
 ```
@@ -171,7 +171,7 @@ Node-free unit suites run anywhere:
 ./scripts/test.sh --unit-only
 ```
 
-The full suite covers all 46 test files, including the regtest
+The full suite covers all 47 test files, including the regtest
 integration suites and the independent-implementation wire suites. The
 regtest suites need two chain nodes; `scripts/test-nodes` starts a
 disposable Bitcoin Core + Bitcoin Knots rig for them:

@@ -64,16 +64,31 @@ Every settlement message:
 - MUST contain `type` and `swap_id`.
 - MUST have `type` equal to the transport-level message type.
 - MUST have `swap_id` equal to the transport-level swap ID.
+- MUST contain exactly the fields its type declares, and no others.
 - MUST NOT contain `secret_hex`, at any layer.
 
 `validate_transport_message()` (`src/swap_v2.py`) enforces these on both
-send and receive and raises
-`SECURITY FAILURE: refusing to transport secret_hex` if a top-level
-`secret_hex` key is present.
+send and receive. It applies the canonical schema in `src/swap_wire.py`,
+which means:
 
-> **Implementation note.** The `secret_hex` check is an exact top-level
-> key test. It is a defense-in-depth guard, not a schema. Producers
-> **MUST NOT** place the secret anywhere in a message, under any name.
+- an **unknown field is rejected**, so the `secret_hex` prohibition is
+  enforced by the shape of the message rather than by one key name: a
+  nested, renamed or extra field cannot carry it past validation;
+- every required field, its type, and the amount precision rule are
+  checked by the same code that independent implementations use;
+- the transport's own bookkeeping (the authenticated sender identity,
+  attached to a received message as `_nostr_pubkey`) is **not** wire
+  content: it is tolerated on receipt and refused on send, so an engine
+  detail cannot leak into a message.
+
+A top-level `secret_hex` key is additionally rejected explicitly, with
+`SECURITY FAILURE: refusing to transport secret_hex`, as defense in
+depth.
+
+> **Implementation note.** Producers **MUST NOT** place the secret
+> anywhere in a message, under any name. The engine's own builders never
+> do, and `tests/schema_equality_tests.py` fails if the engine's
+> acceptance boundary and the schema ever stop agreeing.
 
 ### 3.2 FILE transport
 

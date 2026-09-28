@@ -78,6 +78,7 @@ UNIT_SUITES=(
     tests/driver_policy_tests.py
     tests/agent_policy_tests.py
     tests/blake_amount_tests.py
+    tests/schema_equality_tests.py
 )
 
 REGTEST_SUITES=(

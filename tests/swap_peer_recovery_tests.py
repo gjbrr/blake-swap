@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sys
 import time
 
@@ -599,6 +600,143 @@ def test_refund_path_actor_disappears():
     print("swap:", swap_id)
 
 
+def test_recorded_funding_survives_a_confirmed_spend():
+    """
+    Funding recovery must not depend on the HTLC still being unspent.
+
+    `gettxout` answers "is this unspent right now", so it stops being
+    evidence the moment the HTLC is spent. Recovery of an older record
+    must instead prove the recorded outpoint from the funding transaction
+    and its block, which are permanent.
+
+    This is the participant who did NOT create the funding transaction,
+    so there is no wallet shortcut: without the transaction-and-block
+    path the only remaining option is a historical scan that cannot see
+    the other side's funding transaction at all.
+    """
+
+    h.banner(
+        "PEER RECOVERY: FUNDING EVIDENCE AFTER A CONFIRMED SPEND"
+    )
+
+    swap_id = make_two_funded_swap()
+
+    snapshot = h.state_file(
+        swap_id,
+        "bob",
+    ).read_text()
+
+    bob = h.load_state(
+        swap_id,
+        "bob",
+    )
+
+    h.require(
+        bob.get("blake_funding_blockhash"),
+        "the recorded BLAKE funding has no blockhash to prove it from",
+    )
+
+    #
+    # Drive both HTLCs to a confirmed spend, so neither funding output is
+    # visible to gettxout any more.
+    #
+    crash_action(
+        "btc-claim-after-broadcast",
+        "claim-btc",
+        swap_id,
+        role="alice",
+    )
+
+    h.mine_btc(1)
+
+    sync(
+        swap_id,
+        "bob",
+    )
+
+    h.assert_state(
+        swap_id,
+        "bob",
+        "BTC_CLAIMED",
+    )
+
+    crash_action(
+        "blake-claim-after-broadcast",
+        "claim-blake",
+        swap_id,
+        role="bob",
+    )
+
+    h.mine_blake(1)
+
+    #
+    # Crush Bob's record back to the state it had while both HTLCs were
+    # still unspent, and ask funding reconciliation to re-establish them
+    # from the recorded outpoints alone.
+    #
+    restored = json.loads(snapshot)
+
+    restored["state"] = "OFFERED"
+
+    h.state_file(
+        swap_id,
+        "bob",
+    ).write_text(
+        json.dumps(restored, indent=2, sort_keys=True) + "\n"
+    )
+
+    #
+    # Make the historical scan impossible, so the recorded outpoint is
+    # the ONLY way this can succeed. Without it the command would fall
+    # back to scanning blocks and refuse the scan as too large, which is
+    # exactly what the pre-fix behaviour produced here: recovery of a
+    # spent HTLC's funding depended on a scan that is both expensive and
+    # unavailable once the bound applies.
+    #
+    result = h.swap_cmd(
+        "sync-funding",
+        swap_id,
+        "--role",
+        "bob",
+        role="bob",
+        extra_env={
+            "BLAKE_SWAP_MAX_FUNDING_SCAN_BLOCKS": "1",
+        },
+    )
+
+    output = result.stdout + result.stderr
+
+    h.require(
+        "FUNDING SCAN:" not in output,
+        "funding was recovered by scanning blocks rather than from the "
+        f"recorded outpoint:\n{output}",
+    )
+
+    h.require(
+        "RECOVERED BLAKE FUNDING" in output,
+        "the spent BLAKE HTLC's funding was not recovered from its "
+        f"transaction:\n{output}",
+    )
+
+    h.require(
+        "RECOVERED BITCOIN FUNDING" in output,
+        "the spent Bitcoin HTLC's funding was not recovered from its "
+        f"transaction:\n{output}",
+    )
+
+    h.assert_state(
+        swap_id,
+        "bob",
+        "BTC_FUNDED",
+    )
+
+    h.ok(
+        "recorded funding outpoints survive the HTLC being spent"
+    )
+
+    print("swap:", swap_id)
+
+
 def main():
     h.PASS_COUNT = 0
     h.FAIL_COUNT = 0
@@ -617,6 +755,10 @@ def main():
         (
             "REFUND PEER RECOVERY",
             test_refund_path_actor_disappears,
+        ),
+        (
+            "FUNDING EVIDENCE AFTER A CONFIRMED SPEND",
+            test_recorded_funding_survives_a_confirmed_spend,
         ),
     ]
 

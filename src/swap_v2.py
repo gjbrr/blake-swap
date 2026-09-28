@@ -15156,6 +15156,177 @@ def scan_chain_for_expected_funding(swap, chain):
     return matches[0]
 
 
+def _decoded_output(decoded, vout):
+    """Return one output of a decoded transaction by index, or None."""
+
+    if not isinstance(decoded, dict):
+        return None
+
+    for output in decoded.get("vout", []):
+        if int(output.get("n", -1)) == int(vout):
+            return output
+
+    return None
+
+
+def _require_funding_output_matches(swap, chain, output):
+    """
+    Prove a decoded transaction output is this swap's HTLC.
+
+    Amount and derived HTLC address are what make a *recorded* outpoint
+    trustworthy, so this is the check that replaces consulting the current
+    UTXO set. A mismatch is a security failure: the caller must not fall
+    back to searching for some different transaction.
+    """
+    if output is None:
+        raise RuntimeError(
+            f"Recorded {chain.upper()} funding transaction does not "
+            "contain the recorded vout"
+        )
+
+    actual_address = (
+        output
+        .get("scriptPubKey", {})
+        .get("address")
+    )
+
+    if chain == "blake":
+        expected_address = derive_blake_contract_address(
+            get_blake_contract_descriptor(swap)
+        )
+
+        actual = Decimal(str(output["value"]))
+        expected = Decimal(str(swap.blake_amount))
+
+        if abs(actual - expected) > Decimal("0.00000001"):
+            raise RuntimeError(
+                "Recorded BLAKE funding has the wrong amount: "
+                f"expected {swap.blake_amount}, found {output['value']}"
+            )
+
+    elif chain == "btc":
+        expected_address = derive_btc_contract_address(
+            get_btc_contract_descriptor(swap)
+        )
+
+        actual = int(
+            Decimal(str(output["value"])) * Decimal(100_000_000)
+        )
+
+        if actual != int(swap.btc_sats):
+            raise RuntimeError(
+                "Recorded Bitcoin funding has the wrong amount: "
+                f"expected {swap.btc_sats} sats, found {actual} sats"
+            )
+
+    else:
+        raise ValueError(f"Unknown funding chain: {chain}")
+
+    if actual_address != expected_address:
+        raise RuntimeError(
+            f"Recorded {chain.upper()} funding output does not match "
+            "the expected HTLC address"
+        )
+
+
+def funding_transaction_facts(
+    cli,
+    wallet,
+    txid,
+    vout,
+    recorded_blockhash=None,
+):
+    """
+    Establish a recorded funding outpoint from the transaction itself.
+
+    `gettxout` answers "is this unspent right now", so it stops being
+    evidence the moment the HTLC is spent -- which is exactly the case
+    that recovery of an older record has to handle. The transaction and
+    its block are permanent, so confirmation is derived from those:
+
+      1. the funding wallet, when this participant created the funding
+         transaction (`gettransaction` reports the block and count);
+      2. `getrawtransaction` from the recorded blockhash, which works on a
+         node without `txindex`;
+      3. `getrawtransaction` alone, for a mempool transaction or a node
+         that does have `txindex`.
+
+    Returns ``{"confirmations", "blockhash", "output", "tx"}`` or None
+    when the transaction cannot be fetched at all.
+    """
+
+    #
+    # The wallet path is best effort: the counterparty does not own the
+    # other side's funding transaction and cannot see it this way.
+    #
+    if wallet:
+        try:
+            wallet_tx = cli(
+                "gettransaction",
+                txid,
+                wallet=wallet,
+            )
+        except Exception:
+            wallet_tx = None
+
+        if isinstance(wallet_tx, dict) and wallet_tx.get("hex"):
+            decoded = cli(
+                "decoderawtransaction",
+                wallet_tx["hex"],
+            )
+
+            return {
+                "confirmations": int(
+                    wallet_tx.get("confirmations", 0) or 0
+                ),
+                "blockhash": (
+                    wallet_tx.get("blockhash")
+                    or recorded_blockhash
+                ),
+                "output": _decoded_output(decoded, vout),
+                "tx": decoded,
+            }
+
+    attempts = []
+
+    if recorded_blockhash:
+        attempts.append(recorded_blockhash)
+
+    attempts.append(None)
+
+    for blockhash in attempts:
+        try:
+            if blockhash:
+                decoded = cli(
+                    "getrawtransaction",
+                    txid,
+                    True,
+                    blockhash,
+                )
+            else:
+                decoded = cli(
+                    "getrawtransaction",
+                    txid,
+                    True,
+                )
+        except Exception:
+            continue
+
+        if not isinstance(decoded, dict):
+            continue
+
+        return {
+            "confirmations": int(
+                decoded.get("confirmations", 0) or 0
+            ),
+            "blockhash": decoded.get("blockhash") or blockhash,
+            "output": _decoded_output(decoded, vout),
+            "tx": decoded,
+        }
+
+    return None
+
+
 def recover_recorded_confirmed_funding(swap, chain):
     """
     Fast path for a funding transaction whose exact outpoint was already
@@ -15177,14 +15348,12 @@ def recover_recorded_confirmed_funding(swap, chain):
         tx_field = "blake_funding_txid"
         vout_field = "blake_funding_vout"
         block_field = "blake_funding_blockhash"
-        verifier = verify_blake_contract
     elif chain == "btc":
         cli = btc_cli
         wallet = BTC_WALLET
         tx_field = "btc_funding_txid"
         vout_field = "btc_funding_vout"
         block_field = "btc_funding_blockhash"
-        verifier = verify_btc_contract
     else:
         raise ValueError(
             f"Unknown funding chain: {chain}"
@@ -15202,63 +15371,53 @@ def recover_recorded_confirmed_funding(swap, chain):
             f"{chain.upper()} funding outpoint"
         )
 
-    utxo = cli(
-        "gettxout",
+    #
+    # Confirm the recorded outpoint from the transaction and its block,
+    # NOT from the current UTXO set. `gettxout` answers "is this unspent
+    # right now", so it stops being evidence the moment the HTLC is spent
+    # -- and recovering an older record after the HTLC has been spent is
+    # exactly the case this fast path exists for.
+    #
+    facts = funding_transaction_facts(
+        cli,
+        wallet,
         txid,
         vout,
+        getattr(swap, block_field),
     )
 
-    if not utxo:
-        # It may already be spent, or this participant may need full
-        # historical recovery.  Preserve the existing scan fallback.
+    if facts is None:
+        # The transaction cannot be fetched at all here: fall back to the
+        # bounded historical scan.
         return None
 
-    confirmations = int(
-        utxo.get("confirmations", 0) or 0
-    )
+    confirmations = int(facts["confirmations"])
 
     if confirmations < 1:
+        # Not confirmed yet, so this is not the confirmed fast path. The
+        # caller keeps waiting rather than treating it as missing.
         return None
 
     #
-    # This proves amount, derived HTLC address and confirmation.
-    # Any mismatch in an already-recorded live outpoint is a security
-    # failure; do not silently search for some different transaction.
+    # This proves amount, derived HTLC address and confirmation. Any
+    # mismatch in an already-recorded outpoint is a security failure; do
+    # not silently search for some different transaction.
     #
-    verifier(
+    _require_funding_output_matches(
         swap,
-        verbose=False,
+        chain,
+        facts["output"],
     )
 
-    blockhash = getattr(
-        swap,
-        block_field,
+    blockhash = (
+        facts["blockhash"]
+        or getattr(swap, block_field)
     )
 
-    #
-    # Normal funding recovery is especially cheap for the party that
-    # created the transaction: gettransaction gives us its confirmed
-    # blockhash directly.
-    #
     if not blockhash:
-        try:
-            wallet_tx = cli(
-                "gettransaction",
-                txid,
-                wallet=wallet,
-            )
-        except Exception:
-            wallet_tx = None
-
-        if isinstance(wallet_tx, dict):
-            blockhash = wallet_tx.get(
-                "blockhash"
-            )
-
-    if not blockhash:
-        # Counterparty state may know the exact outpoint without owning
-        # the funding transaction.  Let the existing historical scanner
-        # recover the blockhash in that less-common case.
+        # Confirmed, but no block can be identified: the historical scan
+        # is the only way to anchor the block height. Rare, and the
+        # outpoint itself has already been proven above.
         return None
 
     return {
@@ -15267,6 +15426,7 @@ def recover_recorded_confirmed_funding(swap, chain):
         "blockhash": blockhash,
         "confirmations": confirmations,
         "recorded_fast_path": True,
+        "spent_evidence": True,
     }
 
 def command_sync_funding(args):

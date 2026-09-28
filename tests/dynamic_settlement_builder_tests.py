@@ -81,6 +81,44 @@ def main():
         assert override["fee_sats"] == 200
         assert override["source"] == "override"
 
+        #
+        # A change output that appears and disappears across the dust
+        # threshold makes vsize a *decreasing* step function of the fee:
+        # paying more can remove the output, which lowers the requirement,
+        # which puts the output back. That two-cycle never reaches
+        # equality, so the builder must accept the transaction it has
+        # already measured instead of oscillating until it gives up.
+        #
+        oscillating = FakeCli()
+        oscillating.decoded = {
+            "hex-fee-1": 200,
+            "hex-fee-200": 150,
+            "hex-fee-150": 200,
+        }
+        built.clear()
+
+        # The explicit override above is still set; clear it so the
+        # estimator path (the loop under test) is what runs.
+        os.environ.pop(name, None)
+
+        plan = swap_v2.build_dynamic_settlement_spend(
+            chain="blake",
+            cli=oscillating,
+            input_sats=20_000,
+            build_finalized=lambda fee_sats: (
+                built.append(fee_sats)
+                or f"hex-fee-{fee_sats}"
+            ),
+        )
+
+        assert built == [1, 200], built
+        assert plan["fee_sats"] == 200
+        assert plan["vsize"] == 150
+
+        # What the returned transaction paid must cover what it needs:
+        # the effective rate here is 1 sat/vB.
+        assert plan["fee_sats"] >= plan["vsize"], plan
+
         print(
             "PASS: dynamic settlement builder tests"
         )

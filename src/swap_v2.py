@@ -7062,7 +7062,24 @@ def build_dynamic_settlement_spend(
             max_percent=settlement_fee_cap_percent(),
         )
 
-        if required_fee == fee_sats:
+        #
+        # Converged, or already over the requirement.
+        #
+        # Comparing for equality is not enough. The fee required by a
+        # transaction is measured *from* that transaction, and a change
+        # output appearing or disappearing across the dust threshold makes
+        # vsize a decreasing step function of the fee: paying more can
+        # remove the output, which lowers the requirement, which puts the
+        # output back. That two-cycle never reaches equality, and the
+        # builder used to give up after eight attempts -- a happy-path
+        # settlement failure with nothing wrong on either chain.
+        #
+        # The transaction being returned is the one that was measured, so
+        # its fee covers its own requirement even when the requirement is
+        # now a satoshi or two lower. Paying the larger of the two is what
+        # any wallet does; the cap above still bounds it.
+        #
+        if required_fee <= fee_sats:
             return {
                 "hex": tx_hex,
                 "fee_sats": fee_sats,

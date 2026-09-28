@@ -157,7 +157,10 @@ larger share of the HTLC — that is the cap doing its job, not a bug — and
 the refusal now says which rate the cap permits, how small the HTLC is
 against the current rate, and which knob to change.
 
-The controls, in the order to reach for them:
+The controls, in the order to reach for them. Every one is an **environment
+variable**: fee policy has no command-line option, in the engine or in the
+`scripts/` wrappers, so a client sets these in the environment of the process it
+launches:
 
 | Knob | Effect |
 |---|---|

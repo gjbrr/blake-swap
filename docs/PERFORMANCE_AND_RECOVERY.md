@@ -164,7 +164,24 @@ The controls, in the order to reach for them:
 | `BLAKE_SWAP_MAX_SETTLEMENT_FEE_PERCENT` | the cap as a share of the HTLC input; raising it makes small swaps settleable at the cost of the fee being a larger share of the swap |
 | `BLAKE_SWAP_MAX_SETTLEMENT_FEE_SATS` | a flat ceiling, applied in addition to the percentage. It can only make the cap stricter, and it is the right control for a *large* HTLC in a spike, where a percentage can permit far more than an operator wants to pay |
 | `BLAKE_SWAP_FEE_TARGET_BLOCKS`, `BLAKE_SWAP_FEE_RATE_MULTIPLIER` | what the estimator is asked for, and how much above it to pay; neither helps if the cap is the binding constraint |
-| `BLAKE_SWAP_BTC_SPEND_FEE_SATS` / `BLAKE_SWAP_BLAKE_SPEND_FEE_SATS` | an explicit fee, for an emergency; it is still subject to both caps |
+| `BLAKE_SWAP_BTC_SPEND_FEE_RATE` / `BLAKE_SWAP_BLAKE_SPEND_FEE_RATE` | an explicit **rate** in sat/vB, for a client that reads the fee market itself; takes precedence over the estimator, and over `FEE_TARGET_BLOCKS`/`FEE_RATE_MULTIPLIER`, which it makes irrelevant |
+| `BLAKE_SWAP_BTC_SPEND_FEE_SATS` / `BLAKE_SWAP_BLAKE_SPEND_FEE_SATS` | an explicit **fee** in sats, for an emergency; the most specific knob, so it wins over the rate; it is still subject to both caps |
+
+Precedence, most explicit first: an exact **fee** in sats, an exact **rate**
+in sat/vB, then the node's estimator at the configured target with the
+configured multiplier. Both caps apply to every path — an override says what
+to pay, not what may be paid.
+
+The rate knob is the one that matters for the intended clients. This engine
+does not know how urgent a particular swap is, and a node's estimator is one
+opinion about the next few blocks; a client that subscribes to the fee market
+(and can see the mempool, not just a three-block estimate) should compute
+`current rate + its own margin`, pass it here, and keep the decision at the
+edge where the information is. A rate below the node's acceptance floors
+(`minrelaytxfee`, or the higher `mempoolminfee` while the mempool is
+congested) is **refused** rather than attempted: a settlement that cannot be
+relayed is a stalled swap, and the refusal names the variable, the rate, and
+the floor it failed against.
 
 Deliberately **not** done: raising the default cap so that the test-sized
 swaps settle in a median fee environment. A 10% fee is already a large

@@ -100,6 +100,9 @@ usual way.
 | `BLAKE_SWAP_BLAKE_DATADIR` | BLAKE data directory |
 | `BLAKE_SWAP_BLAKE_RPC_ARGS` | extra `bitcoin-cli` arguments (remote nodes) |
 | `BLAKE_SWAP_RPC_TIMEOUT_SECONDS` | per-RPC timeout; a hung node fails closed instead of blocking (default 120) |
+| `BLAKE_SWAP_RPC_MAX_ATTEMPTS` | attempts for a **read-only** RPC that fails transiently (default 3). State-changing calls are never retried, because a call that timed out may have succeeded |
+| `BLAKE_SWAP_RPC_RETRY_BACKOFF_SECONDS` | first retry delay, doubled per attempt (default 1.0, i.e. 1 s then 2 s) |
+| `BLAKE_SWAP_RPC_MAX_RETRY_BACKOFF_SECONDS` | ceiling on that doubling (default 30) |
 | `BLAKE_SWAP_IGNORED_MATCH_TTL_SECONDS` | lifetime of an `ignore-match` tombstone; 0 never expires (default 0) |
 | `BLAKE_SWAP_TEST_ROOT` | location of the `scripts/test-nodes` rig (default `$HOME/.blake-swap-test`) |
 | `BLAKE_SWAP_TEST_BTC_CLI` | `bitcoin-cli` the rig starts for Bitcoin Core |

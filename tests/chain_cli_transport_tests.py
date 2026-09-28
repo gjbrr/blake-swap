@@ -41,8 +41,11 @@ from __future__ import annotations
 
 import errno
 import json
+import os
+import shutil
 import subprocess
 import sys
+import tempfile
 from types import SimpleNamespace
 from pathlib import Path
 
@@ -94,17 +97,32 @@ def check(name, fn):
 
 
 class FakeSubprocess:
-    """Stand-in for the ``subprocess`` module inside swap_v2."""
+    """
+    Stand-in for the ``subprocess`` module inside swap_v2.
+
+    ``results`` allows a different outcome per attempt, which is how the
+    retry path is reached: a first call that times out, a second that
+    answers. Each entry is either an exception to raise or a result.
+    """
 
     TimeoutExpired = subprocess.TimeoutExpired
 
-    def __init__(self, *, result=None, raises=None):
+    def __init__(self, *, result=None, raises=None, results=None):
         self.result = result
         self.raises = raises
+        self.results = list(results) if results is not None else None
         self.calls = []
 
     def run(self, cmd, **kwargs):
         self.calls.append((list(cmd), kwargs))
+
+        if self.results is not None:
+            outcome = self.results.pop(0)
+
+            if isinstance(outcome, BaseException):
+                raise outcome
+
+            return outcome
 
         if self.raises is not None:
             raise self.raises
@@ -127,8 +145,8 @@ class captured:
     def __enter__(self):
         self._original = swap_v2.run_chain_cli
 
-        def fake(label, cmd, stdin_text=None):
-            self.calls.append((label, list(cmd), stdin_text))
+        def fake(label, cmd, stdin_text=None, method=None):
+            self.calls.append((label, list(cmd), stdin_text, method))
             return {}
 
         swap_v2.run_chain_cli = fake
@@ -152,7 +170,7 @@ def test_ordinary_arguments_stay_in_argv():
     with captured() as cap:
         swap_v2.blake_cli("getblockcount")
 
-    label, cmd, stdin_text = cap.one()
+    label, cmd, stdin_text, _method = cap.one()
 
     if label != "BLAKE":
         raise AssertionError(f"wrong label: {label}")
@@ -174,7 +192,7 @@ def test_booleans_render_as_json_literals():
     with captured() as cap:
         swap_v2.btc_cli("sendtoaddress", "addr", 0.1, True, False)
 
-    _, cmd, stdin_text = cap.one()
+    _, cmd, stdin_text, _method = cap.one()
 
     if stdin_text is not None:
         raise AssertionError("a short call used stdin transport")
@@ -208,7 +226,7 @@ def test_wallet_selection_is_preserved():
     with captured() as cap:
         swap_v2.btc_cli("getbalance", wallet="alice")
 
-    _, cmd, _ = cap.one()
+    _, cmd, _, _method = cap.one()
 
     if "-rpcwallet=alice" not in cmd:
         raise AssertionError(f"wallet selection lost: {cmd}")
@@ -218,7 +236,7 @@ def test_oversized_argument_uses_stdin():
     with captured() as cap:
         swap_v2.blake_cli("decoderawtransaction", OVERSIZED)
 
-    _, cmd, stdin_text = cap.one()
+    _, cmd, stdin_text, _method = cap.one()
 
     if OVERSIZED in cmd:
         raise AssertionError("the oversized value is still in argv")
@@ -236,7 +254,7 @@ def test_oversized_call_keeps_argument_order_and_types():
     with captured() as cap:
         swap_v2.btc_cli("decoderawtransaction", OVERSIZED, False)
 
-    _, cmd, stdin_text = cap.one()
+    _, cmd, stdin_text, _method = cap.one()
 
     if cmd[-1] != "-stdin":
         raise AssertionError(f"-stdin was not requested: {cmd}")
@@ -253,7 +271,7 @@ def test_the_boundary_is_exact():
     with captured() as cap:
         swap_v2.btc_cli("decoderawtransaction", "a" * limit)
 
-    _, cmd, stdin_text = cap.one()
+    _, cmd, stdin_text, _method = cap.one()
 
     if stdin_text is not None or "-stdin" in cmd:
         raise AssertionError("an argument at the limit left argv")
@@ -261,7 +279,7 @@ def test_the_boundary_is_exact():
     with captured() as cap:
         swap_v2.btc_cli("decoderawtransaction", "a" * (limit + 1))
 
-    _, cmd, stdin_text = cap.one()
+    _, cmd, stdin_text, _method = cap.one()
 
     if stdin_text is None or cmd[-1] != "-stdin":
         raise AssertionError("an argument over the limit stayed in argv")
@@ -431,6 +449,91 @@ def test_nonzero_exit_raises_the_node_error():
         swap_v2.subprocess = original
 
 
+
+def test_a_stalled_node_is_retried_against_the_real_cli():
+    """
+    A node that takes longer than the timeout, and then answers.
+
+    The stall is a wrapper around the *real* bitcoin-cli that sleeps on
+    its first invocation only. That matters: the timeout under test is a
+    genuinely slow process being killed, not an injected exception, and
+    the retry then has something real to recover.
+
+    The second half disables retries and requires the same stall to fail,
+    which is what shows the first half passed *because* of the retry
+    rather than because the stall never happened.
+    """
+    problems = node_config.node_config_problems()
+
+    if problems:
+        print("SKIP  stalled-node retry (no chain nodes configured)")
+        return
+
+    real_cli = swap_v2.BLAKE_CLI
+    wrapper_dir = Path(tempfile.mkdtemp(prefix="blake-stall-"))
+    marker = wrapper_dir / "stalled"
+    wrapper = wrapper_dir / "slow-bitcoin-cli"
+
+    wrapper.write_text(
+        "#!/bin/sh\n"
+        f"if [ ! -f {marker} ]; then\n"
+        f"  : > {marker}\n"
+        "  sleep 3\n"
+        "fi\n"
+        f'exec "{real_cli}" "$@"\n'
+    )
+    wrapper.chmod(0o755)
+
+    names = (
+        "BLAKE_SWAP_RPC_TIMEOUT_SECONDS",
+        "BLAKE_SWAP_RPC_MAX_ATTEMPTS",
+        "BLAKE_SWAP_RPC_RETRY_BACKOFF_SECONDS",
+    )
+    saved = {name: os.environ.get(name) for name in names}
+
+    try:
+        swap_v2.BLAKE_CLI = str(wrapper)
+
+        os.environ["BLAKE_SWAP_RPC_TIMEOUT_SECONDS"] = "1"
+        os.environ["BLAKE_SWAP_RPC_MAX_ATTEMPTS"] = "3"
+        os.environ["BLAKE_SWAP_RPC_RETRY_BACKOFF_SECONDS"] = "4"
+
+        height = swap_v2.blake_cli("getblockcount")
+
+        if not isinstance(height, int) or height < 0:
+            raise AssertionError(f"the retry returned {height!r}")
+
+        if not marker.exists():
+            raise AssertionError(
+                "the wrapper never stalled, so this proved nothing"
+            )
+
+        marker.unlink()
+        os.environ["BLAKE_SWAP_RPC_MAX_ATTEMPTS"] = "1"
+
+        try:
+            swap_v2.blake_cli("getblockcount")
+        except RuntimeError as e:
+            if "timed out" not in str(e):
+                raise AssertionError(
+                    f"the stall failed for the wrong reason: {e}"
+                )
+        else:
+            raise AssertionError(
+                "a stalled node answered with retries disabled, so the "
+                "stall was not real"
+            )
+    finally:
+        swap_v2.BLAKE_CLI = real_cli
+
+        for name, value in saved.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+
+        shutil.rmtree(wrapper_dir, ignore_errors=True)
+
 def test_real_node_accepts_the_stdin_transport():
     """
     Force the stdin path against the real node.
@@ -469,6 +572,257 @@ def test_real_node_accepts_the_stdin_transport():
         raise AssertionError(f"decoded transaction has no vsize: {decoded}")
 
 
+
+def with_env(**values):
+    """Set environment variables for the duration of a block."""
+    import contextlib
+
+    @contextlib.contextmanager
+    def manager():
+        saved = {name: os.environ.get(name) for name in values}
+
+        os.environ.update({name: str(v) for name, v in values.items()})
+
+        try:
+            yield
+        finally:
+            for name, value in saved.items():
+                if value is None:
+                    os.environ.pop(name, None)
+                else:
+                    os.environ[name] = value
+
+    return manager()
+
+
+ANSWER = SimpleNamespace(returncode=0, stdout='{"blocks": 7}\n', stderr="")
+
+
+def test_a_slow_read_only_call_is_retried():
+    """
+    A node that is merely slow must not fail a read.
+
+    The first attempt times out and the second answers, which is exactly
+    the "slow rather than down" case the timeout alone used to turn into a
+    hard failure.
+    """
+    original = swap_v2.subprocess
+    fake = FakeSubprocess(
+        results=[
+            subprocess.TimeoutExpired(cmd="bitcoin-cli", timeout=1),
+            ANSWER,
+        ]
+    )
+    swap_v2.subprocess = fake
+
+    try:
+        with with_env(
+            BLAKE_SWAP_RPC_TIMEOUT_SECONDS="1",
+            BLAKE_SWAP_RPC_MAX_ATTEMPTS="3",
+            BLAKE_SWAP_RPC_RETRY_BACKOFF_SECONDS="0",
+        ):
+            decoded = swap_v2.run_chain_cli(
+                "BLAKE",
+                ["bitcoin-cli", "getblockcount"],
+                method="getblockcount",
+            )
+    finally:
+        swap_v2.subprocess = original
+
+    if decoded != {"blocks": 7}:
+        raise AssertionError(f"the retry did not recover the answer: {decoded!r}")
+
+    if len(fake.calls) != 2:
+        raise AssertionError(f"expected two attempts, got {len(fake.calls)}")
+
+
+def test_a_slow_state_changing_call_is_not_retried():
+    """
+    After a timeout on a call that can change state, the engine does not
+    know whether the node acted, so it must not guess by sending again.
+
+    A repeated `sendtoaddress` funds a swap twice. The operator is told
+    what happened and how re-running resolves it.
+    """
+    original = swap_v2.subprocess
+    fake = FakeSubprocess(
+        results=[
+            subprocess.TimeoutExpired(cmd="bitcoin-cli", timeout=1),
+            ANSWER,
+        ]
+    )
+    swap_v2.subprocess = fake
+
+    try:
+        with with_env(
+            BLAKE_SWAP_RPC_TIMEOUT_SECONDS="1",
+            BLAKE_SWAP_RPC_MAX_ATTEMPTS="3",
+            BLAKE_SWAP_RPC_RETRY_BACKOFF_SECONDS="0",
+        ):
+            try:
+                swap_v2.run_chain_cli(
+                    "BTC",
+                    ["bitcoin-cli", "sendtoaddress"],
+                    method="sendtoaddress",
+                )
+            except RuntimeError as e:
+                message = str(e)
+            else:
+                raise AssertionError("a timed-out send did not raise")
+    finally:
+        swap_v2.subprocess = original
+
+    if len(fake.calls) != 1:
+        raise AssertionError(
+            f"a state-changing call was retried {len(fake.calls)} times"
+        )
+
+    for expected in ("NOT", "retried", "may or may not have acted", "re-run"):
+        if expected not in message:
+            raise AssertionError(
+                f"the refusal did not explain the ambiguity ({expected!r}): "
+                f"{message}"
+            )
+
+
+def test_an_unknown_method_is_not_retried():
+    """
+    The retry list is an allowlist on purpose: a method nobody classified
+    gets the behaviour the engine had before retries existed.
+    """
+    if swap_v2.rpc_method_is_retryable("sendtoaddress"):
+        raise AssertionError("a send became retryable")
+
+    if swap_v2.rpc_method_is_retryable("somefuturecall"):
+        raise AssertionError("an unclassified method became retryable")
+
+    if not swap_v2.rpc_method_is_retryable("getblockcount"):
+        raise AssertionError("a chain read is not retryable")
+
+
+def test_transient_connection_failures_are_retried():
+    """
+    A refused connection is a node that is not there *yet*; a missing
+    binary is not. Only the first kind is worth another attempt.
+    """
+    original = swap_v2.subprocess
+
+    fake = FakeSubprocess(
+        results=[
+            ConnectionRefusedError(errno.ECONNREFUSED, "Connection refused"),
+            ANSWER,
+        ]
+    )
+    swap_v2.subprocess = fake
+
+    try:
+        with with_env(
+            BLAKE_SWAP_RPC_MAX_ATTEMPTS="3",
+            BLAKE_SWAP_RPC_RETRY_BACKOFF_SECONDS="0",
+        ):
+            decoded = swap_v2.run_chain_cli(
+                "BLAKE",
+                ["bitcoin-cli", "getblockcount"],
+                method="getblockcount",
+            )
+    finally:
+        swap_v2.subprocess = original
+
+    if decoded != {"blocks": 7} or len(fake.calls) != 2:
+        raise AssertionError(
+            f"a refused connection was not retried: {decoded!r}, "
+            f"{len(fake.calls)} attempts"
+        )
+
+    fake = FakeSubprocess(raises=FileNotFoundError(errno.ENOENT, "no cli"))
+    swap_v2.subprocess = fake
+
+    try:
+        with with_env(
+            BLAKE_SWAP_RPC_MAX_ATTEMPTS="3",
+            BLAKE_SWAP_RPC_RETRY_BACKOFF_SECONDS="0",
+        ):
+            try:
+                swap_v2.run_chain_cli(
+                    "BLAKE",
+                    ["bitcoin-cli", "getblockcount"],
+                    method="getblockcount",
+                )
+            except RuntimeError as e:
+                assert "could not be executed" in str(e), e
+            else:
+                raise AssertionError("a missing CLI did not raise")
+    finally:
+        swap_v2.subprocess = original
+
+    if len(fake.calls) != 1:
+        raise AssertionError(
+            f"a missing binary was retried {len(fake.calls)} times"
+        )
+
+
+def test_retries_are_bounded_and_configured():
+    """Exhausting the attempts fails, and the knobs are validated."""
+    original = swap_v2.subprocess
+    fake = FakeSubprocess(
+        raises=subprocess.TimeoutExpired(cmd="bitcoin-cli", timeout=1)
+    )
+    swap_v2.subprocess = fake
+
+    try:
+        with with_env(
+            BLAKE_SWAP_RPC_TIMEOUT_SECONDS="1",
+            BLAKE_SWAP_RPC_MAX_ATTEMPTS="2",
+            BLAKE_SWAP_RPC_RETRY_BACKOFF_SECONDS="0",
+        ):
+            try:
+                swap_v2.run_chain_cli(
+                    "BLAKE",
+                    ["bitcoin-cli", "getblockcount"],
+                    method="getblockcount",
+                )
+            except RuntimeError as e:
+                message = str(e)
+            else:
+                raise AssertionError("a permanently slow node did not raise")
+    finally:
+        swap_v2.subprocess = original
+
+    if len(fake.calls) != 2:
+        raise AssertionError(f"expected 2 attempts, got {len(fake.calls)}")
+
+    if "attempt 2/2" not in message:
+        raise AssertionError(f"the failure did not count attempts: {message}")
+
+    for name, value in (
+        ("BLAKE_SWAP_RPC_MAX_ATTEMPTS", "0"),
+        ("BLAKE_SWAP_RPC_MAX_ATTEMPTS", "many"),
+        ("BLAKE_SWAP_RPC_RETRY_BACKOFF_SECONDS", "-1"),
+        ("BLAKE_SWAP_RPC_RETRY_BACKOFF_SECONDS", "soon"),
+        ("BLAKE_SWAP_RPC_MAX_RETRY_BACKOFF_SECONDS", "-1"),
+        ("BLAKE_SWAP_RPC_MAX_RETRY_BACKOFF_SECONDS", "later"),
+    ):
+        with with_env(**{name: value}):
+            try:
+                if name == "BLAKE_SWAP_RPC_MAX_ATTEMPTS":
+                    swap_v2.rpc_max_attempts()
+                else:
+                    swap_v2.rpc_retry_backoff_seconds()
+            except RuntimeError:
+                pass
+            else:
+                raise AssertionError(f"{name}={value!r} was accepted")
+
+    # The cap bounds the backoff rather than the base.
+    with with_env(
+        BLAKE_SWAP_RPC_RETRY_BACKOFF_SECONDS="100",
+        BLAKE_SWAP_RPC_MAX_RETRY_BACKOFF_SECONDS="2",
+    ):
+        assert swap_v2.rpc_retry_backoff_seconds() == 2.0
+
+    if swap_v2.rpc_method_is_retryable(None):
+        raise AssertionError("a missing method name was treated as retryable")
+
 def main():
     print()
     print("=" * 72)
@@ -487,10 +841,16 @@ def main():
     check("the argv/stdin boundary is exact", test_the_boundary_is_exact)
     check("a failed exec becomes a named error", test_exec_failure_becomes_a_named_error)
     check("a timeout names the override", test_timeout_names_the_override)
+    check("a slow read-only call is retried", test_a_slow_read_only_call_is_retried)
+    check("a slow state-changing call is not retried", test_a_slow_state_changing_call_is_not_retried)
+    check("an unknown method is not retried", test_an_unknown_method_is_not_retried)
+    check("transient connection failures are retried", test_transient_connection_failures_are_retried)
+    check("retries are bounded and configured", test_retries_are_bounded_and_configured)
     check("a warning before the JSON does not hide it", test_a_warning_before_the_json_does_not_hide_it)
     check("results are decoded, text passes through", test_results_are_decoded_and_text_passes_through)
     check("a non-zero exit raises the node error", test_nonzero_exit_raises_the_node_error)
     check("the real node accepts the stdin transport", test_real_node_accepts_the_stdin_transport)
+    check("a stalled node is retried against the real cli", test_a_stalled_node_is_retried_against_the_real_cli)
 
     print()
     print("=" * 72)

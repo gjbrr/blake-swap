@@ -160,6 +160,24 @@ Still open, and needing a *failing* node rather than a public one: the RPC
 timeout and retry posture against a node that is merely slow rather than down.
 That wants a node that can be made to stall, which the regtest rig can do.
 
+**That is now implemented and verified against a node that stalls rather than
+fails.** A read-only call that times out, or that fails with a connection errno
+that means "not reachable right now" (`ECONNREFUSED`, `ECONNRESET`,
+`ETIMEDOUT`, `EPIPE`, …), is retried up to `BLAKE_SWAP_RPC_MAX_ATTEMPTS`
+(default 3) with an exponential backoff from
+`BLAKE_SWAP_RPC_RETRY_BACKOFF_SECONDS` (default 1 s, doubling, capped by
+`BLAKE_SWAP_RPC_MAX_RETRY_BACKOFF_SECONDS` at 30 s). A state-changing call is
+never retried: a call that timed out may have succeeded, so repeating
+`sendtoaddress` could fund a swap twice, and the timeout message says so rather
+than leaving the operator to guess which side of the ambiguity the engine chose.
+The retry set is therefore an allowlist of reads and pure local transformations
+(`RETRYABLE_RPC_METHODS`); a newly added mutating call gets no retry until
+someone classifies it. `tests/chain_cli_transport_tests.py` holds the evidence,
+including a run against a wrapper around the *real* `bitcoin-cli` that sleeps
+past the timeout on its first call only: the retry recovers, and the same stall
+with retries disabled must fail — so the first half cannot pass because the
+stall never happened.
+
 ## 4. Wire compatibility and legacy messages
 
 **Status: maintained until retired.**

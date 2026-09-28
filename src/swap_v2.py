@@ -30,17 +30,19 @@ from swap_timeout_policy import (
 
 from fee_policy import (
     choose_fee_rate_sat_vb,
+    coin_per_kvb_to_sat_vb,
     fee_for_vsize,
     enforce_fee_cap,
     ABSOLUTE_CAP_ENV,
     PERCENT_CAP_ENV,
 )
 
-import subprocess
+import errno
+import fcntl
 import os
 import shlex
 import shutil
-import fcntl
+import subprocess
 
 BASE_SWAP_DIR = Path(
     os.environ.get(
@@ -1167,7 +1169,167 @@ def funding_scan_max_blocks():
 ARGV_SAFE_LENGTH = 100_000
 
 
-def run_chain_cli(label, cmd, stdin_text=None):
+#
+# RPC methods that may be retried automatically after a timeout or a
+# transient connection failure.
+#
+# This is an allowlist, and that direction is the whole safety argument: a
+# method nobody has classified gets no retry, which is the behaviour the
+# engine had before retries existed. A denylist would do the opposite --
+# a new mutating call would silently become retryable, and a repeated
+# `sendtoaddress` funds a swap twice.
+#
+# Everything here is either a pure read of chain or wallet state, or a
+# deterministic local transformation of data the caller already has.
+#
+RETRYABLE_RPC_METHODS = frozenset({
+    # Chain reads.
+    "getblockcount",
+    "getblockhash",
+    "getblock",
+    "getrawtransaction",
+    "gettxout",
+    "getmempoolentry",
+    "getmempoolinfo",
+    # Fee, descriptor and address queries.
+    "estimatesmartfee",
+    "getdescriptorinfo",
+    "deriveaddresses",
+    "getaddressinfo",
+    # Wallet reads.
+    "gettransaction",
+    "getbalances",
+    "getwalletinfo",
+    "listwallets",
+    "listtransactions",
+    "listunspent",
+    "listdescriptors",
+    # Pure construction and decoding: no node state is involved.
+    "decoderawtransaction",
+    "createrawtransaction",
+    "converttopsbt",
+    "finalizepsbt",
+    "utxoupdatepsbt",
+    # Deterministic local signing of a PSBT that was already given to us.
+    "walletprocesspsbt",
+})
+
+
+#
+# errnos that mean "the node was not reachable right now" rather than "the
+# call cannot work". ENOENT and E2BIG are deliberately absent: retrying a
+# missing binary or an over-long argument list only wastes the operator's
+# time.
+#
+TRANSIENT_ERRNOS = frozenset(
+    errno
+    for errno in (
+        getattr(errno, name, None)
+        for name in (
+            "ECONNREFUSED",
+            "ECONNRESET",
+            "EHOSTUNREACH",
+            "ENETUNREACH",
+            "ETIMEDOUT",
+            "EPIPE",
+            "EAGAIN",
+        )
+    )
+    if errno is not None
+)
+
+
+def rpc_max_attempts():
+    """
+    How many times one read-only RPC may be attempted.
+
+    Default 3 (the first attempt plus two retries). 1 disables retries
+    without disabling the timeout. Override with
+    BLAKE_SWAP_RPC_MAX_ATTEMPTS.
+    """
+    raw = os.environ.get(
+        "BLAKE_SWAP_RPC_MAX_ATTEMPTS",
+        "3",
+    ).strip()
+
+    try:
+        value = int(raw)
+    except ValueError:
+        raise RuntimeError(
+            "BLAKE_SWAP_RPC_MAX_ATTEMPTS must be an integer"
+        ) from None
+
+    if value < 1:
+        raise RuntimeError(
+            "BLAKE_SWAP_RPC_MAX_ATTEMPTS must be at least 1"
+        )
+
+    return value
+
+
+def rpc_retry_backoff_seconds():
+    """
+    The delay before the second attempt, doubled for each one after it.
+
+    Override with BLAKE_SWAP_RPC_RETRY_BACKOFF_SECONDS; 0 retries
+    immediately. Bounded by BLAKE_SWAP_RPC_MAX_RETRY_BACKOFF_SECONDS
+    (default 30) so a large base cannot turn into an unbounded sleep.
+    """
+    raw = os.environ.get(
+        "BLAKE_SWAP_RPC_RETRY_BACKOFF_SECONDS",
+        "1.0",
+    ).strip()
+
+    try:
+        value = float(raw)
+    except ValueError:
+        raise RuntimeError(
+            "BLAKE_SWAP_RPC_RETRY_BACKOFF_SECONDS must be a number"
+        ) from None
+
+    if value < 0:
+        raise RuntimeError(
+            "BLAKE_SWAP_RPC_RETRY_BACKOFF_SECONDS must not be negative"
+        )
+
+    cap = 30.0
+
+    raw_cap = os.environ.get(
+        "BLAKE_SWAP_RPC_MAX_RETRY_BACKOFF_SECONDS",
+        str(cap),
+    ).strip()
+
+    try:
+        cap = float(raw_cap)
+    except ValueError:
+        raise RuntimeError(
+            "BLAKE_SWAP_RPC_MAX_RETRY_BACKOFF_SECONDS must be a number"
+        ) from None
+
+    if cap < 0:
+        raise RuntimeError(
+            "BLAKE_SWAP_RPC_MAX_RETRY_BACKOFF_SECONDS must not be negative"
+        )
+
+    return min(value, cap)
+
+
+def rpc_method_is_retryable(method):
+    """
+    Whether `method` may be retried automatically.
+
+    Unknown or unclassified methods are not retryable. See
+    RETRYABLE_RPC_METHODS for why the allowlist points that way.
+    """
+    return isinstance(method, str) and method in RETRYABLE_RPC_METHODS
+
+
+def _transient_os_error(e):
+    """Whether an OSError is the kind a retry could survive."""
+    return getattr(e, "errno", None) in TRANSIENT_ERRNOS
+
+
+def run_chain_cli(label, cmd, stdin_text=None, method=None):
     """
     Run one chain RPC command and decode its JSON result.
 
@@ -1176,63 +1338,120 @@ def run_chain_cli(label, cmd, stdin_text=None):
     mode reads the command and its arguments from stdin, so the value
     never touches argv.
 
-    Fails closed with a named diagnostic when the node does not answer
-    in time, rather than blocking indefinitely.
+    ``method`` names the RPC being called, and decides whether a timeout
+    or a transient connection failure is retried. Only methods in
+    RETRYABLE_RPC_METHODS are; a call that can change state is reported
+    instead, because after a timeout the engine cannot know whether the
+    node acted. The engine is written so that re-running is what resolves
+    that: funding records a durable intent first, and recovery finds a
+    broadcast that did happen.
+
+    Fails closed with a named diagnostic when the node does not answer in
+    time, rather than blocking indefinitely.
     """
     timeout = rpc_timeout_seconds()
 
-    try:
-        p = subprocess.run(
-            cmd,
-            text=True,
-            capture_output=True,
-            timeout=timeout,
-            input=stdin_text,
-        )
-    except subprocess.TimeoutExpired as e:
-        raise RuntimeError(
-            f"{label} RPC timed out after {timeout:g}s "
-            f"(BLAKE_SWAP_RPC_TIMEOUT_SECONDS): {cmd[0]}"
-        ) from e
-    except OSError as e:
-        #
-        # E2BIG (argument list too long) and ENOENT both surface here.
-        # A raw OSError from deep inside subprocess is not a useful
-        # diagnostic for an operator, and the caller's `except Exception`
-        # guards would swallow it into a generic failure.
-        #
-        raise RuntimeError(
-            f"{label} RPC could not be executed: {e}"
-        ) from e
+    retryable = rpc_method_is_retryable(method)
+    attempts = rpc_max_attempts() if retryable else 1
 
-    if p.returncode != 0:
-        raise RuntimeError(p.stderr.strip())
+    last_error = None
 
-    out = p.stdout.strip()
-
-    try:
-        return json.loads(out)
-    except json.JSONDecodeError:
-        pass
-
-    #
-    # A node can put a warning in front of its JSON. Most warnings go to
-    # stderr, but not all of them, and the wording and destination are not
-    # stable across Bitcoin Core and Knots versions. Decoding from the
-    # first structural character keeps a warning-prefixed reply from being
-    # handed to a caller as a string when it expects an object.
-    #
-    start = _first_json_offset(out)
-
-    if start is not None:
+    for attempt in range(1, attempts + 1):
         try:
-            value, _end = json.JSONDecoder().raw_decode(out, start)
-        except ValueError:
-            pass
-        else:
-            return value
+            p = subprocess.run(
+                cmd,
+                text=True,
+                capture_output=True,
+                timeout=timeout,
+                input=stdin_text,
+            )
+        except subprocess.TimeoutExpired as e:
+            last_error = e
 
-    return out
+            if attempt < attempts:
+                delay = rpc_retry_backoff_seconds() * (2 ** (attempt - 1))
+
+                print(
+                    f"{label} RPC timed out after {timeout:g}s; "
+                    f"retrying in {delay:g}s "
+                    f"(attempt {attempt + 1}/{attempts}): {method or cmd[0]}"
+                )
+
+                time.sleep(delay)
+                continue
+
+            raise RuntimeError(
+                f"{label} RPC timed out after {timeout:g}s "
+                f"(BLAKE_SWAP_RPC_TIMEOUT_SECONDS) on attempt "
+                f"{attempt}/{attempts}: {cmd[0]} {method or ''}".strip()
+                + (
+                    ""
+                    if retryable
+                    else ". This call can change state, so it is NOT "
+                    "retried: the node may or may not have acted. Check "
+                    "the node, then re-run the command -- a durable "
+                    "funding intent and funding recovery resolve a "
+                    "broadcast that did happen."
+                )
+            ) from e
+        except OSError as e:
+            last_error = e
+
+            if _transient_os_error(e) and attempt < attempts:
+                delay = rpc_retry_backoff_seconds() * (2 ** (attempt - 1))
+
+                print(
+                    f"{label} RPC could not reach the node ({e}); "
+                    f"retrying in {delay:g}s "
+                    f"(attempt {attempt + 1}/{attempts}): {method or cmd[0]}"
+                )
+
+                time.sleep(delay)
+                continue
+
+            #
+            # E2BIG (argument list too long) and ENOENT both surface here.
+            # A raw OSError from deep inside subprocess is not a useful
+            # diagnostic for an operator, and the caller's `except
+            # Exception` guards would swallow it into a generic failure.
+            #
+            raise RuntimeError(
+                f"{label} RPC could not be executed: {e}"
+            ) from e
+
+        if p.returncode != 0:
+            raise RuntimeError(p.stderr.strip())
+
+        out = p.stdout.strip()
+
+        try:
+            return json.loads(out)
+        except json.JSONDecodeError:
+            pass
+
+        #
+        # A node can put a warning in front of its JSON. Most warnings go
+        # to stderr, but not all of them, and the wording and destination
+        # are not stable across Bitcoin Core and Knots versions. Decoding
+        # from the first structural character keeps a warning-prefixed
+        # reply from being handed to a caller as a string when it expects
+        # an object.
+        #
+        start = _first_json_offset(out)
+
+        if start is not None:
+            try:
+                value, _end = json.JSONDecoder().raw_decode(out, start)
+            except ValueError:
+                pass
+            else:
+                return value
+
+        return out
+
+    raise RuntimeError(
+        f"{label} RPC failed with no attempt recorded: {last_error}"
+    )
 
 
 def _first_json_offset(text):
@@ -1297,11 +1516,16 @@ def _call_chain_cli(label, base_cmd, wallet, args):
             label,
             cmd,
             stdin_text="\n".join(rendered) + "\n",
+            method=args[0] if args else None,
         )
 
     cmd.extend(rendered)
 
-    return run_chain_cli(label, cmd)
+    return run_chain_cli(
+        label,
+        cmd,
+        method=args[0] if args else None,
+    )
 
 
 def blake_cli(*args, wallet=None):
@@ -7581,20 +7805,13 @@ def build_dynamic_settlement_spend(
             "source": "override",
         }
 
-    estimate = cli(
-        "estimatesmartfee",
-        settlement_fee_target_blocks(),
-    )
+    rate, rate_source = settlement_fee_rate(cli, chain)
 
-    mempool = cli(
-        "getmempoolinfo"
-    )
-
-    rate = choose_fee_rate_sat_vb(
-        estimate,
-        mempool,
-        multiplier=settlement_fee_multiplier(),
-    )
+    if rate_source != "dynamic":
+        print(
+            f"Settlement fee rate: {rate} sat/vB "
+            f"(from {rate_source})"
+        )
 
     # Start deliberately small. The provisional transaction is
     # never broadcast; it exists only to measure the real witness.
@@ -7647,7 +7864,7 @@ def build_dynamic_settlement_spend(
                 "fee_sats": fee_sats,
                 "vsize": vsize,
                 "rate_sat_vb": rate,
-                "source": "dynamic",
+                "source": rate_source,
             }
 
         fee_sats = required_fee
@@ -11267,32 +11484,157 @@ def settlement_fee_override_sats(chain):
     return value
 
 
+def settlement_fee_rate_env_name(chain):
+    """
+    The environment variable carrying the per-chain settlement feerate,
+    whether or not it is set.
+
+    Named in refusals so the operator is told which knob to turn rather
+    than left to search for it.
+    """
+    if chain == "btc":
+        return "BLAKE_SWAP_BTC_SPEND_FEE_RATE"
+
+    if chain == "blake":
+        return "BLAKE_SWAP_BLAKE_SPEND_FEE_RATE"
+
+    raise ValueError(
+        f"unknown settlement-fee chain: {chain}"
+    )
+
+
+def settlement_fee_rate_override(chain):
+    """
+    An explicit settlement feerate, in sat/vB, if the operator set one.
+
+    This is the knob a client with its own view of the fee market wants:
+    a client reads current rates (its own source, or the node's), adds a
+    margin for how quickly it wants the swap settled, and tells the engine
+    the exact rate to use. The engine does not try to read the market on
+    its client's behalf beyond the node estimator, and it does not know
+    how urgent this particular swap is.
+
+    Precedence, most explicit first:
+
+      1. `BLAKE_SWAP_{BTC,BLAKE}_SPEND_FEE_SATS` -- an exact fee
+      2. `BLAKE_SWAP_{BTC,BLAKE}_SPEND_FEE_RATE` -- an exact rate (sat/vB)
+      3. the node estimator and policy floors (the default)
+
+    Both caps still apply to every path: an override says what to pay, not
+    what may be paid.
+    """
+    name = settlement_fee_rate_env_name(chain)
+
+    raw = os.environ.get(name)
+
+    if raw in (None, ""):
+        return None
+
+    try:
+        value = Decimal(str(raw).strip())
+    except (InvalidOperation, ValueError):
+        raise ValueError(
+            f"{name} must be a number in sat/vB"
+        ) from None
+
+    if not value.is_finite() or value <= 0:
+        raise ValueError(
+            f"{name} must be a positive number in sat/vB"
+        )
+
+    return value
+
+
+def settlement_fee_rate(cli, chain):
+    """
+    The feerate to build a settlement transaction at, and where it came
+    from.
+
+    Returns `(rate, source)`. With an explicit rate override the node is
+    still asked for its acceptance floors, because a rate below them
+    cannot be relayed or admitted at all: failing here names the knob and
+    the binding floor, where letting the node refuse later would surface
+    as an unrelated-looking broadcast failure.
+
+    Both floors are checked, not just `minrelaytxfee`: `mempoolminfee`
+    rises above relay policy when the mempool is congested, and a
+    transaction below it is rejected just as surely, if only for as long
+    as the congestion lasts. An override that the node will not accept
+    right now is a settlement that stalls, so it is refused with the
+    node's own numbers.
+    """
+    override = settlement_fee_rate_override(chain)
+
+    if override is None:
+        estimate = cli(
+            "estimatesmartfee",
+            settlement_fee_target_blocks(),
+        )
+
+        mempool = cli(
+            "getmempoolinfo"
+        )
+
+        return (
+            choose_fee_rate_sat_vb(
+                estimate,
+                mempool,
+                multiplier=settlement_fee_multiplier(),
+            ),
+            "dynamic",
+        )
+
+    mempool = cli("getmempoolinfo")
+
+    floor = Decimal("0")
+    floor_field = None
+
+    if isinstance(mempool, dict):
+        for field in ("minrelaytxfee", "mempoolminfee"):
+            value = mempool.get(field)
+
+            if value is None:
+                continue
+
+            try:
+                candidate = coin_per_kvb_to_sat_vb(value)
+            except (ValueError, TypeError, ArithmeticError):
+                continue
+
+            if candidate > floor:
+                floor = candidate
+                floor_field = field
+
+    if floor > 0 and override < floor:
+        name = settlement_fee_rate_env_name(chain)
+
+        raise ValueError(
+            f"{name} is {override} sat/vB, below the node's {floor} "
+            f"sat/vB {floor_field}; a transaction paying it would not "
+            "be accepted. Raise the rate, or unset the variable to use "
+            "the node's estimator."
+        )
+
+    return override, "rate-override"
+
+
 def estimate_dynamic_settlement_fee(
     cli,
     *,
     vsize,
     input_sats=None,
+    chain="btc",
 ):
     """
     Derive a settlement fee from the node's current estimator
     and policy floors.
 
+    `chain` selects which per-chain feerate override is honoured, so a
+    caller on the BLAKE leg is not steered by the BTC knob.
+
     This helper does not broadcast or mutate chain state.
     """
-    estimate = cli(
-        "estimatesmartfee",
-        settlement_fee_target_blocks(),
-    )
-
-    mempool = cli(
-        "getmempoolinfo"
-    )
-
-    rate = choose_fee_rate_sat_vb(
-        estimate,
-        mempool,
-        multiplier=settlement_fee_multiplier(),
-    )
+    rate, _source = settlement_fee_rate(cli, chain)
 
     fee_sats = fee_for_vsize(
         vsize,
@@ -11341,6 +11683,7 @@ def btc_trade_minimum_sats():
     fee_sats, _rate = estimate_dynamic_settlement_fee(
         btc_cli,
         vsize=vsize,
+        chain="btc",
     )
 
     return fee_sats + 1

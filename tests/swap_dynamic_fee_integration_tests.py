@@ -32,6 +32,7 @@ def main():
 
     names = [
         "BLAKE_SWAP_BTC_SPEND_FEE_SATS",
+        "BLAKE_SWAP_BTC_SPEND_FEE_RATE",
         "BLAKE_SWAP_FEE_TARGET_BLOCKS",
         "BLAKE_SWAP_BTC_FUNDING_FEE_TARGET_BLOCKS",
         "BLAKE_SWAP_FEE_RATE_MULTIPLIER",
@@ -88,6 +89,57 @@ def main():
         # ceil(200 × 1.19 × 1.10) = 262;
         # minimum amount = 263.
         assert swap_v2.btc_trade_minimum_sats() == 263
+
+        #
+        # The rate override drives the same derivation: a client with its
+        # own view of the fee market hands over sat/vB, and the trade
+        # minimum follows the rate it named rather than the estimator's
+        # 1.19.
+        #
+        os.environ[
+            "BLAKE_SWAP_BTC_SPEND_FEE_RATE"
+        ] = "10"
+
+        # ceil(200 × 10) = 2000; minimum = 2001. Note the 1.10 multiplier
+        # from above is still set and is deliberately *not* applied: an
+        # explicit rate is the client's answer, and scaling it would be
+        # this engine answering the same question twice.
+        assert swap_v2.btc_trade_minimum_sats() == 2001, (
+            swap_v2.btc_trade_minimum_sats()
+        )
+
+        os.environ.pop(
+            "BLAKE_SWAP_BTC_SPEND_FEE_RATE",
+            None,
+        )
+
+        os.environ.pop(
+            "BLAKE_SWAP_FEE_RATE_MULTIPLIER",
+            None,
+        )
+
+        #
+        # The knobs are per chain, and `chain` is what selects one. If
+        # this helper were pinned to BTC -- as it was -- a BLAKE caller
+        # would be priced by the BTC knob.
+        #
+        os.environ[
+            "BLAKE_SWAP_BTC_SPEND_FEE_RATE"
+        ] = "50"
+
+        fee, rate = swap_v2.estimate_dynamic_settlement_fee(
+            fake_btc_cli,
+            vsize=200,
+            chain="blake",
+        )
+
+        assert rate == Decimal("1.19"), rate
+        assert fee == 238, fee
+
+        os.environ.pop(
+            "BLAKE_SWAP_BTC_SPEND_FEE_RATE",
+            None,
+        )
 
         print(
             "PASS: swap dynamic fee integration tests"

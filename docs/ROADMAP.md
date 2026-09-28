@@ -148,11 +148,17 @@ descriptor was imported, and for an output already spent before this
 participant looked — a spent HTLC is not in `listunspent`. Both are bounded by
 the recorded anchor.
 
-Still open, and not verifiable without a live public network:
+The fee policy has been reviewed against real fee-market history rather than
+against a live node: mempool.space publishes per-block feerate percentiles, and
+`docs/PERFORMANCE_AND_RECOVERY.md` now carries the measured settlement vsizes,
+the cap arithmetic, and the minimum viable swap size for each historical fee
+environment. The finding is that the percentage cap, not the estimator, decides
+whether a small swap can settle — a documented constraint now, not an open
+question.
 
-- a review of the fee policy against real mempool conditions;
-- the RPC timeout and retry posture against a node that is merely slow rather
-  than down.
+Still open, and needing a *failing* node rather than a public one: the RPC
+timeout and retry posture against a node that is merely slow rather than down.
+That wants a node that can be made to stall, which the regtest rig can do.
 
 ## 4. Wire compatibility and legacy messages
 

@@ -17,6 +17,7 @@ from swap_wire import (  # noqa: E402
     WireError,
     decode_message,
     encode_message,
+    format_amount,
     sha256_hex,
     validate_message,
 )
@@ -328,6 +329,72 @@ def main():
         bad = dict(offer)
         mutate(bad)
         expect_reject(name + " is rejected", bad)
+
+    #
+    # Amounts carry at most 8 decimal places, because that is the
+    # protocol's smallest unit. Anything finer cannot be put on a chain,
+    # so accepting it would let the message and the settlement disagree
+    # about the trade.
+    #
+    for name, value in (
+        ("an amount finer than one base unit", "0.123456789"),
+        ("an amount one base unit too fine", "0.000000001"),
+    ):
+        bad = dict(offer)
+        bad["blake_amount"] = value
+        expect_reject(name + " is rejected", bad)
+
+    for value in ("0.00000001", "1", "10", "21000000"):
+        good = dict(offer)
+        good["blake_amount"] = value
+
+        try:
+            validate_message(good)
+        except WireError as e:
+            fail(f"{value} is accepted as an amount: {e}")
+            break
+    else:
+        ok("amounts at or above one base unit are accepted")
+
+    #
+    # The canonical rendering is a plain decimal string, never exponent
+    # notation, so independent implementations can produce a
+    # byte-identical payload.
+    #
+    for raw, expected in (
+        ("10.0", "10"),
+        ("0.2", "0.2"),
+        ("0.10000000", "0.1"),
+        ("21000000", "21000000"),
+        ("0.00000001", "0.00000001"),
+    ):
+        rendered = format_amount(raw)
+
+        if rendered != expected:
+            fail(f"format_amount({raw!r}) is {rendered!r}, expected {expected!r}")
+            break
+
+        if "E" in rendered or "e" in rendered:
+            fail(f"format_amount({raw!r}) used exponent notation")
+            break
+    else:
+        ok("amounts render canonically")
+
+    for name, value in (
+        ("a non-numeric amount", "abc"),
+        ("a zero amount", "0"),
+        ("a negative amount", "-1"),
+        ("a non-finite amount", "NaN"),
+    ):
+        try:
+            format_amount(value)
+        except WireError:
+            continue
+
+        fail(f"{name} was rendered instead of refused")
+        break
+    else:
+        ok("unrepresentable amounts are refused when rendering")
 
     #
     # Every settlement type has its own validator, so each one needs at

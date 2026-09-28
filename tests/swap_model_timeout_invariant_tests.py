@@ -14,7 +14,7 @@ def test_cross_chain_timeout_heights_are_not_ordered():
         state=State.OFFERED.value,
         created_at=1,
 
-        blake_amount=0.0001,
+        blake_amount_base_units=10_000,
         btc_sats=2730,
 
         secret_hex=None,

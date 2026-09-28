@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from decimal import Decimal
 import os
 import re
 import subprocess
@@ -659,7 +660,7 @@ def test_timeout_refresh() -> None:
 
     original_secret = before["secret_hex"]
     original_hash = before["secret_hash"]
-    original_blake = before["blake_amount"]
+    original_blake = before["blake_amount_base_units"]
     original_sats = before["btc_sats"]
 
     swap_cmd(
@@ -689,7 +690,7 @@ def test_timeout_refresh() -> None:
     )
 
     require(
-        after["blake_amount"] == original_blake,
+        after["blake_amount_base_units"] == original_blake,
         "timeout refresh changed BLAKE amount",
     )
 
@@ -770,9 +771,7 @@ def test_timeout_refresh() -> None:
                 "swap_id": swap_id,
                 "chain": "blake",
                 "address": "test-only",
-                "amount": str(
-                    second["blake_amount"]
-                ),
+                "amount": blake_amount_wire(second),
                 "secret_hash":
                     second["secret_hash"],
             },
@@ -1384,6 +1383,28 @@ def test_refund() -> None:
     ok("refund path revealed no secret")
 
     print("refund swap:", swap_id)
+
+
+def blake_amount_wire(record) -> str:
+    """
+    The canonical wire rendering of a stored swap's BLAKE amount.
+
+    State records carry `blake_amount_base_units` as an integer; earlier
+    records carried `blake_amount` as a JSON number. Suites that hand
+    build wire messages must render the *same* string the engine would,
+    so the formatting lives here once instead of being re-derived (and
+    drifting) in each suite.
+    """
+    if record.get("blake_amount_base_units") is not None:
+        units = int(record["blake_amount_base_units"])
+    else:
+        units = int(
+            Decimal(str(record["blake_amount"])) * Decimal(100_000_000)
+        )
+
+    value = Decimal(units) / Decimal(100_000_000)
+
+    return format(value.normalize(), "f")
 
 
 def message_file(swap_id: str, message_type: str) -> Path:
@@ -3478,7 +3499,12 @@ def test_reverse_market_bob_selection() -> None:
                 public_swap,
             ):
                 built["swap_id"] = public_swap.swap_id
-                built["blake_amount"] = public_swap.blake_amount
+                built["blake_amount"] = blake_amount_wire(
+                    {
+                        "blake_amount_base_units":
+                            public_swap.blake_amount_base_units,
+                    }
+                )
                 built["btc_sats"] = public_swap.btc_sats
 
                 event = {

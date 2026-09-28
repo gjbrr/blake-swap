@@ -5,9 +5,10 @@ import argparse
 import hashlib
 import json
 import secrets
+import sys
 import time
 import uuid
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation, ROUND_HALF_EVEN
 
 from dataclasses import dataclass, asdict
 from enum import Enum
@@ -126,6 +127,152 @@ BTC_WALLET = os.environ.get(
 
 MARKET_DIRECTION_BLAKE_FOR_BTC = "blake-for-btc"
 MARKET_DIRECTION_BTC_FOR_BLAKE = "btc-for-blake"
+
+
+#
+# BLAKE amounts are integers, like Bitcoin amounts, and BLAKE is a
+# Bitcoin fork with the same 8 decimal places. The engine stores, compares
+# and transmits base units, and only renders a decimal string for humans
+# and for the wire. The previous float representation had three
+# representations of one quantity (Python float in memory, a decimal
+# string on the wire, a tolerance-based comparison) that could disagree,
+# and 0.1 has no exact binary form.
+#
+BLAKE_DECIMALS = 8
+BLAKE_BASE_UNITS_PER_COIN = 10 ** BLAKE_DECIMALS
+BLAKE_AMOUNT_QUANTUM = Decimal(1) / Decimal(BLAKE_BASE_UNITS_PER_COIN)
+
+
+def blake_base_units(amount):
+    """
+    Convert a BLAKE amount to integer base units, exactly.
+
+    Accepts a decimal string, an int, a Decimal or a float. Anything
+    finer than 8 decimal places is refused rather than silently rounded:
+    the wire carries a decimal string, and a value the engine cannot
+    represent would be a different amount on the chain than in the
+    message.
+    """
+    if isinstance(amount, bool):
+        raise ValueError("BLAKE amount must be a number, not a boolean")
+
+    try:
+        value = Decimal(str(amount))
+    except (InvalidOperation, ValueError):
+        raise ValueError(
+            f"BLAKE amount {amount!r} is not a decimal number"
+        ) from None
+
+    if not value.is_finite():
+        raise ValueError(f"BLAKE amount {amount!r} must be finite")
+
+    if value <= 0:
+        raise ValueError("BLAKE amount must be positive")
+
+    scaled = value * BLAKE_BASE_UNITS_PER_COIN
+
+    if scaled != scaled.to_integral_value():
+        raise ValueError(
+            f"BLAKE amount {amount!r} is finer than {BLAKE_DECIMALS} "
+            "decimal places, which the protocol cannot represent"
+        )
+
+    return int(scaled)
+
+
+def blake_base_units_from_legacy(amount):
+    """
+    Convert a pre-migration stored amount, which was a float.
+
+    Legacy state was written from a Python float, so it can hold a value
+    like 0.30000000000000004 that has no exact base-unit form. Round to
+    the nearest base unit and report whether that was necessary, so the
+    migration can say what it changed rather than silently discarding
+    value.
+    """
+    value = Decimal(str(amount))
+
+    if not value.is_finite() or value <= 0:
+        raise ValueError(
+            f"legacy BLAKE amount {amount!r} is not a positive finite number"
+        )
+
+    quantized = value.quantize(
+        BLAKE_AMOUNT_QUANTUM,
+        rounding=ROUND_HALF_EVEN,
+    )
+
+    return int(quantized * BLAKE_BASE_UNITS_PER_COIN), quantized != value
+
+
+def btc_sats_from_coin(value):
+    """
+    Exact integer satoshis from a node-reported coin amount.
+
+    The node reports output values as decimal strings already quantised
+    to one satoshi, so this conversion is lossless; anything finer is
+    refused rather than rounded into a different amount.
+    """
+    if isinstance(value, bool):
+        raise ValueError("Bitcoin amount must be a number, not a boolean")
+
+    try:
+        amount = Decimal(str(value))
+    except (InvalidOperation, ValueError):
+        raise ValueError(
+            f"Bitcoin amount {value!r} is not a decimal number"
+        ) from None
+
+    if not amount.is_finite() or amount < 0:
+        raise ValueError(
+            f"Bitcoin amount {value!r} must be a non-negative finite number"
+        )
+
+    scaled = amount * Decimal(100_000_000)
+
+    if scaled != scaled.to_integral_value():
+        raise ValueError(
+            f"Bitcoin amount {value!r} is finer than one satoshi"
+        )
+
+    return int(scaled)
+
+
+def blake_amount_decimal(base_units):
+    """The exact decimal value of an integer base-unit amount."""
+    return Decimal(int(base_units)) / Decimal(BLAKE_BASE_UNITS_PER_COIN)
+
+
+def swap_blake_base_units(swap):
+    """
+    The canonical base-unit amount of a swap, or of a swap-like object.
+
+    A stored `Swap` always carries `blake_amount_base_units`. Lightweight
+    namespaces built by callers and by tests may carry only the
+    whole-coin `blake_amount`, and the message builders accept either, so
+    the tolerance lives here at the boundary rather than in storage or in
+    every caller.
+    """
+    units = getattr(swap, "blake_amount_base_units", None)
+
+    if units is not None:
+        return int(units)
+
+    return blake_base_units(getattr(swap, "blake_amount"))
+
+
+def format_blake_amount(base_units):
+    """
+    The canonical wire and human rendering of a base-unit amount.
+
+    Always a plain decimal string, never exponent notation, because the
+    wire schema requires a decimal string.
+    """
+    value = blake_amount_decimal(base_units)
+
+    rendered = format(value.normalize(), "f")
+
+    return rendered
 
 
 def market_role_labels(direction):
@@ -299,9 +446,6 @@ class Swap:
 
     created_at: int
 
-    # Alice sells this amount of BLAKE
-    blake_amount: float
-
     # Bob pays this many sats
     btc_sats: int
 
@@ -311,6 +455,16 @@ class Swap:
     # Absolute block heights for now.
     blake_timeout: int
     btc_timeout: int
+
+    # Alice sells this many BLAKE base units (an integer, exactly like
+    # satoshis).
+    #
+    # This is the canonical stored representation. The `blake_amount`
+    # property below is a derived whole-coin view, kept so display and
+    # coordination code can keep speaking in coins; it cannot drift,
+    # because it is computed from the integer. `None` only exists while a
+    # record written by an older build is being migrated.
+    blake_amount_base_units: int | None = None
 
     # v1.5 timeout-safety metadata.
     # These describe the wall-clock policy used to derive
@@ -356,6 +510,27 @@ class Swap:
     blake_refund_txid: str | None = None
     btc_refund_blockhash: str | None = None
     blake_refund_blockhash: str | None = None
+
+    @property
+    def blake_amount(self):
+        """
+        The BLAKE amount as a whole-coin float, derived from base units.
+
+        Kept so display and coordination code can keep speaking in coins,
+        while the stored and compared value stays an exact integer.
+        """
+        if self.blake_amount_base_units is None:
+            raise ValueError(
+                "swap has no BLAKE amount; the record did not migrate"
+            )
+
+        return float(
+            blake_amount_decimal(self.blake_amount_base_units)
+        )
+
+    @blake_amount.setter
+    def blake_amount(self, value):
+        self.blake_amount_base_units = blake_base_units(value)
 
     def validate(self):
         # secret_hash must always be a 32-byte SHA256 hash
@@ -406,7 +581,20 @@ class Swap:
                     "Stored secret does not match secret_hash"
                 )
 
-        if self.blake_amount <= 0:
+        if self.blake_amount_base_units is None:
+            raise ValueError(
+                "BLAKE amount is missing; a stored record must carry "
+                "blake_amount_base_units"
+            )
+
+        if isinstance(self.blake_amount_base_units, bool) or not isinstance(
+            self.blake_amount_base_units, int
+        ):
+            raise ValueError(
+                "blake_amount_base_units must be an integer"
+            )
+
+        if self.blake_amount_base_units <= 0:
             raise ValueError("BLAKE amount must be positive")
 
         if self.btc_sats <= 0:
@@ -511,6 +699,63 @@ def save_swap(swap, role="alice"):
     return path
 
 
+def migrate_swap_record(data):
+    """
+    Bring one stored swap record up to the current on-disk shape.
+
+    The only migration so far is BLAKE amounts: records written before
+    the change carry `blake_amount` as a JSON number (a Python float),
+    and records written after it carry `blake_amount_base_units` as an
+    integer. A legacy value is converted exactly where that is possible;
+    where the float cannot be represented in base units at all it is
+    rounded to the nearest one and the change is reported, because
+    silently discarding value would be worse than saying so.
+
+    Reading is non-destructive: the file is rewritten in the new shape
+    the next time anything saves it, so a record can be inspected with an
+    older build in the meantime.
+    """
+    migrated = dict(data)
+
+    legacy = migrated.pop("blake_amount", None)
+
+    if migrated.get("blake_amount_base_units") is not None:
+        if legacy is not None:
+            #
+            # Both present: the integer is canonical, but a disagreement
+            # means the record was hand-edited or half-written. Trust the
+            # integer, and say so rather than picking silently.
+            #
+            try:
+                expected = blake_base_units(legacy)
+            except ValueError:
+                expected = None
+
+            if expected is not None and expected != int(
+                migrated["blake_amount_base_units"]
+            ):
+                print(
+                    "WARNING: stored blake_amount disagrees with "
+                    "blake_amount_base_units; using the integer",
+                    file=sys.stderr,
+                )
+    elif legacy is not None:
+        base_units, rounded = blake_base_units_from_legacy(legacy)
+
+        migrated["blake_amount_base_units"] = base_units
+
+        if rounded:
+            print(
+                "WARNING: migrated legacy BLAKE amount "
+                f"{legacy!r} to {base_units} base units "
+                f"({format_blake_amount(base_units)} BLAKE), which is "
+                "the nearest representable value",
+                file=sys.stderr,
+            )
+
+    return migrated
+
+
 def load_swap(swap_id, role="alice"):
     path = swap_path(
         swap_id,
@@ -525,7 +770,7 @@ def load_swap(swap_id, role="alice"):
     with open(path) as f:
         data = json.load(f)
 
-    swap = Swap(**data)
+    swap = Swap(**migrate_swap_record(data))
     swap.validate()
 
     return swap
@@ -580,7 +825,7 @@ def make_swap(
 
         created_at=int(time.time()),
 
-        blake_amount=blake_amount,
+        blake_amount_base_units=blake_base_units(blake_amount),
         btc_sats=btc_sats,
 
         secret_hex=secret.hex(),
@@ -2522,7 +2767,9 @@ def command_fund_blake(args):
                 .get("trusted", 0)
             )
         )
-        required = Decimal(str(swap.blake_amount))
+        required = blake_amount_decimal(
+            swap.blake_amount_base_units
+        )
 
         if trusted < required:
             print()
@@ -4249,7 +4496,9 @@ def command_publish_offer(args):
     message = {
         "type": "offer",
         "swap_id": swap.swap_id,
-        "blake_amount": str(swap.blake_amount),
+        "blake_amount": format_blake_amount(
+            swap.blake_amount_base_units
+        ),
         "btc_sats": swap.btc_sats,
         "secret_hash": swap.secret_hash,
         "btc_timeout": swap.btc_timeout,
@@ -4680,7 +4929,7 @@ def command_accept_offer(args):
         state=State.OFFERED.value,
         created_at=message["created_at"],
 
-        blake_amount=float(
+        blake_amount_base_units=blake_base_units(
             message["blake_amount"]
         ),
         btc_sats=message["btc_sats"],
@@ -5001,11 +5250,9 @@ def command_receive_blake_funded(args):
             "secret_hash mismatch"
         )
 
-    if Decimal(
+    if blake_base_units(
         message["blake_amount"]
-    ) != Decimal(
-        str(swap.blake_amount)
-    ):
+    ) != swap.blake_amount_base_units:
         raise ValueError(
             "BLAKE amount mismatch"
         )
@@ -5216,12 +5463,26 @@ def verify_blake_contract(swap, verbose=True):
         .get("address")
     )
 
-    if abs(
-        actual_amount - swap.blake_amount
-    ) > 0.00000001:
+    #
+    # Compare base units exactly. A tolerance is the wrong instrument
+    # here: it accepts a chain output that is a different amount from the
+    # one the offer, the message and this record all claim, and 1e-8 of a
+    # BLAKE is still a real (if small) quantity. The node reports the
+    # output value as a decimal string, so the conversion is exact.
+    #
+    try:
+        actual_base_units = blake_base_units(actual_amount)
+    except ValueError as e:
         raise RuntimeError(
-            f"Wrong BLAKE amount: expected "
-            f"{swap.blake_amount}, found {actual_amount}"
+            f"BLAKE funding output has an unrepresentable amount: {e}"
+        ) from e
+
+    if actual_base_units != swap.blake_amount_base_units:
+        raise RuntimeError(
+            "Wrong BLAKE amount: expected "
+            f"{format_blake_amount(swap.blake_amount_base_units)} "
+            f"({swap.blake_amount_base_units} base units), found "
+            f"{actual_amount}"
         )
 
     if actual_address != expected_address:
@@ -6520,8 +6781,8 @@ def command_claim_blake(args):
         wallet=BLAKE_WALLET,
     )
 
-    amount = Decimal(
-        str(swap.blake_amount)
+    amount = blake_amount_decimal(
+        swap.blake_amount_base_units
     )
     input_sats = _coin_decimal_to_sats(amount)
 
@@ -6921,7 +7182,9 @@ def command_refund_blake(args):
         "getblockcount"
     )
 
-    amount = Decimal(str(swap.blake_amount))
+    amount = blake_amount_decimal(
+        swap.blake_amount_base_units
+    )
     input_sats = _coin_decimal_to_sats(amount)
 
     refund_path = (
@@ -9846,8 +10109,8 @@ def build_market_offer_v2_event(
 
         "direction": direction,
 
-        "blake_amount": str(
-            blake_amount
+        "blake_amount": format_blake_amount(
+            blake_base_units(blake_amount)
         ),
         "btc_sats": int(
             btc_sats
@@ -10336,8 +10599,10 @@ def build_market_take_event(
             "base": "BLAKE",
             "quote": "BTC",
 
-            "blake_amount": str(
-                offer_message["blake_amount"]
+            "blake_amount": format_blake_amount(
+                blake_base_units(
+                    offer_message["blake_amount"]
+                )
             ),
             "btc_sats": int(
                 offer_message["btc_sats"]
@@ -10393,8 +10658,10 @@ def build_market_take_event(
             "taker_role":
                 roles["taker_role"],
 
-            "blake_amount": str(
-                offer_message["blake_amount"]
+            "blake_amount": format_blake_amount(
+                blake_base_units(
+                    offer_message["blake_amount"]
+                )
             ),
             "btc_sats": int(
                 offer_message["btc_sats"]
@@ -11245,8 +11512,8 @@ def build_market_match_event(
             "base": "BLAKE",
             "quote": "BTC",
 
-            "blake_amount": str(
-                swap.blake_amount
+            "blake_amount": format_blake_amount(
+                swap_blake_base_units(swap)
             ),
             "btc_sats": int(
                 swap.btc_sats
@@ -11309,8 +11576,8 @@ def build_market_match_event(
             "taker_role":
                 roles["taker_role"],
 
-            "blake_amount": str(
-                swap.blake_amount
+            "blake_amount": format_blake_amount(
+                swap_blake_base_units(swap)
             ),
             "btc_sats": int(
                 swap.btc_sats
@@ -11549,8 +11816,8 @@ def command_publish_market_match(args):
         )
 
     if (
-        float(offer_message["blake_amount"])
-        != float(swap.blake_amount)
+        blake_base_units(offer_message["blake_amount"])
+        != swap.blake_amount_base_units
     ):
         raise RuntimeError(
             "SECURITY FAILURE: BLAKE terms "
@@ -13856,9 +14123,14 @@ def accept_reverse_market_take(
     #
     public_swap = SimpleNamespace(
         swap_id=swap_id,
-        blake_amount=selection[
-            "blake_amount"
-        ],
+        #
+        # Canonical base units, derived from the durable selection. The
+        # market match carries public terms only; it still carries an
+        # exact amount.
+        #
+        blake_amount_base_units=blake_base_units(
+            selection["blake_amount"]
+        ),
         btc_sats=selection[
             "btc_sats"
         ],
@@ -14923,10 +15195,6 @@ def scan_chain_for_expected_funding(swap, chain):
     mechanism rather than a genesis scan.
     """
 
-    from decimal import Decimal
-
-    unit = Decimal("0.00000001")
-
     if chain == "blake":
         cli = blake_cli
 
@@ -14938,9 +15206,10 @@ def scan_chain_for_expected_funding(swap, chain):
             desc
         )
 
-        expected_amount = Decimal(
-            str(swap.blake_amount)
-        ).quantize(unit)
+        expected_base_units = swap.blake_amount_base_units
+        expected_amount_text = format_blake_amount(
+            expected_base_units
+        )
 
     elif chain == "btc":
         cli = btc_cli
@@ -14953,10 +15222,12 @@ def scan_chain_for_expected_funding(swap, chain):
             desc
         )
 
-        expected_amount = (
-            Decimal(int(swap.btc_sats))
-            / Decimal(100_000_000)
-        ).quantize(unit)
+        expected_base_units = int(swap.btc_sats)
+        expected_amount_text = format(
+            (Decimal(expected_base_units) / Decimal(100_000_000))
+            .normalize(),
+            "f",
+        )
 
     else:
         raise ValueError(
@@ -15117,14 +15388,19 @@ def scan_chain_for_expected_funding(swap, chain):
                     continue
 
                 try:
-                    value = Decimal(
-                        str(output["value"])
-                    ).quantize(unit)
+                    if chain == "blake":
+                        value = blake_base_units(
+                            output["value"]
+                        )
+                    else:
+                        value = btc_sats_from_coin(
+                            output["value"]
+                        )
 
                 except Exception:
                     continue
 
-                if value != expected_amount:
+                if value != expected_base_units:
                     continue
 
                 matches.append(
@@ -15138,7 +15414,7 @@ def scan_chain_for_expected_funding(swap, chain):
                         "address":
                             expected_address,
                         "amount":
-                            str(expected_amount),
+                            expected_amount_text,
                     }
                 )
 
@@ -15195,13 +15471,14 @@ def _require_funding_output_matches(swap, chain, output):
             get_blake_contract_descriptor(swap)
         )
 
-        actual = Decimal(str(output["value"]))
-        expected = Decimal(str(swap.blake_amount))
+        actual = blake_base_units(output["value"])
 
-        if abs(actual - expected) > Decimal("0.00000001"):
+        if actual != swap.blake_amount_base_units:
             raise RuntimeError(
-                "Recorded BLAKE funding has the wrong amount: "
-                f"expected {swap.blake_amount}, found {output['value']}"
+                "Recorded BLAKE funding has the wrong amount: expected "
+                f"{format_blake_amount(swap.blake_amount_base_units)} "
+                f"({swap.blake_amount_base_units} base units), found "
+                f"{output['value']}"
             )
 
     elif chain == "btc":
@@ -15209,9 +15486,7 @@ def _require_funding_output_matches(swap, chain, output):
             get_btc_contract_descriptor(swap)
         )
 
-        actual = int(
-            Decimal(str(output["value"])) * Decimal(100_000_000)
-        )
+        actual = btc_sats_from_coin(output["value"])
 
         if actual != int(swap.btc_sats):
             raise RuntimeError(
@@ -16163,20 +16438,18 @@ def _reconcile_observe_htlc(swap, chain):
                         )
                     )
 
-                    actual_amount = Decimal(
-                        str(utxo["value"])
-                    )
-                    expected_amount = Decimal(
-                        str(work.blake_amount)
+                    actual_amount = blake_base_units(
+                        utxo["value"]
                     )
 
                     if (
-                        abs(actual_amount - expected_amount)
-                        > Decimal("0.00000001")
+                        actual_amount
+                        != work.blake_amount_base_units
                     ):
                         raise RuntimeError(
                             "Wrong BLAKE amount: expected "
-                            f"{work.blake_amount}, "
+                            f"{format_blake_amount(work.blake_amount_base_units)} "
+                            f"({work.blake_amount_base_units} base units), "
                             f"found {utxo['value']}"
                         )
 
@@ -16193,9 +16466,8 @@ def _reconcile_observe_htlc(swap, chain):
                         )
                     )
 
-                    actual_sats = int(
-                        Decimal(str(utxo["value"]))
-                        * Decimal(100_000_000)
+                    actual_sats = btc_sats_from_coin(
+                        utxo["value"]
                     )
 
                     if actual_sats != work.btc_sats:
@@ -16307,20 +16579,20 @@ def _reconcile_observe_htlc(swap, chain):
                             )
                         )
 
-                        actual_amount = Decimal(
-                            str(funding_output["value"])
-                        )
-                        expected_amount = Decimal(
-                            str(work.blake_amount)
+                        actual_amount = blake_base_units(
+                            funding_output["value"]
                         )
 
                         if (
-                            abs(actual_amount - expected_amount)
-                            > Decimal("0.00000001")
+                            actual_amount
+                            != work.blake_amount_base_units
                         ):
                             raise RuntimeError(
                                 "recorded pending BLAKE funding "
-                                "has the wrong amount"
+                                "has the wrong amount: expected "
+                                f"{format_blake_amount(work.blake_amount_base_units)} "
+                                f"({work.blake_amount_base_units} base "
+                                f"units), found {funding_output['value']}"
                             )
 
                     else:
@@ -16330,9 +16602,8 @@ def _reconcile_observe_htlc(swap, chain):
                             )
                         )
 
-                        actual_sats = int(
-                            Decimal(str(funding_output["value"]))
-                            * Decimal(100_000_000)
+                        actual_sats = btc_sats_from_coin(
+                            funding_output["value"]
                         )
 
                         if actual_sats != int(work.btc_sats):
@@ -16799,7 +17070,9 @@ def _reconcile_execution_readiness(
                 "BLAKE_SWAP_RUN_BLAKE_FEE_RESERVE must be >= 0"
             )
 
-        required = Decimal(str(swap.blake_amount)) + fee_reserve
+        required = blake_amount_decimal(
+            swap.blake_amount_base_units
+        ) + fee_reserve
         remaining = int(swap.blake_timeout) - int(blake_height)
 
         minimum_blocks = int(

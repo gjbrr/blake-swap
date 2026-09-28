@@ -139,7 +139,7 @@ def main():
         "--secret-hash",
         alice["secret_hash"],
         "--blake-amount",
-        str(alice["blake_amount"]),
+        h.blake_amount_wire(alice),
         "--blake-timeout",
         str(alice["blake_timeout"]),
         "--txid",

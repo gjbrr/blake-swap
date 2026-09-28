@@ -35,6 +35,11 @@ class WireError(ValueError):
 
 
 SWAP_ID_RE = re.compile(r"^[0-9a-f]{12}$")
+#
+# BLAKE amounts carry at most 8 decimal places, like the chain.
+#
+AMOUNT_DECIMALS = 8
+
 HEX_32_RE = re.compile(r"^[0-9a-f]{64}$")
 PUBKEY_RE = re.compile(r"^(02|03)[0-9a-f]{64}$")
 
@@ -283,7 +288,47 @@ def _require_amount(
             f"{field} must be positive"
         )
 
+    #
+    # The protocol's smallest unit is one base unit (8 decimal places,
+    # matching the chain). An amount finer than that cannot be put on a
+    # chain, so accepting it would mean the message and the settlement
+    # disagree about the trade. Refuse it rather than rounding.
+    #
+    scaled = amount * (10 ** AMOUNT_DECIMALS)
+
+    if scaled != scaled.to_integral_value():
+        raise WireError(
+            f"{field} must not be finer than {AMOUNT_DECIMALS} decimal "
+            "places"
+        )
+
     return amount
+
+
+def format_amount(value) -> str:
+    """
+    The canonical decimal rendering of a wire amount.
+
+    Always a plain decimal string, never exponent notation, and never
+    finer than the protocol's smallest unit. Independent implementations
+    can use this to produce a byte-identical payload.
+    """
+    try:
+        amount = Decimal(str(value))
+    except InvalidOperation as e:
+        raise WireError(
+            f"amount {value!r} is not a decimal number"
+        ) from e
+
+    if not amount.is_finite() or amount <= 0:
+        raise WireError("amount must be a positive finite decimal")
+
+    rendered = format(amount.normalize(), "f")
+
+    if Decimal(rendered) != amount:
+        raise WireError("amount lost precision while rendering")
+
+    return rendered
 
 
 def _validate_common(

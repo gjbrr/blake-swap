@@ -169,7 +169,7 @@ def main():
         "offer",
         {
             "blake_amount":
-                str(alice["blake_amount"]),
+                h.blake_amount_wire(alice),
 
             "btc_sats":
                 int(alice["btc_sats"]),
@@ -300,7 +300,7 @@ def main():
                 alice["secret_hash"],
 
             "blake_amount":
-                str(alice["blake_amount"]),
+                h.blake_amount_wire(alice),
 
             "blake_timeout":
                 int(alice["blake_timeout"]),

@@ -216,9 +216,23 @@ fallback: `validate_v15_offer_timeouts()` raises
 Known fields only. Unknown fields are rejected by the canonical
 validator.
 
-`blake_amount` is a JSON **string** containing a decimal value. It is
-serialized from a Python float, so an integer amount appears as
-`"10.0"`.
+`blake_amount` is a JSON **string** containing a decimal value with at
+most **8 decimal places**, which is the protocol's smallest unit (BLAKE is
+a Bitcoin fork, so one base unit is `0.00000001` BLAKE). It is rendered
+from an integer base-unit amount, so an integer amount appears as `"10"`,
+not `"10.0"`, and an amount can never be transmitted in a form the chain
+cannot represent. A value finer than one base unit is rejected rather than
+rounded, at both ends: the engine refuses to construct it, and the
+canonical validator refuses to accept it.
+
+The engine stores, compares and transmits base units; the whole-coin
+decimal is derived for the wire and for display. Earlier builds stored a
+Python float in the swap record and compared amounts with a `1e-8`
+tolerance, which accepted an output exactly one base unit away from the
+agreed amount. Records written by those builds are migrated on load: an
+amount with an exact base-unit form is converted exactly, and one without
+(it was written from a float) is rounded to the nearest base unit *and the
+rounding is reported* rather than applied silently.
 
 ### 4.2 `accept`
 

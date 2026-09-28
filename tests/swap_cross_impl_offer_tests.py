@@ -97,7 +97,7 @@ def main():
         "--swap-id",
         swap_id,
         "--blake-amount",
-        str(alice["blake_amount"]),
+        h.blake_amount_wire(alice),
         "--btc-sats",
         str(alice["btc_sats"]),
         "--secret-hash",
@@ -171,8 +171,8 @@ def main():
         )
 
     if (
-        float(bob["blake_amount"])
-        != float(alice["blake_amount"])
+        float(h.blake_amount_wire(bob))
+        != float(h.blake_amount_wire(alice))
     ):
         raise RuntimeError(
             "Bob imported different BLAKE amount"

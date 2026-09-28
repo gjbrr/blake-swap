@@ -33,6 +33,31 @@ set -uo pipefail
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 #
+# One run at a time.
+#
+# Two concurrent runs share the regtest rig: its wallets, its mempool and
+# its block heights. The failures that produces look like engine bugs -- a
+# timelock that fires early, a settlement fee that will not converge, a
+# suite that passes on its own and fails when it does not -- and they cost
+# far more to diagnose than this lock does. Set BLAKE_SWAP_NO_RUN_LOCK=1 on
+# a host that keeps deliberately separate rigs.
+#
+if [[ "${BLAKE_SWAP_NO_RUN_LOCK:-0}" != "1" ]] && command -v flock >/dev/null 2>&1; then
+    RUN_LOCK_DIR="${BLAKE_SWAP_TEST_ROOT:-$HOME/.blake-swap-test}"
+
+    mkdir -p "$RUN_LOCK_DIR" 2>/dev/null || true
+
+    exec 9>"$RUN_LOCK_DIR/run.lock"
+
+    if ! flock -n 9; then
+        echo "ERROR: another test run already holds $RUN_LOCK_DIR/run.lock" >&2
+        echo "       Two runs share the rig, so both sets of results are suspect." >&2
+        echo "       Wait for it to finish, or set BLAKE_SWAP_NO_RUN_LOCK=1 to override." >&2
+        exit 2
+    fi
+fi
+
+#
 # Only participant/session state is cleared. Node configuration is
 # preserved, because the integration harness resolves its nodes from it.
 #

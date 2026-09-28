@@ -112,6 +112,106 @@ def main():
                 "excessive BTC override bypassed safety cap"
             )
 
+        #
+        # The absolute cap is the control a percentage cannot express.
+        # 200 sats is under 10% of 2,500, so only this knob can refuse it.
+        #
+        absolute_name = "BLAKE_SWAP_MAX_SETTLEMENT_FEE_SATS"
+        old_absolute = os.environ.pop(absolute_name, None)
+
+        # The previous case left an excessive override set; clear it so the
+        # absolute cap is what this section is testing.
+        os.environ.pop(override_name, None)
+
+        try:
+            os.environ[absolute_name] = "100"
+
+            try:
+                swap_v2.build_dynamic_settlement_spend(
+                    chain="btc",
+                    cli=cli,
+                    input_sats=2500,
+                    build_finalized=lambda fee: "btc-fee-200",
+                )
+            except ValueError as exc:
+                assert "safety cap" in str(exc), exc
+                assert "BLAKE_SWAP_MAX_SETTLEMENT_FEE_SATS" in str(exc), exc
+            else:
+                raise AssertionError(
+                    "the absolute settlement fee cap did not bind"
+                )
+
+            # A cap that permits the dynamic answer changes nothing else:
+            # 131 vB at 1.19 sat/vB is 156 sats either way.
+            os.environ[absolute_name] = "250"
+
+            permitted = swap_v2.build_dynamic_settlement_spend(
+                chain="btc",
+                cli=cli,
+                input_sats=2500,
+                build_finalized=lambda fee: "btc-fee-200",
+            )
+
+            assert permitted["fee_sats"] == 156, permitted
+            assert permitted["fee_sats"] <= 250
+
+            #
+            # And it applies to the explicit override path too: the
+            # percentage ceiling already does, so an operator cannot use
+            # `BLAKE_SWAP_BTC_SPEND_FEE_SATS` to get past this one either.
+            #
+            os.environ[override_name] = "200"
+            os.environ[absolute_name] = "100"
+
+            try:
+                swap_v2.build_dynamic_settlement_spend(
+                    chain="btc",
+                    cli=cli,
+                    input_sats=2500,
+                    build_finalized=lambda fee: "btc-fee-200",
+                )
+            except ValueError as exc:
+                assert "safety cap" in str(exc), exc
+            else:
+                raise AssertionError(
+                    "an explicit override bypassed the absolute fee cap"
+                )
+
+            os.environ[absolute_name] = "250"
+
+            overridden = swap_v2.build_dynamic_settlement_spend(
+                chain="btc",
+                cli=cli,
+                input_sats=2500,
+                build_finalized=lambda fee: "btc-fee-200",
+            )
+
+            assert overridden["source"] == "override", overridden
+            assert overridden["fee_sats"] == 200, overridden
+            os.environ.pop(override_name, None)
+
+            for bad in ("0", "-5", "abc"):
+                os.environ[absolute_name] = bad
+
+                try:
+                    swap_v2.build_dynamic_settlement_spend(
+                        chain="btc",
+                        cli=cli,
+                        input_sats=2500,
+                        build_finalized=lambda fee: "btc-fee-200",
+                    )
+                except ValueError as exc:
+                    assert absolute_name in str(exc), exc
+                else:
+                    raise AssertionError(
+                        f"an absolute cap of {bad!r} was accepted"
+                    )
+        finally:
+            if old_absolute is None:
+                os.environ.pop(absolute_name, None)
+            else:
+                os.environ[absolute_name] = old_absolute
+
         print(
             "PASS: BTC dynamic settlement tests"
         )

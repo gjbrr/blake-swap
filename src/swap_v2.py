@@ -32,6 +32,8 @@ from fee_policy import (
     choose_fee_rate_sat_vb,
     fee_for_vsize,
     enforce_fee_cap,
+    ABSOLUTE_CAP_ENV,
+    PERCENT_CAP_ENV,
 )
 
 import subprocess
@@ -7562,6 +7564,7 @@ def build_dynamic_settlement_spend(
             override,
             input_sats,
             max_percent=settlement_fee_cap_percent(),
+            absolute_cap_sats=settlement_fee_absolute_cap_sats(),
         )
 
         tx_hex = build_finalized(override)
@@ -7602,6 +7605,7 @@ def build_dynamic_settlement_spend(
             fee_sats,
             input_sats,
             max_percent=settlement_fee_cap_percent(),
+            absolute_cap_sats=settlement_fee_absolute_cap_sats(),
         )
 
         tx_hex = build_finalized(fee_sats)
@@ -7616,6 +7620,8 @@ def build_dynamic_settlement_spend(
             required_fee,
             input_sats,
             max_percent=settlement_fee_cap_percent(),
+            absolute_cap_sats=settlement_fee_absolute_cap_sats(),
+            vsize=vsize,
         )
 
         #
@@ -11197,16 +11203,41 @@ def settlement_fee_multiplier():
 def settlement_fee_cap_percent():
     value = Decimal(
         os.environ.get(
-            "BLAKE_SWAP_MAX_SETTLEMENT_FEE_PERCENT",
+            PERCENT_CAP_ENV,
             "10",
         )
     )
 
     if value <= 0 or value >= 100:
         raise ValueError(
-            "BLAKE_SWAP_MAX_SETTLEMENT_FEE_PERCENT "
-            "must be > 0 and < 100"
+            f"{PERCENT_CAP_ENV} must be > 0 and < 100"
         )
+
+    return value
+
+
+def settlement_fee_absolute_cap_sats():
+    """
+    An optional cap on the absolute settlement fee, in sat-units.
+
+    `enforce_fee_cap` has always accepted one; nothing could reach it. It
+    is the control that a percentage cannot express: on a large HTLC a
+    percentage cap can permit a fee far larger than the operator wants to
+    pay, and the mitigation is a flat ceiling rather than a smaller share.
+    Unset means no absolute cap, so the percentage governs alone.
+    """
+    raw = os.environ.get(ABSOLUTE_CAP_ENV, "").strip()
+
+    if not raw:
+        return None
+
+    try:
+        value = int(raw)
+    except ValueError as e:
+        raise ValueError(f"{ABSOLUTE_CAP_ENV} must be an integer") from e
+
+    if value < 1:
+        raise ValueError(f"{ABSOLUTE_CAP_ENV} must be >= 1")
 
     return value
 
@@ -11273,6 +11304,8 @@ def estimate_dynamic_settlement_fee(
             fee_sats,
             input_sats,
             max_percent=settlement_fee_cap_percent(),
+            absolute_cap_sats=settlement_fee_absolute_cap_sats(),
+            vsize=vsize,
         )
 
     return fee_sats, rate

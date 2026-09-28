@@ -217,7 +217,6 @@ def test_descriptor_templates_documented(docs):
     The docs describe the HTLC clauses. They must match the engine's
     actual descriptor templates, clause for clause.
     """
-    source = (SRC / "swap_v2.py").read_text()
     protocol = (DOCS_DIR / "PROTOCOL.md").read_text()
 
     def normalise(text):
@@ -244,20 +243,103 @@ def test_descriptor_templates_documented(docs):
                 f"PROTOCOL.md is missing descriptor clause {fragment}"
             )
 
-    # The engine must actually use each of those clauses.
-    for needle in (
-        "v:pk({swap.blake_bob_pub})",
-        "sha256({swap.secret_hash})",
-        "v:after({swap.blake_timeout})",
-        "pk({swap.blake_alice_pub})",
-        "v:pk({swap.btc_alice_pub})",
-        "v:after({swap.btc_timeout})",
-        "pk({swap.btc_bob_pub})",
-    ):
-        if needle not in source:
-            problems.append(
-                f"engine no longer contains expected template {needle}"
-            )
+    #
+    # Compare the *rendered* descriptor, not the source text. Grepping for
+    # interpolation literals made this check fail on a refactor that kept
+    # the clauses identical, which is a false alarm; rendering the real
+    # template tests what actually reaches the chain.
+    #
+    sys.path.insert(0, str(SRC))
+
+    import swap_v2
+
+    probe = swap_v2.Swap(
+        swap_id="0123456789ab",
+        state=swap_v2.State.OFFERED.value,
+        created_at=1,
+        btc_sats=25000,
+        secret_hex=None,
+        secret_hash="11" * 32,
+        blake_timeout=1000,
+        btc_timeout=900,
+        blake_amount_base_units=10_000_000,
+        blake_alice_pub="02" + "aa" * 32,
+        blake_bob_pub="02" + "bb" * 32,
+        btc_alice_pub="02" + "cc" * 32,
+        btc_bob_pub="02" + "dd" * 32,
+    )
+
+    rendered = {
+        "blake": swap_v2.htlc_descriptor_body(probe, "blake"),
+        "btc": swap_v2.htlc_descriptor_body(probe, "btc"),
+    }
+
+    expected = {
+        "blake": [
+            "wsh(or_i(",
+            "and_v(v:pk(" + probe.blake_bob_pub + "),"
+            "sha256(" + probe.secret_hash + "))",
+            "and_v(v:after(" + str(probe.blake_timeout) + "),"
+            "pk(" + probe.blake_alice_pub + "))",
+            "))",
+        ],
+        "btc": [
+            "wsh(or_i(",
+            "and_v(v:pk(" + probe.btc_alice_pub + "),"
+            "sha256(" + probe.secret_hash + "))",
+            "and_v(v:after(" + str(probe.btc_timeout) + "),"
+            "pk(" + probe.btc_bob_pub + "))",
+            "))",
+        ],
+    }
+
+    for chain, fragments in expected.items():
+        body = rendered[chain]
+        position = 0
+
+        for fragment in fragments:
+            found = body.find(fragment, position)
+
+            if found < 0:
+                problems.append(
+                    f"the {chain} HTLC template does not contain "
+                    f"{fragment!r} in the documented order: {body}"
+                )
+                break
+
+            position = found + len(fragment)
+
+        for forbidden in ("OP_DROP", "raw("):
+            if forbidden in body:
+                problems.append(
+                    f"the {chain} HTLC template contains {forbidden}"
+                )
+
+    #
+    # And the private-key form must be the same script with the key
+    # substituted: that is what makes a descriptor import able to recover
+    # a wallet that lost the key.
+    #
+    with_key = swap_v2.htlc_descriptor_body(
+        probe,
+        "blake",
+        {probe.blake_alice_pub: "cTestWif"},
+    )
+
+    if probe.blake_alice_pub in with_key:
+        problems.append(
+            "substituting a private key left the public key in place"
+        )
+
+    if "cTestWif" not in with_key:
+        problems.append(
+            "substituting a private key did not reach the descriptor"
+        )
+
+    if probe.blake_bob_pub not in with_key:
+        problems.append(
+            "substituting one key removed the counterparty's key"
+        )
 
     check("documented HTLC clauses match the engine templates", problems)
 

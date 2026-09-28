@@ -1,6 +1,6 @@
 # BLAKE Swap Test Suites
 
-49 suites covering the atomic-swap engine, the wire format, the market
+50 suites covering the atomic-swap engine, the wire format, the market
 state machine, crash recovery, reorganization safety,
 independent-implementation compatibility, and documentation alignment.
 
@@ -37,7 +37,7 @@ List suites and their prerequisites:
 | Class | Needs | Count |
 |---|---|---|
 | `unit` | nothing (some need the declared Python deps) | 23 |
-| `regtest` | reachable Bitcoin + BLAKE regtest nodes | 24 |
+| `regtest` | reachable Bitcoin + BLAKE regtest nodes | 25 |
 | `nostr` | regtest nodes, real relays, two participant keys | 2 |
 
 The two `nostr` suites publish to real relays and are therefore
@@ -259,7 +259,7 @@ honest reading — run `scripts/test-nodes start` first.
 | `node_config_tests.py` | node resolution: environment first, then a running rig, then conventional paths; a stopped or corrupt rig state file degrades to a skip instead of a wrong target |
 | `fail_closed_tests.py` | refusal behaviour when preconditions fail: corrupted state files, unknown swap IDs, mismatched chain identities, missing preimages, and unconfirmed settlements all stop the command instead of acting on a guess, and no on-disk state is mutated |
 
-### Regtest suites — need chain nodes (24)
+### Regtest suites — need chain nodes (25)
 
 **Core protocol**
 
@@ -270,6 +270,7 @@ honest reading — run `scripts/test-nodes start` first.
 | `pre_btc_refund_tests.py` | Alice must be able to abort and refund BLAKE before Bob funds Bitcoin |
 | `swap_reverse_market_flow_tests.py` | the **reverse** (`btc-for-blake`) market path, where the maker is protocol Bob and the **taker** creates the secret: proves the maker reserves the swap and signs the match without ever holding S |
 | `swap_encrypted_coordination_tests.py` | the opt-in encrypted coordination mode over the relay stub: a real encrypted offer/accept handshake, the offer staying plaintext because it is first contact, ciphertext that leaks no message field, and refusals in both directions (an encrypted participant refuses a plaintext downgrade; a plaintext participant refuses content it cannot read) |
+| `htlc_key_recovery_tests.py` | the key-recovery drill on regtest: an HTLC funded to a refund key the wallet has **never held**, the `recovery-plan` command's report, importing the private descriptor into a fresh wallet (with its own checksum and `timestamp: "now"`), and that wallet then performing the actual refund |
 | `swap_driver_surface_tests.py` | the operator/driver surface on a live swap: `next` converging one safe step at a time, refusing to fund, and refusing to choose between two negotiations or two funding-ready trades, `dashboard` and `dashboard --json`, read-only `reconcile` (JSON and human), `show`/`list`, `ignore-match` tombstones, `dismiss` archiving only provably unfunded swaps, `sync-funding` discovering funding from the chain, and `resume` driving settlement to COMPLETE |
 | `swap_market_flow_tests.py` | the **marketplace** path end to end on regtest over the local relay stub: publish-market-offer → take → accept-market-take → accept-market-match → settle to COMPLETE, plus a cancel flow and read-only reconciliation |
 | `swap_participant_isolation_tests.py` | distinct participant state roots and no cross-participant state |

@@ -64,35 +64,53 @@ What remains before it can be described as generally deployable:
 
 ## 2. Watch-only HTLC descriptor import
 
-**Status: planned, after the recovery procedure.**
+**Status: the manual procedure is implemented and tested; automatic import is
+planned.**
+
+`scripts/blake engine recovery-plan <swap-id>` reports the descriptor, its checksum,
+the funding outpoint, which branch is yours, whether the wallet can currently
+spend it, and the import and spend steps. `docs/KEY_RECOVERY.md` is the
+procedure, and `tests/htlc_key_recovery_tests.py` performs it end to end: an
+HTLC is funded to a refund key the wallet has never held, the private
+descriptor is imported into a fresh wallet, and that wallet refunds.
+
+Three constraints were confirmed against the node while building it, and they
+are the reason automatic import needs care rather than being a one-liner:
+
+- `getdescriptorinfo` returns the **public** canonical form even when the input
+  carried a private key, while its `checksum` belongs to the input string. A
+  private-key import must therefore checksum its own string; importing the
+  returned `descriptor` fails with "Cannot import descriptor without private
+  keys to a wallet with private keys enabled", and appending the checksum to an
+  already-checksummed descriptor fails with "Multiple '#' symbols".
+- `deriveaddresses` requires a checksummed descriptor.
+- `BLAKE_SWAP_BLAKE_WALLET` / `BLAKE_SWAP_BTC_WALLET` outrank
+  `BLAKE_SWAP_CHAIN_WALLET`, so pointing a command at a recovered wallet means
+  setting the chain-specific variable.
+
+What automatic import still needs:
 
 The participant wallet currently holds the private keys behind the
 addresses used for HTLC claim and refund. A wallet restore that loses those
 keys makes both the claim and the refund impossible. Signing depends on
 them being present.
 
-The plan is to import each swap's HTLC descriptor as watch-only, with the
-private keys where the participant holds them, so a restored wallet can
-still spend. Two facts constrain how this has to be done, and both were
-verified against Bitcoin Core:
+- importing the descriptor at swap creation (or at first funding), with
+  `"timestamp": "now"`, so a participant is never in the position of holding a
+  swap it cannot spend;
+- deciding whether to import into the participant's existing wallet or a
+  dedicated watch-only wallet, since Core v30 will not let one wallet mix
+  watch-only and private-key descriptors;
+- reporting, in `dashboard`, a swap whose HTLC address is not solvable by the
+  current wallet — the condition this whole document exists to fix.
 
-- The engine already asks the node to compile the policy
-  (`wsh(or_i(and_v(v:pk(A),sha256(H)),and_v(v:after(T),pk(B))))`), so the
-  funded script is the node's Miniscript compilation. The descriptor is
-  therefore the source of truth and matches the output by construction.
-- `importdescriptors` requires the checksum returned by
-  `getdescriptorinfo` **on the exact string being imported**. Substituting
-  the participant's WIF for their own pubkey changes the checksum, so the
-  private-key form must be checksummed separately.
-- Import must use `"timestamp": "now"` for a descriptor that has not been
-  funded yet, to avoid a chain rescan. Note that one `"timestamp": 0` item
-  in a batch forces a full rescan for the whole batch.
-- An HTLC **claim** cannot be signed from a raw transaction over RPC: the
-  signing path needs the SHA256 preimage, which Core only accepts through a
-  PSBT input field (`PSBT_IN_SHA256`, BIP174 type `0x0a`). The engine
-  already constructs claims as PSBTs with the preimage injected, which is
-  why this is a documentation and import problem rather than a signing
-  rewrite. Refunds sign normally from a raw transaction.
+Already established: the engine asks the node to compile the policy
+(`wsh(or_i(and_v(v:pk(A),sha256(H)),and_v(v:after(T),pk(B))))`), so the funded
+script is the node's Miniscript compilation and the descriptor matches the
+output by construction. An HTLC **claim** also cannot be signed from a raw
+transaction over RPC at all, because the preimage reaches Core only through a
+PSBT input field (`PSBT_IN_SHA256`); the engine already builds claims that way,
+so that part needs no change.
 
 ## 3. Public-network observation and scanning
 

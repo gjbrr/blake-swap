@@ -107,6 +107,7 @@ REGTEST_SUITES=(
     tests/swap_participant_isolation_tests.py
     tests/swap_driver_surface_tests.py
     tests/swap_encrypted_coordination_tests.py
+    tests/htlc_key_recovery_tests.py
 )
 
 NOSTR_SUITES=(

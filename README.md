@@ -156,7 +156,7 @@ scripts/
   stability-check          static safety-invariant checks
   wire_inventory.py        regenerate the wire message inventory
 
-tests/                     49 suites: unit tests and regtest integration
+tests/                     50 suites: unit tests and regtest integration
 tools/minimal_*.py         independent wire-message producers
 checkpoints/v1.5/          frozen earlier snapshot with SHA256SUMS
 ```
@@ -171,7 +171,7 @@ Node-free unit suites run anywhere:
 ./scripts/test.sh --unit-only
 ```
 
-The full suite covers all 49 test files, including the regtest
+The full suite covers all 50 test files, including the regtest
 integration suites and the independent-implementation wire suites. The
 regtest suites need two chain nodes; `scripts/test-nodes` starts a
 disposable Bitcoin Core + Bitcoin Knots rig for them:
@@ -209,6 +209,7 @@ silently omitting them.
 | `docs/REGTEST_TWO_HOST.md` | step-by-step two-host reproduction, health checks, troubleshooting |
 | `docs/PERFORMANCE_AND_RECOVERY.md` | why live coordination, historical recovery, and chain settlement are separated |
 | `docs/ROADMAP.md` | known, scoped work that is not yet done, and what is deliberately deferred |
+| `docs/KEY_RECOVERY.md` | recovering an HTLC after a wallet key loss: the recovery plan, the descriptor-import traps, and how to spend each branch |
 | `tests/README.md` | test suite inventory, prerequisites, and node configuration |
 | `CONTRIBUTOR_ORIENTATION.md` | orientation for new contributors |
 

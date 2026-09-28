@@ -1133,6 +1133,75 @@ def btc_cli(*args, wallet=None):
 
     return _call_chain_cli("Bitcoin", cmd, wallet, args)
 
+def htlc_descriptor_body(swap, chain, private_keys=None):
+    """
+    The swap's HTLC descriptor, optionally carrying private keys.
+
+    Both branches are of the form:
+
+        wsh(or_i(and_v(v:pk(CLAIMER),sha256(H)),
+                 and_v(v:after(T),pk(REFUNDER))))
+
+    `private_keys` maps a compressed public key to the WIF (or extended
+    private key) that controls it, so a participant can build the
+    descriptor *their* wallet can sign with while the counterparty's key
+    stays public.
+
+    Substituting a key changes the descriptor string, and therefore its
+    checksum: `getdescriptorinfo` must be run again on the substituted
+    form. That is why this returns the body rather than a checksummed
+    descriptor.
+
+    The engine funds whatever the node compiles from this body, so the
+    body is the single source of truth for the HTLC's script.
+    """
+
+    keys = private_keys or {}
+
+    def render(pubkey):
+        return keys.get(pubkey, pubkey)
+
+    if chain == "blake":
+        return (
+            "wsh(or_i("
+            f"and_v(v:pk({render(swap.blake_bob_pub)}),"
+            f"sha256({swap.secret_hash})),"
+            f"and_v(v:after({swap.blake_timeout}),"
+            f"pk({render(swap.blake_alice_pub)}))"
+            "))"
+        )
+
+    if chain == "btc":
+        return (
+            "wsh(or_i("
+            f"and_v(v:pk({render(swap.btc_alice_pub)}),"
+            f"sha256({swap.secret_hash})),"
+            f"and_v(v:after({swap.btc_timeout}),"
+            f"pk({render(swap.btc_bob_pub)}))"
+            "))"
+        )
+
+    raise ValueError(f"Unknown HTLC chain: {chain}")
+
+
+def descriptor_checksum(body, cli):
+    """The 8-character checksum `importdescriptors` requires."""
+
+    info = cli(
+        "getdescriptorinfo",
+        body,
+    )
+
+    checksum = info.get("checksum")
+
+    if not checksum:
+        raise RuntimeError(
+            "the node returned no descriptor checksum for the HTLC"
+        )
+
+    return checksum
+
+
 def get_blake_contract_descriptor(swap):
     if not swap.blake_alice_pub:
         raise ValueError(
@@ -1144,14 +1213,7 @@ def get_blake_contract_descriptor(swap):
             "Swap has no BLAKE Bob pubkey"
         )
 
-    body = (
-        "wsh(or_i("
-        f"and_v(v:pk({swap.blake_bob_pub}),"
-        f"sha256({swap.secret_hash})),"
-        f"and_v(v:after({swap.blake_timeout}),"
-        f"pk({swap.blake_alice_pub}))"
-        "))"
-    )
+    body = htlc_descriptor_body(swap, "blake")
 
     info = blake_cli(
         "getdescriptorinfo",
@@ -1176,12 +1238,7 @@ def get_btc_contract_descriptor(swap):
     if not swap.btc_bob_pub:
         raise ValueError("Swap has no Bitcoin Bob pubkey")
 
-    body = (
-        "wsh(or_i("
-        f"and_v(v:pk({swap.btc_alice_pub}),sha256({swap.secret_hash})),"
-        f"and_v(v:after({swap.btc_timeout}),pk({swap.btc_bob_pub}))"
-        "))"
-    )
+    body = htlc_descriptor_body(swap, "btc")
 
     info = btc_cli(
         "getdescriptorinfo",
@@ -17756,6 +17813,254 @@ def build_reconcile_report(swap):
         "read_only": True,
     }
 
+def command_recovery_plan(args):
+    """
+    How to recover an HTLC whose keys this wallet no longer holds.
+
+    A wallet restore, rename or re-creation that loses the private keys
+    behind an HTLC's addresses makes both the claim and the refund
+    impossible, and nothing in the swap record says so. This command is
+    read-only: it reports the exact descriptor, its checksum, the funding
+    outpoint, which branch and key belong to this participant, and whether
+    the wallet can currently spend it -- plus the import and spend steps
+    if it cannot.
+
+    The descriptor is printed in its public form. To import it into a
+    signing wallet the operator substitutes their own key (WIF or extended
+    private key) where their public key appears, then runs
+    `getdescriptorinfo` again on that exact string, because substituting a
+    key changes the checksum. `importdescriptors` requires the checksum of
+    the string being imported and rejects a missing or stale one.
+    """
+
+    swap = load_swap(args.swap_id)
+
+    try:
+        local_role, _, _ = _reconcile_local_role(swap)
+    except Exception as e:  # noqa: BLE001
+        print()
+        print("RECOVERY PLAN")
+        print("=============")
+        print("swap:", swap.swap_id)
+        print()
+        print(
+            "This record does not pin enough identities to derive the "
+            f"local protocol role ({type(e).__name__}: {e}), so the "
+            "recovery plan cannot say which branch is yours."
+        )
+        return
+
+    print()
+    print("HTLC RECOVERY PLAN")
+    print("==================")
+    print("swap:  ", swap.swap_id)
+    print("state: ", swap.state)
+    print("role:  ", local_role)
+    print()
+    print(
+        "Read-only. Nothing is imported, signed, funded or broadcast by "
+        "this command."
+    )
+
+    for chain, chain_name, cli, cli_name, wallet in (
+        ("blake", "BLAKE", blake_cli, "blake", BLAKE_WALLET),
+        ("btc", "Bitcoin", btc_cli, "btc", BTC_WALLET),
+    ):
+        tx_field = f"{chain}_funding_txid"
+        vout_field = f"{chain}_funding_vout"
+        timeout_field = (
+            "blake_timeout" if chain == "blake" else "btc_timeout"
+        )
+
+        print()
+        print(chain_name.upper())
+        print("-" * len(chain_name))
+
+        try:
+            body = htlc_descriptor_body(swap, chain)
+        except Exception as e:  # noqa: BLE001
+            print("not derivable:", f"{type(e).__name__}: {e}")
+            continue
+
+        try:
+            checksum = descriptor_checksum(body, cli)
+        except Exception as e:  # noqa: BLE001
+            print("descriptor:", body)
+            print(
+                "checksum:  could not be obtained "
+                f"({type(e).__name__}: {e})"
+            )
+            continue
+
+        print("descriptor:", f"{body}#{checksum}")
+
+        #
+        # `deriveaddresses` requires the checksum, and the checksum of
+        # this exact body is the one just obtained, so build the
+        # checksummed form rather than relying on the node's canonical
+        # rendering.
+        #
+        checksummed = f"{body}#{checksum}"
+
+        try:
+            address = (
+                derive_blake_contract_address(checksummed)
+                if chain == "blake"
+                else derive_btc_contract_address(checksummed)
+            )
+        except Exception as e:  # noqa: BLE001
+            print("address:   not derivable:", f"{type(e).__name__}: {e}")
+            continue
+
+        print("address:   ", address)
+
+        txid = getattr(swap, tx_field)
+        vout = getattr(swap, vout_field)
+
+        print(
+            "funding:   ",
+            f"{txid}:{vout}" if txid else "not recorded",
+        )
+
+        #
+        # Which branch this participant can take, and with which key.
+        #
+        if chain == "blake":
+            claimer_pub = swap.blake_bob_pub
+            refunder_pub = swap.blake_alice_pub
+            claimer_role = "bob"
+        else:
+            claimer_pub = swap.btc_alice_pub
+            refunder_pub = swap.btc_bob_pub
+            claimer_role = "alice"
+
+        if local_role == claimer_role:
+            branch = "claim"
+            own_key = claimer_pub
+        else:
+            branch = "refund"
+            own_key = refunder_pub
+
+        print(
+            "your branch:",
+            branch,
+            f"(protocol {local_role})",
+        )
+        print("your key:   ", own_key)
+        print(
+            "timeout:    ",
+            getattr(swap, timeout_field),
+            "(the refund branch is spendable at or after this height)",
+        )
+
+        try:
+            info = cli("getaddressinfo", address, wallet=wallet)
+            can_spend = bool(
+                isinstance(info, dict)
+                and info.get("solvable")
+            )
+            print(
+                "wallet can spend:",
+                "yes" if can_spend else "no",
+                f"(wallet {wallet!r}, solvable={info.get('solvable') if isinstance(info, dict) else 'unknown'})",
+            )
+        except Exception as e:  # noqa: BLE001
+            print(
+                "wallet can spend: unknown",
+                f"({type(e).__name__}: {e})",
+            )
+            can_spend = False
+
+        if can_spend:
+            print()
+            print(
+                "This wallet can already spend the HTLC; use:"
+            )
+            print(f"  scripts/blake {branch}-{chain} {swap.swap_id}")
+            continue
+
+        print()
+        print("RECOVER IT")
+        print("~~~~~~~~~~")
+        print(
+            "1. Re-import the descriptor with your own private key in "
+            "place of your public key:"
+        )
+        print()
+        print(f"     {cli_name}-cli -rpcwallet=<wallet> getdescriptorinfo \\")
+        print(
+            f"       '{htlc_descriptor_body(swap, chain, {own_key: '<YOUR-WIF-OR-XPRV>'})}'"
+        )
+        print()
+        print(
+            "   Substituting the key changes the descriptor string, so "
+            "the checksum from this call is the one to use, not the one "
+            "printed above."
+        )
+        print()
+        print("2. Import it, with a timestamp that avoids a rescan:")
+        print()
+        print(f"     {cli_name}-cli -rpcwallet=<wallet> importdescriptors \\")
+        print(
+            '       \'[{"desc":"<descriptor>#<checksum>",'
+            '"timestamp":"now"}]\''
+        )
+        print()
+        print(
+            "   `timestamp` is required. Use \"now\" for an HTLC that "
+            "has not been funded yet; a numeric timestamp triggers a "
+            "rescan from that time minus two hours, and a single "
+            "`\"timestamp\": 0` in a batch forces a full rescan of the "
+            "whole batch."
+        )
+        print()
+        print("3. Verify, then spend:")
+        print()
+        print(f"     {cli_name}-cli -rpcwallet=<wallet> getaddressinfo {address}")
+        print(
+            "       # expect solvable=true (and ismine=true) before "
+            "spending"
+        )
+
+        if branch == "refund":
+            print()
+            print(
+                "   Refund. The refund branch signs with the wallet once "
+                "the locktime is mature:"
+            )
+            print()
+            print(
+                f"     scripts/blake refund-{chain} {swap.swap_id}"
+            )
+            print(
+                "       # the engine builds and signs it; the locktime "
+                f"must be at or after height {getattr(swap, timeout_field)}"
+            )
+        else:
+            print()
+            print(
+                "   Claim. A P2WSH claim cannot be signed from a raw "
+                "transaction over RPC: the signing path needs the SHA256 "
+                "preimage, which the node accepts only through a PSBT "
+                "input field (PSBT_IN_SHA256). The engine already builds "
+                "the claim that way:"
+            )
+            print()
+            print(
+                f"     scripts/blake claim-{chain} {swap.swap_id}"
+            )
+            print(
+                "       # requires the secret S; without it this branch "
+                "cannot be spent at all"
+            )
+
+    print()
+    print(
+        "PASS: recovery plan generated; nothing was imported, signed, "
+        "funded or broadcast"
+    )
+
+
 def command_reconcile(args):
     """Read-only protocol brain: observe, derive, recommend; never act."""
     import json
@@ -20782,6 +21087,19 @@ def main():
     p.set_defaults(
         func=command_sync_funding,
     )
+
+    p = sub.add_parser(
+        "recovery-plan",
+        help=(
+            "Show how to recover an HTLC whose keys this wallet no "
+            "longer holds: the descriptor, its checksum, and the "
+            "import and spend steps"
+        ),
+    )
+
+    p.add_argument("swap_id")
+
+    p.set_defaults(func=command_recovery_plan)
 
     p = sub.add_parser(
         "reconcile",

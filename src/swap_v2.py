@@ -3895,6 +3895,124 @@ def verify_nostr_event(event):
         )
 
 
+NOSTR_ENCRYPTION_TAG = "nip44_v2"
+
+#
+# Coordination content is plaintext by default. The protocol does not
+# depend on transport confidentiality -- S never travels, and every fact a
+# message carries is re-verified against a chain -- so encryption is an
+# opt-in that shields the metadata as well.
+#
+# Set BLAKE_SWAP_NOSTR_ENCRYPTION=nip44_v2 on BOTH participants to enable
+# it. A participant that requires encryption refuses a plaintext
+# coordination message rather than accepting a downgrade, and a
+# participant that does not understand encryption refuses an event that
+# declares it rather than guessing at it.
+#
+NOSTR_ENCRYPTION_MODES = ("off", NOSTR_ENCRYPTION_TAG)
+
+#
+# Which settlement messages can be encrypted. The `offer` is first
+# contact: at the moment it is published the maker does not yet know the
+# taker's identity, and NIP-44 is pairwise by construction, so there is no
+# key to encrypt it to. It is also public coordination data by nature --
+# the announcement is the ask. Everything after first contact is pairwise
+# and is encrypted when the mode is on.
+#
+NOSTR_ENCRYPTABLE_TYPES = tuple(
+    sorted(swap_wire.SETTLEMENT_TYPES - {"offer"})
+)
+
+
+def nostr_encryption_required(message_type):
+    """
+    Whether this message must be encrypted in the current mode.
+
+    The offer is exempt in both directions: it cannot be encrypted on
+    send, and it must still be readable on receipt, or two participants
+    could never meet.
+    """
+
+    return (
+        nostr_encryption_enabled()
+        and message_type in NOSTR_ENCRYPTABLE_TYPES
+    )
+
+
+def nostr_encryption_mode():
+    """The configured coordination-confidentiality mode."""
+
+    raw = os.environ.get(
+        "BLAKE_SWAP_NOSTR_ENCRYPTION",
+        "off",
+    ).strip().lower()
+
+    if raw in ("", "0", "false", "no"):
+        raw = "off"
+
+    if raw not in NOSTR_ENCRYPTION_MODES:
+        raise RuntimeError(
+            "BLAKE_SWAP_NOSTR_ENCRYPTION must be one of "
+            f"{', '.join(NOSTR_ENCRYPTION_MODES)}"
+        )
+
+    return raw
+
+
+def nostr_encryption_enabled():
+    return nostr_encryption_mode() == NOSTR_ENCRYPTION_TAG
+
+
+def nostr_event_encryption(event):
+    """
+    The encryption a coordination event declares, or None.
+
+    The tag is inside the signed event, so a relay cannot add or remove
+    it without invalidating the signature.
+    """
+
+    for tag in event.get("tags", []):
+        if (
+            isinstance(tag, list)
+            and len(tag) >= 2
+            and tag[0] == "encryption"
+        ):
+            return tag[1]
+
+    return None
+
+
+def nostr_event_message_type(event):
+    """
+    The coordination message type an event declares.
+
+    Read from the signed `type` tag rather than from the content, because
+    the content may be encrypted and therefore unreadable until the right
+    key is known.
+    """
+
+    for tag in event.get("tags", []):
+        if (
+            isinstance(tag, list)
+            and len(tag) >= 2
+            and tag[0] == "type"
+        ):
+            return tag[1]
+
+    return None
+
+
+def nostr_conversation_key(peer_pubkey):
+    """The conversation key for one peer, from our own Nostr key."""
+
+    import nip44
+
+    return nip44.conversation_key(
+        nostr_private_key_hex(),
+        peer_pubkey,
+    )
+
+
 def build_nostr_event(
     swap_id,
     message_type,
@@ -3975,15 +4093,58 @@ def build_nostr_event(
         sort_keys=True,
     )
 
+    tags = [
+        ["t", "blake-swap"],
+        ["d", swap_id],
+        ["type", message_type],
+    ]
+
+    if nostr_encryption_required(message_type):
+        #
+        # Settlement coordination is encrypted when the mode is on. A
+        # plaintext message would be a downgrade of our own making, and a
+        # peer in encrypted mode refuses it, so there is no useful
+        # fallback here: fail closed instead.
+        #
+        if current_role is None:
+            raise RuntimeError(
+                "SECURITY FAILURE: cannot encrypt a coordination message "
+                "without knowing the local protocol role"
+            )
+
+        local = load_swap(
+            swap_id,
+            role=current_role,
+        )
+
+        peer_field = (
+            "nostr_bob_pub"
+            if current_role == "alice"
+            else "nostr_alice_pub"
+        )
+
+        peer_pubkey = getattr(local, peer_field, None)
+
+        if not peer_pubkey:
+            raise RuntimeError(
+                "SECURITY FAILURE: no pinned counterparty Nostr identity "
+                "to encrypt to"
+            )
+
+        import nip44
+
+        content = nip44.encrypt(
+            content,
+            nostr_conversation_key(peer_pubkey),
+        )
+
+        tags.append(["encryption", NOSTR_ENCRYPTION_TAG])
+
     event = {
         "pubkey": pubkey_hex,
         "created_at": int(time.time()),
         "kind": 1,
-        "tags": [
-            ["t", "blake-swap"],
-            ["d", swap_id],
-            ["type", message_type],
-        ],
+        "tags": tags,
         "content": content,
     }
 
@@ -4302,28 +4463,35 @@ async def nostr_fetch_message(
             ):
                 continue
 
-            message = json.loads(
-                event["content"]
-            )
-
-            if message.get("swap_id") != swap_id:
-                continue
-
-            if message.get("type") != message_type:
-                continue
-
-            valid.append(
-                (
-                    event["created_at"],
-                    event["id"],
-                    event["pubkey"],
-                    message,
-                )
-            )
-
         except Exception:
             # Relays and relay contents are untrusted.
             continue
+
+        #
+        # Content decoding is deliberately OUTSIDE the skip-guard above.
+        # A declared encryption that cannot be honoured -- an encrypted
+        # message for a plaintext participant, a downgrade, an untagged
+        # payload -- is a security condition, not a relay artefact, and
+        # swallowing it into "no valid message matched" would hide the
+        # very thing the mode exists to detect.
+        #
+        message = decode_coordination_content(
+            event,
+            swap_id=swap_id,
+            message_type=message_type,
+        )
+
+        if message is None:
+            continue
+
+        valid.append(
+            (
+                event["created_at"],
+                event["id"],
+                event["pubkey"],
+                message,
+            )
+        )
 
     if not valid:
         raise RuntimeError(
@@ -4350,6 +4518,110 @@ async def nostr_fetch_message(
     )
 
     return message, event_id, signer_pubkey
+
+
+def decode_coordination_content(event, *, swap_id, message_type):
+    """
+    The coordination message inside a verified event.
+
+    Returns the message dict, or None when the event is simply not the
+    one being looked for (a different swap or type, or content that does
+    not parse). Raises when the *declared* encryption cannot be honoured,
+    because that is a security condition rather than a relay artefact:
+
+      * the event declares `nip44_v2` and we cannot read it;
+      * the event looks encrypted but declares nothing, while we require
+        encryption;
+      * the event is plaintext while we require encryption (a downgrade).
+    """
+
+    #
+    # Filter by the event's own signed type FIRST. The encryption policy
+    # is keyed on the message type being looked for, and applying it
+    # before this filter would make an unrelated plaintext event (an
+    # `offer`, say) look like a downgrade of an `accept`.
+    #
+    if nostr_event_message_type(event) != message_type:
+        return None
+
+    declared = nostr_event_encryption(event)
+    raw = event.get("content")
+
+    if not isinstance(raw, str):
+        return None
+
+    if declared is not None:
+        if declared != NOSTR_ENCRYPTION_TAG:
+            raise RuntimeError(
+                "SECURITY FAILURE: coordination event declares an "
+                f"unsupported encryption {declared!r}"
+            )
+
+        if not nostr_encryption_enabled():
+            raise RuntimeError(
+                "SECURITY FAILURE: coordination event is encrypted but "
+                "BLAKE_SWAP_NOSTR_ENCRYPTION is not enabled; refusing to "
+                "guess at its content"
+            )
+
+        import nip44
+
+        try:
+            plaintext = nip44.decrypt(
+                raw,
+                nostr_conversation_key(event["pubkey"]),
+            )
+        except nip44.Nip44Error as e:
+            raise RuntimeError(
+                "SECURITY FAILURE: coordination event declares "
+                f"{NOSTR_ENCRYPTION_TAG} but did not decrypt: {e}"
+            ) from e
+
+        try:
+            message = json.loads(plaintext)
+        except Exception as e:
+            raise RuntimeError(
+                "SECURITY FAILURE: decrypted coordination content is not "
+                f"a JSON message: {e}"
+            ) from e
+
+    else:
+        import nip44
+
+        if nip44.looks_encrypted(raw):
+            #
+            # A payload with no `encryption` tag. Either the sender is
+            # misconfigured or something is stripping the tag; both are
+            # refused rather than treated as plaintext.
+            #
+            raise RuntimeError(
+                "SECURITY FAILURE: coordination content looks like a "
+                f"{NOSTR_ENCRYPTION_TAG} payload but carries no "
+                "encryption tag"
+            )
+
+        if nostr_encryption_required(message_type):
+            raise RuntimeError(
+                "SECURITY FAILURE: refusing a plaintext coordination "
+                f"event while BLAKE_SWAP_NOSTR_ENCRYPTION={NOSTR_ENCRYPTION_TAG} "
+                "is required (downgrade attempt)"
+            )
+
+        try:
+            message = json.loads(raw)
+        except Exception:
+            return None
+
+    if not isinstance(message, dict):
+        return None
+
+    if message.get("swap_id") != swap_id:
+        return None
+
+    if message.get("type") != message_type:
+        return None
+
+    return message
 
 
 def nostr_send_message(

@@ -13,41 +13,54 @@ documents drifts from the implementation.
 
 ## 1. Coordination confidentiality (optional NIP-44)
 
-**Status: planned.**
+**Status: implemented for the reference engine; not yet in the independent
+implementations.**
 
 The default transport is plaintext Nostr kind-1 events, and that is
 documented rather than assumed: the protocol does not depend on transport
 confidentiality, because the secret `S` is never transported and every
 claim taken from a message is re-verified against a chain.
 
-An optional encrypted mode is planned for deployments that also want the
-coordination metadata shielded:
+`BLAKE_SWAP_NOSTR_ENCRYPTION=nip44_v2`, set on both participants, encrypts
+settlement content as well:
 
-- NIP-44 v2 payloads (secp256k1 ECDH → HKDF-SHA256 → ChaCha20 →
-  HMAC-SHA256), carried in the same coordination events.
-- A signed `["encryption", "nip44_v2"]` tag, so the intent to encrypt is
-  covered by the event signature and cannot be stripped without breaking
-  it.
-- `content` stays valid JSON in both modes: `{"v": 1, …}` in plaintext and
-  `{"v": 2, "enc": "nip44_v2", "payload": "<base64>"}` when encrypted.
-  A reader that does not understand `v: 2` must **reject** the event, and a
-  failed decryption must never fall back to parsing the content as
-  plaintext. This is the anti-downgrade rule.
-- The decrypted payload is then validated against the canonical wire
-  schema, exactly as a plaintext message is.
+- `src/nip44.py` implements NIP-44 v2 (secp256k1 ECDH → HKDF-Extract with
+  the fixed `nip44-v2` salt → HKDF-Expand with the nonce → ChaCha20 →
+  HMAC-SHA256), verified against the official vectors rather than against
+  its own output: `tests/nip44_tests.py`.
+- Settlement messages other than `offer` carry a signed
+  `["encryption", "nip44_v2"]` tag and a base64 payload as `content`. The
+  tag is inside the signature, so a relay cannot strip it.
+- The `offer` stays plaintext in both directions: it is first contact, the
+  maker does not yet know the taker, and NIP-44 is pairwise. It is also
+  public coordination data by nature.
+- Refusals run in both directions: an encrypted participant refuses a
+  plaintext message of an encryptable type (a downgrade), and a plaintext
+  participant refuses content it cannot read. A failed decryption never
+  falls back to parsing the content as plaintext.
 
-Outstanding before this can ship:
+What remains before it can be described as generally deployable:
 
 1. The two independent implementations in `tools/minimal_*.py` must gain
-   the same mode, or the cross-implementation evidence lapses for encrypted
-   runs. The existing compatibility evidence is plaintext.
-2. The payload must be bound to the swap (`type`, `swap_id`, and a
-   monotonic step) because NIP-44's authentication covers only the nonce
-   and ciphertext, with no protocol domain separation.
-3. Documentation of what encryption does and does not protect:
-   `content` only. Publisher identity, timing, message existence and
-   approximate size remain visible to relays, and the conversation key is a
-   long-lived shared secret with no forward secrecy.
+   the same mode, or the cross-implementation evidence lapses for
+   encrypted runs. The existing compatibility evidence is plaintext, and
+   `tests/swap_encrypted_coordination_tests.py` covers this engine only.
+2. A `nip44`-native peer will encrypt *every* message it can address,
+   including an `offer` it has already seen a pubkey for. This engine
+   decrypts an encrypted offer when it can derive the conversation key, but
+   the interop matrix with such a peer has not been exercised.
+3. The payload carries no protocol domain separation beyond the
+   conversation key: NIP-44 authenticates the nonce and ciphertext only.
+   Binding the payload to the swap (`type`, `swap_id`, a monotonic step) is
+   done by the message content itself, which is validated after
+   decryption; a shared key used in another protocol would still admit
+   cross-protocol replay, so the same identity keys should not be reused
+   for unrelated NIP-44 traffic.
+4. Encryption protects `content` only. Publisher identity, timing, message
+   existence, frequency and approximate size remain visible to relays, and
+   there is no forward secrecy: the conversation key is a long-lived shared
+   secret. Hiding participants or timing needs gift-wrap with a fresh key
+   per message and authenticated relays, which this project does not do.
 
 ## 2. Watch-only HTLC descriptor import
 

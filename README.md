@@ -156,7 +156,7 @@ scripts/
   stability-check          static safety-invariant checks
   wire_inventory.py        regenerate the wire message inventory
 
-tests/                     47 suites: unit tests and regtest integration
+tests/                     49 suites: unit tests and regtest integration
 tools/minimal_*.py         independent wire-message producers
 checkpoints/v1.5/          frozen earlier snapshot with SHA256SUMS
 ```
@@ -171,7 +171,7 @@ Node-free unit suites run anywhere:
 ./scripts/test.sh --unit-only
 ```
 
-The full suite covers all 47 test files, including the regtest
+The full suite covers all 49 test files, including the regtest
 integration suites and the independent-implementation wire suites. The
 regtest suites need two chain nodes; `scripts/test-nodes` starts a
 disposable Bitcoin Core + Bitcoin Knots rig for them:
@@ -218,9 +218,13 @@ silently omitting them.
 
 This is experimental software and has not been audited. In particular:
 
-- Nostr events are **plaintext** kind-1 events. Amounts, timeouts,
-  transaction IDs, and identities are publicly readable by anyone
-  watching the relays.
+- Nostr events are **plaintext** kind-1 events by default. Amounts,
+  timeouts, transaction IDs, and identities are publicly readable by
+  anyone watching the relays. An optional NIP-44 mode
+  (`BLAKE_SWAP_NOSTR_ENCRYPTION=nip44_v2`, enabled on both participants)
+  encrypts settlement content; the `offer` necessarily stays plaintext,
+  because it is first contact and the maker does not yet know the taker.
+  See `docs/WIRE_PROTOCOL.md` §3.1a.
 - The secret `S` is never transported. It is revealed only by Alice's
   confirmed Bitcoin claim and recovered by Bob only from that
   transaction's witness. The implementation asserts this at every
@@ -241,8 +245,14 @@ The coordination transport is plaintext by default, and the default
 posture is documented rather than assumed: the protocol does not depend
 on transport confidentiality, because the secret `S` is never
 transported and every fact taken from a message is re-verified against a
-chain. An optional NIP-44 encrypted mode for coordination content is
-being added for deployments that want the metadata shielded as well; see
-`docs/ROADMAP.md` for its status.
+chain.
+
+An optional NIP-44 v2 mode (`BLAKE_SWAP_NOSTR_ENCRYPTION=nip44_v2`)
+encrypts settlement content as well, with a signed `encryption` tag and a
+refusal in both directions: an encrypted participant refuses a plaintext
+downgrade, and a plaintext participant refuses content it cannot read.
+The `offer` stays plaintext, because it is first contact and NIP-44 is
+pairwise by construction. The codec is verified against the official
+NIP-44 test vectors.
 
 **Do not use with valuable funds.**

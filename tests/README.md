@@ -1,6 +1,6 @@
 # BLAKE Swap Test Suites
 
-47 suites covering the atomic-swap engine, the wire format, the market
+49 suites covering the atomic-swap engine, the wire format, the market
 state machine, crash recovery, reorganization safety,
 independent-implementation compatibility, and documentation alignment.
 
@@ -36,8 +36,8 @@ List suites and their prerequisites:
 
 | Class | Needs | Count |
 |---|---|---|
-| `unit` | nothing (some need the declared Python deps) | 22 |
-| `regtest` | reachable Bitcoin + BLAKE regtest nodes | 23 |
+| `unit` | nothing (some need the declared Python deps) | 23 |
+| `regtest` | reachable Bitcoin + BLAKE regtest nodes | 24 |
 | `nostr` | regtest nodes, real relays, two participant keys | 2 |
 
 The two `nostr` suites publish to real relays and are therefore
@@ -231,7 +231,7 @@ honest reading — run `scripts/test-nodes start` first.
 
 ## Suite inventory
 
-### Unit suites — no prerequisites (22)
+### Unit suites — no prerequisites (23)
 
 | Suite | Covers |
 |---|---|
@@ -251,6 +251,7 @@ honest reading — run `scripts/test-nodes start` first.
 | `swap_market_takes_json_tests.py` | `market-takes` resolves offer-ID prefixes and emits validated JSON (needs `coincurve`) |
 | `swap_resume_step_budget_tests.py` | `resume --max-steps` forwards an explicit step budget to the driver |
 | `schema_equality_tests.py` | the engine's acceptance boundary *is* the canonical schema, for all seven settlement types: a schema-valid message is accepted field for field, every required field is required, unknown fields and a nested `secret_hex` are refused by both, internal annotations are tolerated on receipt and refused on send, and a static check that every message type the engine hands to the transport has a schema (and vice versa) |
+| `nip44_tests.py` | the NIP-44 v2 codec against the **official** test vectors rather than its own output: conversation keys, message keys, all published padding lengths, plaintext/payload pairs (ASCII, multi-plane Unicode, emoji, right-to-left), long messages by hash, the 2026 extended length-prefix boundary, and every published invalid class |
 | `blake_amount_tests.py` | BLAKE amounts as integer base units: exact parse/render round-trips, canonical wire strings, refusal of anything finer than one base unit, the legacy float record migration (including the rounded-and-reported case), and the one-base-unit difference that the old `1e-8` tolerance accepted |
 | `agent_policy_tests.py` | the autonomous agent's (state → command) table for both roles, the child-process environment and output forwarding, escalation of a child's `SECURITY FAILURE`, the give-up bound on consecutive failures, and clean SIGTERM unwinding |
 | `driver_policy_tests.py` | the autonomous driver's decision table, driven directly through its only input (the reconciliation report) with every action executor replaced by a recorder: `claim-btc`, `fund-btc`, `refund-btc` and `refund-blake` are attempted exactly when protocol role, checkpoint, chain status, secret provenance and timeout margin all permit, and never otherwise; a violated precondition is a contained, reported step failure |
@@ -258,7 +259,7 @@ honest reading — run `scripts/test-nodes start` first.
 | `node_config_tests.py` | node resolution: environment first, then a running rig, then conventional paths; a stopped or corrupt rig state file degrades to a skip instead of a wrong target |
 | `fail_closed_tests.py` | refusal behaviour when preconditions fail: corrupted state files, unknown swap IDs, mismatched chain identities, missing preimages, and unconfirmed settlements all stop the command instead of acting on a guess, and no on-disk state is mutated |
 
-### Regtest suites — need chain nodes (23)
+### Regtest suites — need chain nodes (24)
 
 **Core protocol**
 
@@ -268,6 +269,7 @@ honest reading — run `scripts/test-nodes start` first.
 | `swap_timeout_negotiation_tests.py` | Bob's independent v1.5 timeout validation ("Time Mallory"): unknown policy, versionless offers, missing recovery, expired windows, short windows, dishonest metadata |
 | `pre_btc_refund_tests.py` | Alice must be able to abort and refund BLAKE before Bob funds Bitcoin |
 | `swap_reverse_market_flow_tests.py` | the **reverse** (`btc-for-blake`) market path, where the maker is protocol Bob and the **taker** creates the secret: proves the maker reserves the swap and signs the match without ever holding S |
+| `swap_encrypted_coordination_tests.py` | the opt-in encrypted coordination mode over the relay stub: a real encrypted offer/accept handshake, the offer staying plaintext because it is first contact, ciphertext that leaks no message field, and refusals in both directions (an encrypted participant refuses a plaintext downgrade; a plaintext participant refuses content it cannot read) |
 | `swap_driver_surface_tests.py` | the operator/driver surface on a live swap: `next` converging one safe step at a time, refusing to fund, and refusing to choose between two negotiations or two funding-ready trades, `dashboard` and `dashboard --json`, read-only `reconcile` (JSON and human), `show`/`list`, `ignore-match` tombstones, `dismiss` archiving only provably unfunded swaps, `sync-funding` discovering funding from the chain, and `resume` driving settlement to COMPLETE |
 | `swap_market_flow_tests.py` | the **marketplace** path end to end on regtest over the local relay stub: publish-market-offer → take → accept-market-take → accept-market-match → settle to COMPLETE, plus a cancel flow and read-only reconciliation |
 | `swap_participant_isolation_tests.py` | distinct participant state roots and no cross-participant state |

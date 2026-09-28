@@ -5,3 +5,8 @@
 
 coincurve==21.0.0
 websockets==17.1
+
+# Optional: only needed for the encrypted coordination mode
+# (BLAKE_SWAP_NOSTR_ENCRYPTION=nip44_v2). Plaintext coordination, which is
+# the default, does not import it.
+cryptography==50.0.1

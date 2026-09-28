@@ -90,6 +90,44 @@ depth.
 > do, and `tests/schema_equality_tests.py` fails if the engine's
 > acceptance boundary and the schema ever stop agreeing.
 
+### 3.1a Coordination confidentiality (optional)
+
+Coordination content is **plaintext by default**, and the protocol does not
+depend on confidentiality: `S` never travels, and every fact a message
+carries is re-verified against a chain. A deployment that also wants the
+metadata shielded sets `BLAKE_SWAP_NOSTR_ENCRYPTION=nip44_v2` on **both**
+participants.
+
+When enabled:
+
+- Settlement messages **other than `offer`** carry a signed
+  `["encryption", "nip44_v2"]` tag, and `content` is a NIP-44 v2 payload
+  (base64) rather than a JSON object. The tag is inside the signed event,
+  so a relay cannot add, remove or alter it.
+- The `offer` remains plaintext in both directions. It is first contact:
+  the maker does not yet know the taker's identity, and NIP-44 is pairwise
+  by construction, so there is no key to encrypt it to. It is also public
+  coordination data by nature — the announcement is the ask.
+- A participant with the mode enabled **MUST refuse** a plaintext message
+  of an encryptable type rather than accept a downgrade.
+- A participant **MUST refuse** any event whose `content` looks like a
+  payload but which carries no `encryption` tag, and **MUST refuse** an
+  event declaring encryption it cannot perform.
+- Decryption failure is **MUST refuse**, never a fall back to parsing the
+  content as plaintext.
+
+A plaintext reader cannot mistake ciphertext for a JSON object: a JSON
+object begins with `{`, which is not in the base64 alphabet, and a version
+2 payload always begins with `A`. That is a discrimination aid, not
+authentication — the payload's MAC, and the signed tag, are what establish
+that a payload is genuine.
+
+**What encryption covers, and what it does not.** It protects `content`
+only. The author, kind, tags, timestamp, relay, timing, message frequency
+and approximate size remain visible. There is no forward secrecy: the
+conversation key is a long-lived shared secret, so compromise of either
+identity key decrypts every message that pair exchanged.
+
 ### 3.2 FILE transport
 
 Intended for local and regtest operation. It is **not** a

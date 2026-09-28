@@ -79,6 +79,7 @@ UNIT_SUITES=(
     tests/agent_policy_tests.py
     tests/blake_amount_tests.py
     tests/schema_equality_tests.py
+    tests/nip44_tests.py
 )
 
 REGTEST_SUITES=(
@@ -105,6 +106,7 @@ REGTEST_SUITES=(
     tests/swap_reverse_market_flow_tests.py
     tests/swap_participant_isolation_tests.py
     tests/swap_driver_surface_tests.py
+    tests/swap_encrypted_coordination_tests.py
 )
 
 NOSTR_SUITES=(

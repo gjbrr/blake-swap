@@ -2,6 +2,13 @@
 
 This file records an earlier v1.9 development checkpoint. For the current independently reproduced two-host procedure, see `docs/REGTEST_TWO_HOST.md`.
 
+The checkpoint it describes is now a git tag rather than only a commit message:
+
+```bash
+git show --stat v1.9-independent-nodes
+git checkout v1.9-independent-nodes
+```
+
 ---
 
 cd ~/blake-swap

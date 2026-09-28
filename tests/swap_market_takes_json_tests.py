@@ -11,11 +11,17 @@ import swap_v2
 OFFER_ID = "a" * 64
 ALICE_PUB = "b" * 64
 
+#
+# This is the record `validate_market_take_event()` produces, including the
+# exact base units F7 added; the validator's own output is asserted in
+# tests/nostr_market_tests.py.
+#
 TAKES = [
     {
         "event_id": "c" * 64,
         "taker": "d" * 64,
         "blake_amount": 10.0,
+        "blake_amount_base_units": 1_000_000_000,
         "btc_sats": 25000,
         "created_at": 1234567890,
         "direction": "blake-for-btc",
@@ -115,6 +121,7 @@ def test_json_output():
     assert parsed["takes"][0]["event_id"] == "c" * 64
     assert parsed["takes"][0]["taker"] == "d" * 64
     assert parsed["takes"][0]["blake_amount"] == 10.0
+    assert parsed["takes"][0]["blake_amount_base_units"] == 1_000_000_000
     assert parsed["takes"][0]["btc_sats"] == 25000
 
 

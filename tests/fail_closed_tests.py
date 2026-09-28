@@ -990,6 +990,22 @@ def test_market_take_validator_guards():
         ),
     )
 
+    #
+    # And the record it does produce carries both forms of the amount:
+    # the display value that has always been there, and the exact integer
+    # the state file and the wire use (F7).
+    #
+    record = validate(
+        signed(good_take, good_tags, 1700000100)
+    )
+
+    holds(
+        "a validated take carries exact base units",
+        record["blake_amount_base_units"] == 100_000_000
+        and record["blake_amount"] == 1.0,
+        f"the take record was {record}",
+    )
+
 
 def test_next_is_safe_with_nothing_to_do():
     clear_state()

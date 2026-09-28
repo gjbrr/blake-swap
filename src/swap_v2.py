@@ -11718,6 +11718,13 @@ def nostr_validate_market_take_event(
         "blake_amount": float(
             message["blake_amount"]
         ),
+        #
+        # Exact base units alongside the display value; see
+        # command_dashboard's JSON view for why both are emitted.
+        #
+        "blake_amount_base_units": blake_base_units(
+            message["blake_amount"]
+        ),
         "btc_sats": int(
             message["btc_sats"]
         ),
@@ -19606,7 +19613,17 @@ def command_dashboard(args):
             "status": outcome_label(swap, report),
             "action": action_text(report),
             "trade": {
+                #
+                # `blake_amount` is the display value and has always been
+                # a JSON number. `blake_amount_base_units` is the exact
+                # integer the state file and the wire carry, added
+                # alongside rather than in place of it so no existing
+                # consumer's type changes.
+                #
                 "blake_amount": swap.blake_amount,
+                "blake_amount_base_units": (
+                    swap.blake_amount_base_units
+                ),
                 "btc_sats": swap.btc_sats,
             },
             "chains": {

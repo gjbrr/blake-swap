@@ -23,6 +23,7 @@ def fake_swap():
         swap_id=SWAP_ID,
         state=swap_v2.State.BTC_FUNDED.value,
         blake_amount=10.0,
+        blake_amount_base_units=1_000_000_000,
         btc_sats=25_000,
 
         # Identity needed by dashboard ownership filtering.
@@ -122,8 +123,14 @@ def test_json_dashboard():
     assert item["status"] == "READY TO CLAIM BTC"
     assert item["action"] == "run resume"
 
+    #
+    # Both forms are emitted on purpose: the JSON number has always been
+    # there and changing its type would break consumers, and the integer
+    # is the exact value the state file and the wire carry.
+    #
     assert item["trade"] == {
         "blake_amount": 10.0,
+        "blake_amount_base_units": 1_000_000_000,
         "btc_sats": 25_000,
     }
 

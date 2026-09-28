@@ -287,6 +287,14 @@ amount with an exact base-unit form is converted exactly, and one without
 (it was written from a float) is rounded to the nearest base unit *and the
 rounding is reported* rather than applied silently.
 
+The local `--json` views (`dashboard --json`, `market-takes --json`) report
+both forms of an amount: `blake_amount` as a JSON number, which is what they
+have always emitted and is a display approximation, and
+`blake_amount_base_units` as the exact integer the state file and the wire
+carry. A consumer that needs to compare or act on an amount should use the
+base-unit field; the number exists for the humans and scripts already
+reading it.
+
 ### 4.2 `accept`
 
 Sent by protocol **Bob**.

@@ -161,6 +161,22 @@ tools/minimal_*.py         independent wire-message producers
 checkpoints/v1.5/          frozen earlier snapshot with SHA256SUMS
 ```
 
+Two annotated tags mark the documented checkpoints, so a hash in the
+documentation can be checked out and verified rather than taken on trust:
+
+```bash
+git tag -l 'v1.*'
+git checkout v1.5-regtest-prototype     # the sources in checkpoints/v1.5/
+git checkout v1.9-independent-nodes     # docs/V1_9_TWO_HOST_INDEPENDENT_NODES.md
+```
+
+`checkpoints/v1.5/SHA256SUMS` lists the frozen files by relative path, so
+verify it from inside that directory:
+
+```bash
+cd checkpoints/v1.5 && sha256sum -c SHA256SUMS
+```
+
 ---
 
 ## Testing

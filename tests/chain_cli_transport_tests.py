@@ -183,6 +183,27 @@ def test_booleans_render_as_json_literals():
         raise AssertionError(f"booleans rendered wrongly: {cmd}")
 
 
+def test_structured_arguments_are_json_encoded():
+    """
+    `importdescriptors` takes a JSON array and the node rejects anything
+    else with "Error parsing JSON". A list or dict must therefore be
+    encoded, not repr'd: `str([{"desc": ...}])` uses single quotes and
+    the node cannot read it.
+    """
+    assert swap_v2._rpc_argument([{"desc": "wsh(x)#abcd1234"}]) == (
+        '[{"desc": "wsh(x)#abcd1234"}]'
+    )
+    assert swap_v2._rpc_argument({"a": 1, "b": [True, None]}) == (
+        '{"a": 1, "b": [true, null]}'
+    )
+
+    # The scalar cases are unchanged.
+    assert swap_v2._rpc_argument(True) == "true"
+    assert swap_v2._rpc_argument(False) == "false"
+    assert swap_v2._rpc_argument(7) == "7"
+    assert swap_v2._rpc_argument("text") == "text"
+
+
 def test_wallet_selection_is_preserved():
     with captured() as cap:
         swap_v2.btc_cli("getbalance", wallet="alice")
@@ -459,6 +480,7 @@ def main():
 
     check("ordinary arguments stay in argv", test_ordinary_arguments_stay_in_argv)
     check("booleans render as JSON literals", test_booleans_render_as_json_literals)
+    check("structured arguments are JSON encoded", test_structured_arguments_are_json_encoded)
     check("wallet selection is preserved", test_wallet_selection_is_preserved)
     check("an oversized argument switches to stdin", test_oversized_argument_uses_stdin)
     check("the stdin payload keeps order and types", test_oversized_call_keeps_argument_order_and_types)

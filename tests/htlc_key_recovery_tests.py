@@ -245,7 +245,116 @@ def test_the_plan_reports_what_is_needed():
     h.ok("the plan names the descriptor, the branch and the steps")
 
 
+
+WATCH_WALLET = "blake-swap-recovery-watch"
+
+
+def test_the_watch_only_wallet_makes_it_solvable():
+    """
+    The automatic half: a funded HTLC is recorded in a dedicated
+    watch-only wallet before any funds move.
+
+    What the wallet must prove is that it can *solve* the output without
+    being able to *sign* for it: `solvable` true with `ismine` false, in a
+    wallet whose private keys are disabled. That is the difference
+    between a second copy of the swap and a second copy of the keys.
+    """
+    address = htlc_address()
+
+    result = h.swap_cmd(
+        "watch-htlc",
+        SWAP_ID,
+        "--chain", "blake",
+        role="alice",
+        extra_env={
+            "BLAKE_SWAP_BLAKE_WATCH_WALLET": WATCH_WALLET,
+        },
+    )
+
+    for expected in (
+        "PASS: descriptor imported into the watch-only wallet",
+        "PASS: this HTLC is solvable",
+    ):
+        if expected not in result.stdout:
+            raise AssertionError(
+                f"watch-htlc did not report {expected!r}:\n{result.stdout}"
+            )
+
+    info = h.blake_cli(
+        "getaddressinfo",
+        address,
+        wallet=WATCH_WALLET,
+    )
+
+    if not isinstance(info, dict) or not info.get("solvable"):
+        raise AssertionError(
+            f"the watch-only wallet cannot solve the HTLC: {info}"
+        )
+
+    #
+    # `ismine` is true for a descriptor the wallet watches, which is not
+    # the property that matters. `iswatchonly` and the wallet's own
+    # `private_keys_enabled` are.
+    #
+    #
+    # In a descriptor wallet Core reports `ismine: true` and
+    # `iswatchonly: false` for a descriptor it merely watches, so neither
+    # says what matters. The two facts that do are that the wallet has
+    # private keys disabled and that the address is nevertheless solvable
+    # -- and that the descriptor it holds is this HTLC's, with every key
+    # public.
+    #
+    wallet_info = h.blake_cli("getwalletinfo", wallet=WATCH_WALLET)
+
+    if wallet_info.get("private_keys_enabled"):
+        raise AssertionError(
+            "the watch-only wallet has private keys enabled, so it is "
+            "not the separate copy this design depends on"
+        )
+
+    descriptors = h.blake_cli(
+        "listdescriptors",
+        wallet=WATCH_WALLET,
+    )
+
+    held = [
+        entry["desc"]
+        for entry in descriptors.get("descriptors", [])
+        if address == h.blake_cli(
+            "deriveaddresses",
+            entry["desc"],
+        )[0]
+    ]
+
+    if not held:
+        raise AssertionError(
+            "the watch-only wallet does not hold this HTLC's descriptor"
+        )
+
+    if any(marker in held[0] for marker in ("prv", "wif", "xprv", "tprv")):
+        raise AssertionError(
+            f"the imported descriptor is not the public form: {held[0]}"
+        )
+
+    h.ok("the watch-only wallet solves the HTLC without owning it")
+
+
+def test_the_original_wallet_still_cannot_spend_it():
+    """
+    Recording a watch-only copy must not change what the signing wallet
+    can do: the test's whole premise is that the original wallet has lost
+    access to this output.
+    """
+    if wallet_can_spend(htlc_address(), h.ALICE_WALLET):
+        raise AssertionError(
+            "the original wallet can now solve the HTLC, so the "
+            "watch-only import changed the signing path"
+        )
+
+    h.ok("the original signing wallet still cannot spend it")
+
 def test_the_private_descriptor_imports_into_a_fresh_wallet():
+
     """
     The actual recovery step. Core requires the checksum of the exact
     string being imported, and substituting a key changes it, so the
@@ -414,6 +523,8 @@ def main():
             raise
 
         check("the original wallet cannot spend the HTLC", test_the_original_wallet_cannot_spend_it)
+        check("the watch-only wallet solves it without owning it", test_the_watch_only_wallet_makes_it_solvable)
+        check("the signing wallet is unchanged", test_the_original_wallet_still_cannot_spend_it)
         check("the plan reports what is needed", test_the_plan_reports_what_is_needed)
         check("the private descriptor imports into a fresh wallet", test_the_private_descriptor_imports_into_a_fresh_wallet)
         check("the recovered wallet can solve the HTLC", test_the_recovered_wallet_can_spend_it)

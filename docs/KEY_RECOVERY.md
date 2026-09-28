@@ -146,11 +146,36 @@ recovered into a throwaway wallet, do not leave funds there.
 
 ---
 
-## What is not yet automated
+## What is automated, and what is not
 
-Importing each HTLC descriptor automatically at swap creation would make this
-drill unnecessary: the wallet would never be in a position where it cannot
-spend its own swap. It is planned, not implemented, and the constraints above
-are why it needs care — the private form needs its own checksum, the
-`timestamp` must not trigger a rescan, and Core v30 will not let one wallet mix
-watch-only and private-key descriptors. See `docs/ROADMAP.md` §2.
+Each chain's HTLC is recorded in a **dedicated watch-only wallet** before that
+chain is funded, so a funded swap stays observable even if the signing wallet
+later loses its keys. That is a second copy of the *swap*, not of the keys: the
+wallet holds the same descriptor with every key public, has private keys
+disabled, and can confirm and report the outpoint without being able to spend
+it. `dashboard` says so when a live swap's HTLC is not solvable by any loaded
+wallet, because otherwise such a swap looks entirely normal.
+
+The wallets are named `<wallet>-watch` on each node, and can be pointed
+elsewhere:
+
+```bash
+BLAKE_SWAP_BLAKE_WATCH_WALLET=alice-watch    # BLAKE node
+BLAKE_SWAP_BTC_WATCH_WALLET=bob-watch        # Bitcoin node
+```
+
+The explicit form, for a swap funded before those wallets existed, for a
+wallet that was recreated, or just to see the answer:
+
+```bash
+scripts/blake engine watch-htlc <swap-id>            # both chains
+scripts/blake engine watch-htlc <swap-id> --chain blake --json
+```
+
+What is still manual is the part that needs a *private* key: if the signing
+wallet has already lost the keys, the descriptor in the watch-only wallet
+cannot spend, and sections 3–5 above are the drill. The private form needs its
+own checksum, the `timestamp` must not trigger a rescan, and Core v30 will not
+let one wallet mix watch-only and private-key descriptors — those constraints
+are why the automatic half imports the public form only. See
+`docs/ROADMAP.md` §2.

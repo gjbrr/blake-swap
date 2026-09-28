@@ -64,18 +64,30 @@ What remains before it can be described as generally deployable:
 
 ## 2. Watch-only HTLC descriptor import
 
-**Status: the manual procedure is implemented and tested; automatic import is
-planned.**
+**Status: implemented for the public (watch-only) form; the private-key
+import remains a manual procedure by design.**
 
-`scripts/blake engine recovery-plan <swap-id>` reports the descriptor, its checksum,
-the funding outpoint, which branch is yours, whether the wallet can currently
-spend it, and the import and spend steps. `docs/KEY_RECOVERY.md` is the
-procedure, and `tests/htlc_key_recovery_tests.py` performs it end to end: an
-HTLC is funded to a refund key the wallet has never held, the private
-descriptor is imported into a fresh wallet, and that wallet refunds.
+Each chain's HTLC is imported into a dedicated watch-only wallet before that
+chain is funded (`report_watch_only_import()`, and explicitly via
+`scripts/blake engine watch-htlc <swap-id>`), and `dashboard` reports a live
+swap whose HTLC no loaded wallet can solve. The wallet is created with
+`disable_private_keys` and `blank` set, so it holds no key of its own and
+cannot be confused with the signing wallet; the descriptor is the node's
+canonical public form, which already carries the checksum `importdescriptors`
+requires.
 
-Three constraints were confirmed against the node while building it, and they
-are the reason automatic import needs care rather than being a one-liner:
+Decided: **a wallet of its own per chain**, not the participant's, because
+Core refuses to mix a watch-only descriptor into a wallet with private keys
+enabled, and because the participant wallet's keys are exactly what a key loss
+destroys.
+
+The manual procedure remains for the case it exists for: a wallet that has
+*already* lost the keys needs the private form, with its own checksum, and
+`docs/KEY_RECOVERY.md` is that drill. `tests/htlc_key_recovery_tests.py`
+performs both halves end to end on regtest.
+
+Three constraints confirmed against the node, and the reason the automatic
+half imports the public form only:
 
 - `getdescriptorinfo` returns the **public** canonical form even when the input
   carried a private key, while its `checksum` belongs to the input string. A
@@ -88,29 +100,21 @@ are the reason automatic import needs care rather than being a one-liner:
   `BLAKE_SWAP_CHAIN_WALLET`, so pointing a command at a recovered wallet means
   setting the chain-specific variable.
 
-What automatic import still needs:
-
-The participant wallet currently holds the private keys behind the
-addresses used for HTLC claim and refund. A wallet restore that loses those
-keys makes both the claim and the refund impossible. Signing depends on
-them being present.
-
-- importing the descriptor at swap creation (or at first funding), with
-  `"timestamp": "now"`, so a participant is never in the position of holding a
-  swap it cannot spend;
-- deciding whether to import into the participant's existing wallet or a
-  dedicated watch-only wallet, since Core v30 will not let one wallet mix
-  watch-only and private-key descriptors;
-- reporting, in `dashboard`, a swap whose HTLC address is not solvable by the
-  current wallet — the condition this whole document exists to fix.
+Not done, and deliberately: importing at the moment of *funding discovery*
+rather than before funding (a swap funded by the counterparty before this
+build existed is reported by `dashboard` and can be recorded with the explicit
+`watch-htlc` command), and rescanning the chain for an HTLC funded before its
+descriptor was imported. `"timestamp": "now"` is correct for the normal order;
+a historical rescan is a different, much heavier operation.
 
 Already established: the engine asks the node to compile the policy
 (`wsh(or_i(and_v(v:pk(A),sha256(H)),and_v(v:after(T),pk(B))))`), so the funded
 script is the node's Miniscript compilation and the descriptor matches the
-output by construction. An HTLC **claim** also cannot be signed from a raw
-transaction over RPC at all, because the preimage reaches Core only through a
-PSBT input field (`PSBT_IN_SHA256`); the engine already builds claims that way,
-so that part needs no change.
+output by construction — which is why the watch-only copy can be built from the
+swap record alone, with no chain lookup. An HTLC **claim** also cannot be
+signed from a raw transaction over RPC at all, because Core accepts the SHA256
+preimage only through a PSBT input field (`PSBT_IN_SHA256`); the engine already
+injects it into a PSBT, so spending a recovered HTLC uses an existing path.
 
 ## 3. Public-network observation and scanning
 

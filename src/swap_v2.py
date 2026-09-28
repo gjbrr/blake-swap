@@ -1255,12 +1255,18 @@ def _rpc_argument(x):
     Render one Python value as a bitcoin-cli argument.
 
     The engine passes Python booleans for the JSON booleans the RPC
-    expects, and ``str(True)`` is not ``"true"``.
+    expects, and ``str(True)`` is not ``"true"``. Lists and dicts are the
+    same problem in a different shape: several RPCs take a JSON array or
+    object, and ``str([{"desc": ...}])`` is not JSON, so a structured
+    argument is encoded rather than repr'd. The node rejects the repr with
+    "Error parsing JSON", which is a confusing way to learn this.
     """
     if x is True:
         return "true"
     if x is False:
         return "false"
+    if isinstance(x, (list, dict)):
+        return json.dumps(x)
     return str(x)
 
 
@@ -1329,16 +1335,17 @@ def chain_dispatch(chain):
     """
     Everything the engine needs that differs between the two HTLC chains.
 
-    The chains differ only in prefix, entry point and contract verifier,
-    so this is derived rather than repeated as a pair of if/elif branches
-    at every call site: a per-chain fact added here cannot be wired up
-    for one chain and forgotten for the other.
+    The chains differ only in prefix, entry point, contract builder and
+    verifier, so this is derived rather than repeated as a pair of if/elif
+    branches at every call site: a per-chain fact added here cannot be
+    wired up for one chain and forgotten for the other.
 
     Returns a dict with `name`, `cli`, `wallet`, `tx_field`, `vout_field`,
-    `block_field` and `verifier`. Function references are resolved at call
-    time rather than stored in a module-level table, so replacing
-    `blake_cli`/`btc_cli` on the module keeps working: the transport and
-    fail-closed suites rely on exactly that.
+    `block_field`, `verifier`, `descriptor` and `derive_address`.
+    Function references are resolved at call time rather than stored in a
+    module-level table, so replacing `blake_cli`/`btc_cli` on the module
+    keeps working: the transport and fail-closed suites rely on exactly
+    that.
     """
     if chain == "btc":
         return {
@@ -1349,6 +1356,8 @@ def chain_dispatch(chain):
             "vout_field": "btc_funding_vout",
             "block_field": "btc_funding_blockhash",
             "verifier": verify_btc_contract,
+            "descriptor": get_btc_contract_descriptor,
+            "derive_address": derive_btc_contract_address,
         }
 
     if chain == "blake":
@@ -1360,6 +1369,8 @@ def chain_dispatch(chain):
             "vout_field": "blake_funding_vout",
             "block_field": "blake_funding_blockhash",
             "verifier": verify_blake_contract,
+            "descriptor": get_blake_contract_descriptor,
+            "derive_address": derive_blake_contract_address,
         }
 
     raise ValueError(f"Unknown HTLC chain: {chain}")
@@ -1432,6 +1443,266 @@ def descriptor_checksum(body, cli):
         )
 
     return checksum
+
+
+def htlc_contract(swap, chain):
+    """
+    The node's canonical public descriptor for this swap's HTLC, with its
+    derived address.
+
+    The descriptor comes back from `getdescriptorinfo` already
+    checksummed, which is the form `importdescriptors` requires and the
+    reason a caller must not checksum it again.
+    """
+    fields = chain_dispatch(chain)
+
+    descriptor = fields["descriptor"](swap)
+
+    return descriptor, fields["derive_address"](descriptor)
+
+
+def watch_only_wallet_name(chain):
+    """
+    The dedicated wallet that holds this participant's watch-only HTLCs.
+
+    A wallet of its own rather than the participant's, for the two reasons
+    Core enforces: a wallet with private keys enabled refuses to import a
+    watch-only descriptor at all ("Cannot import descriptor without
+    private keys to a wallet with private keys enabled"), and the
+    participant wallet's keys are exactly what a key loss destroys -- a
+    watch-only copy kept inside it would be lost with them.
+
+    The name is per chain but the wallet is per node, because the two
+    chains are separate datadirs: a default of `<wallet>-watch` on each
+    node is two wallets, not one.
+
+    Override with BLAKE_SWAP_BLAKE_WATCH_WALLET / BLAKE_SWAP_BTC_WATCH_WALLET.
+    """
+    if chain == "btc":
+        return os.environ.get(
+            "BLAKE_SWAP_BTC_WATCH_WALLET",
+            f"{BTC_WALLET}-watch",
+        )
+
+    if chain == "blake":
+        return os.environ.get(
+            "BLAKE_SWAP_BLAKE_WATCH_WALLET",
+            f"{BLAKE_WALLET}-watch",
+        )
+
+    raise ValueError(f"Unknown HTLC chain: {chain}")
+
+
+def ensure_watch_only_wallet(chain):
+    """
+    Return `(cli, wallet)` for the watch-only wallet, creating it if needed.
+
+    `disable_private_keys` and `blank` are the arguments that matter: the
+    wallet holds no key of its own and generates none, so it can never be
+    confused with the signing wallet, and importing the public HTLC
+    descriptor is the only way it learns about an output.
+    """
+    cli = chain_dispatch(chain)["cli"]
+
+    wallet = watch_only_wallet_name(chain)
+
+    loaded = cli("listwallets")
+
+    if isinstance(loaded, list) and wallet in loaded:
+        return cli, wallet
+
+    try:
+        cli("loadwallet", wallet)
+    except Exception:
+        cli(
+            "createwallet",
+            wallet,
+            True,     # disable_private_keys
+            True,     # blank
+            "",       # passphrase
+            False,    # avoid_reuse
+            True,     # descriptors
+        )
+
+    return cli, wallet
+
+
+def import_watch_only_htlc(swap, chain):
+    """
+    Import this swap's public HTLC descriptor into the watch-only wallet.
+
+    Idempotent: the descriptor is a pure function of the swap terms, so a
+    second call imports an identical string and the node reports that as a
+    warning rather than an error.
+
+    `timestamp` is `"now"` on purpose. The descriptor is imported before
+    the HTLC is funded, and a rescan of the whole chain to find an output
+    that does not exist yet would be wasted work. The point of the import
+    is that the output is *solvable* the moment it appears, which does not
+    need the wallet to have seen the chain before.
+
+    Returns a status dict rather than raising: the caller decides whether
+    a node that cannot keep a watch-only wallet should stop a funding
+    operation.
+    """
+    status = {
+        "chain": chain,
+        "descriptor": None,
+        "address": None,
+        "wallet": None,
+        "imported": False,
+        "reason": None,
+    }
+
+    try:
+        descriptor, address = htlc_contract(swap, chain)
+        cli, wallet = ensure_watch_only_wallet(chain)
+
+        status["descriptor"] = descriptor
+        status["address"] = address
+        status["wallet"] = wallet
+
+        result = cli(
+            "importdescriptors",
+            [
+                {
+                    "desc": descriptor,
+                    "timestamp": "now",
+                    "active": False,
+                    "internal": False,
+                    "label": f"htlc-{swap.swap_id}-{chain}",
+                }
+            ],
+            wallet=wallet,
+        )
+
+        if not isinstance(result, list) or not result:
+            status["reason"] = "the node returned no import result"
+            return status
+
+        failed = [
+            item.get("error", {}).get("message", "unknown error")
+            for item in result
+            if isinstance(item, dict) and not item.get("success")
+        ]
+
+        if failed:
+            status["reason"] = "; ".join(failed)
+            return status
+
+        status["imported"] = True
+        return status
+
+    except Exception as e:
+        status["reason"] = f"{type(e).__name__}: {e}"
+        return status
+
+
+def htlc_solvability(swap, chain):
+    """
+    Whether a loaded wallet can currently solve this swap's HTLC output.
+
+    Asks each wallet that might: the participant wallet, which can spend
+    it if it still holds the keys, and the watch-only wallet, which
+    imported the public descriptor and can therefore at least see and
+    confirm the output.
+
+    Returns a status dict; a chain that cannot be reached reports
+    `solvable: None` with a reason rather than raising, because this is
+    reported in a read-only dashboard.
+    """
+    status = {
+        "chain": chain,
+        "address": None,
+        "wallet": None,
+        "solvable": None,
+        "reason": None,
+    }
+
+    fields = chain_dispatch(chain)
+    cli = fields["cli"]
+
+    try:
+        _descriptor, address = htlc_contract(swap, chain)
+    except Exception as e:
+        status["reason"] = f"{type(e).__name__}: {e}"
+        return status
+
+    status["address"] = address
+
+    for wallet in (
+        fields["wallet"],
+        watch_only_wallet_name(chain),
+    ):
+        try:
+            loaded = cli("listwallets")
+        except Exception as e:
+            status["reason"] = (
+                f"wallet service unavailable: {type(e).__name__}: {e}"
+            )
+            return status
+
+        if not isinstance(loaded, list) or wallet not in loaded:
+            continue
+
+        try:
+            info = cli(
+                "getaddressinfo",
+                address,
+                wallet=wallet,
+            )
+        except Exception:
+            continue
+
+        if isinstance(info, dict) and info.get("solvable"):
+            status["wallet"] = wallet
+            status["solvable"] = True
+            return status
+
+    status["solvable"] = False
+    status["reason"] = (
+        "no loaded wallet can solve this HTLC; import the descriptor with "
+        "`watch-htlc` (see docs/KEY_RECOVERY.md)"
+    )
+    return status
+
+
+def report_watch_only_import(swap, chain):
+    """
+    Import the HTLC into the watch-only wallet before funds move, loudly.
+
+    A failure here does not stop funding: the private keys are present at
+    this moment, so the swap is spendable, and refusing to fund because a
+    *watch-only* copy could not be recorded would break the case it exists
+    to protect. What it must not do is pass unmentioned, so the outcome is
+    printed either way.
+    """
+    status = import_watch_only_htlc(swap, chain)
+
+    print()
+    print(f"WATCH-ONLY {chain.upper()} HTLC")
+    print("=" * (12 + len(chain)))
+
+    if status["imported"]:
+        print("wallet:  ", status["wallet"])
+        print("address: ", status["address"])
+        print(
+            "PASS: descriptor imported; this HTLC stays solvable "
+            "without the signing wallet"
+        )
+        return status
+
+    print("wallet:  ", status["wallet"] or "(none)")
+    print("address: ", status["address"] or "-")
+    print(
+        "WARNING: the HTLC was NOT recorded in a watch-only wallet: "
+        f"{status['reason']}"
+    )
+    print(
+        "         Funding may continue, but a later loss of the signing "
+        "wallet would leave this swap unspendable."
+    )
+    return status
 
 
 def get_blake_contract_descriptor(swap):
@@ -3043,6 +3314,14 @@ def command_fund_blake(args):
             raise RuntimeError(
                 "Insufficient trusted BLAKE balance for HTLC funding"
             )
+
+        #
+        # Record the HTLC as watch-only before any funds move, so a later
+        # loss of the signing wallet does not leave a funded swap that
+        # cannot even be observed. Non-fatal by design; see
+        # report_watch_only_import().
+        #
+        report_watch_only_import(swap, "blake")
 
         # Persist intent before funds may move.
         write_funding_intent(
@@ -6527,6 +6806,12 @@ def command_fund_btc(args):
             "will not fund it again"
         )
     else:
+        #
+        # Same as the BLAKE side: the watch-only record is written before
+        # funds may move, and its failure is reported rather than fatal.
+        #
+        report_watch_only_import(swap, "btc")
+
         # Persist intent before funds may move.
         write_funding_intent(
             swap,
@@ -18132,6 +18417,87 @@ def build_reconcile_report(swap):
         "read_only": True,
     }
 
+def command_watch_htlc(args):
+    """
+    Record this swap's HTLCs in the watch-only wallets, and report them.
+
+    Run automatically for each chain before that chain is funded; this is
+    the explicit form, for a swap funded before the watch-only wallet
+    existed, for a wallet that was recreated, or to check the answer
+    without funding anything.
+
+    A watch-only wallet is a second copy of what the swap *is*, not of the
+    keys that spend it: it holds the same descriptor with every key public,
+    so a later loss of the signing wallet leaves the outpoint observable
+    and the recovery procedure in docs/KEY_RECOVERY.md workable.
+    """
+    import json
+
+    swap = load_swap(args.swap_id)
+
+    chains = [args.chain] if args.chain else ["blake", "btc"]
+
+    results = []
+
+    for chain in chains:
+        fields = chain_dispatch(chain)
+
+        print()
+        print(f"{fields['name'].upper()} HTLC")
+        print("=" * (len(fields["name"]) + 5))
+
+        status = import_watch_only_htlc(swap, chain)
+        solvable = htlc_solvability(swap, chain)
+
+        results.append(
+            {
+                "chain": chain,
+                "wallet": status["wallet"],
+                "address": status["address"],
+                "imported": status["imported"],
+                "reason": status["reason"],
+                "solvable": solvable["solvable"],
+                "solvable_by": solvable["wallet"],
+            }
+        )
+
+        if status["imported"]:
+            print("wallet:  ", status["wallet"])
+            print("address: ", status["address"])
+            print("PASS: descriptor imported into the watch-only wallet")
+        else:
+            print("wallet:  ", status["wallet"] or "(none)")
+            print("FAIL: not imported:", status["reason"])
+
+        if solvable["solvable"]:
+            print(
+                "PASS: this HTLC is solvable by wallet "
+                f"{solvable['wallet']!r}"
+            )
+        elif solvable["solvable"] is False:
+            print(f"FAIL: not solvable: {solvable['reason']}")
+        else:
+            print(f"UNKNOWN: {solvable['reason']}")
+
+    if getattr(args, "json", False):
+        print(
+            json.dumps(
+                {
+                    "swap_id": swap.swap_id,
+                    "chains": results,
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return
+
+    if not all(item["imported"] for item in results):
+        raise RuntimeError(
+            "at least one HTLC could not be recorded in a watch-only wallet"
+        )
+
+
 def command_recovery_plan(args):
     """
     How to recover an HTLC whose keys this wallet no longer holds.
@@ -19448,6 +19814,38 @@ def command_next(args):
     )
 
 
+def dashboard_solvability(items):
+    """
+    Per-chain HTLC solvability for the swaps that still need something.
+
+    Settled swaps are not asked about: their HTLC is spent, so the answer
+    would cost two RPCs per chain and mean nothing. A swap with no HTLC
+    yet -- a placeholder offer, say -- reports `solvable: None` rather
+    than a warning, because it has not got one to solve.
+    """
+    status = {}
+
+    for item in items:
+        swap = item["swap"]
+        per_chain = {}
+
+        for chain in ("blake", "btc"):
+            try:
+                per_chain[chain] = htlc_solvability(swap, chain)
+            except Exception as e:
+                per_chain[chain] = {
+                    "chain": chain,
+                    "address": None,
+                    "wallet": None,
+                    "solvable": None,
+                    "reason": f"{type(e).__name__}: {e}",
+                }
+
+        status[swap.swap_id] = per_chain
+
+    return status
+
+
 def command_dashboard(args):
     import contextlib
     import io
@@ -19629,6 +20027,22 @@ def command_dashboard(args):
             "chains": {
                 "blake_status": blake_report.get("status"),
                 "btc_status": btc_report.get("status"),
+                #
+                # Whether a loaded wallet can solve the HTLC: True,
+                # False, or None when there is no HTLC yet or no chain to
+                # ask. A participant who cannot solve a funded HTLC is the
+                # condition docs/KEY_RECOVERY.md exists for.
+                #
+                "blake_solvable": (
+                    solvability.get(swap.swap_id, {})
+                    .get("blake", {})
+                    .get("solvable")
+                ),
+                "btc_solvable": (
+                    solvability.get(swap.swap_id, {})
+                    .get("btc", {})
+                    .get("solvable")
+                ),
             },
             "transactions": {
                 "blake_funding_txid": swap.blake_funding_txid,
@@ -19639,6 +20053,12 @@ def command_dashboard(args):
                 "blake_refund_txid": swap.blake_refund_txid,
             },
         }
+
+    #
+    # Only the swaps that still need something are asked about, and only
+    # once: the answer is used by both the JSON view and the human one.
+    #
+    solvability = dashboard_solvability(active + attention)
 
     if getattr(args, "json", False):
         result = {
@@ -19764,6 +20184,36 @@ def command_dashboard(args):
     print("attention: ", len(attention))
     print("settled:   ", len(settled))
     print("archived:  ", len(archived))
+
+    #
+    # Only printed when there is something to say, so the usual output is
+    # unchanged. A live swap whose HTLC no loaded wallet can solve is the
+    # failure docs/KEY_RECOVERY.md exists for, and it is silent otherwise:
+    # the swap looks normal in every other line above.
+    #
+    unsolvable = [
+        (item["swap"].swap_id, chain, status)
+        for item in active + attention
+        for chain, status in solvability.get(
+            item["swap"].swap_id, {}
+        ).items()
+        if status["solvable"] is False
+    ]
+
+    if unsolvable:
+        print()
+        print("HTLCs NOT SOLVABLE BY A LOADED WALLET")
+        print("=====================================")
+
+        for swap_id, chain, status in unsolvable:
+            print(f"{swap_id}  {chain:<5}  {status['reason']}")
+
+        print()
+        print(
+            "Record the descriptor with "
+            "`scripts/blake engine watch-htlc <swap-id>`, or follow"
+        )
+        print("docs/KEY_RECOVERY.md if the signing keys are already gone.")
 
 
 
@@ -21367,6 +21817,31 @@ def main():
     p.set_defaults(
         func=command_sync_funding,
     )
+
+    p = sub.add_parser(
+        "watch-htlc",
+        help=(
+            "Record this swap's HTLC descriptors in the watch-only "
+            "wallets, so a funded swap stays observable after a key loss"
+        ),
+    )
+
+    p.add_argument("swap_id")
+
+    p.add_argument(
+        "--chain",
+        choices=["blake", "btc"],
+        default=None,
+        help="Only this chain (default: both)",
+    )
+
+    p.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit machine-readable JSON",
+    )
+
+    p.set_defaults(func=command_watch_htlc)
 
     p = sub.add_parser(
         "recovery-plan",

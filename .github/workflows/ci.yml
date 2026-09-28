@@ -1,0 +1,157 @@
+name: CI
+
+# Runs the whole suite, including the node-backed regtest suites, by
+# provisioning the same two-chain rig the project is developed against:
+# Bitcoin Core for one chain and Bitcoin Knots for the other. Testing both
+# chains with the same binary would silently drop the cross-implementation
+# evidence that tests/swap_cross_impl_* and the rig exist to provide.
+#
+# The coverage gate runs here and nowhere else: the regtest suites are what
+# carry most of src/, so a unit-only job would fail the threshold for the
+# wrong reason.
+#
+# The public-relay suites are deliberately absent. They need real relays and
+# two real participant keys, they are slower and less predictable, and a
+# merge should not depend on a third party being up. Run them with
+# `scripts/test.sh --with-nostr` on a schedule instead, if at all.
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+env:
+  # Pinned to the versions this project is developed and validated against.
+  # Knots publishes no "latest" alias, so the version appears in both the
+  # directory and the file name.
+  CORE_VERSION: "30.3"
+  KNOTS_VERSION: "29.3.knots20260508"
+  CORE_SHA256: "4753cd70416c629a2090503e8545a3c05e94a0f5037f8fb97b4c35c6e1afee0e"
+  KNOTS_SHA256: "70bd12fb56a2fe3908e0f44f7f142f77a55aabc8427bf00b61cfa4deedcf0899"
+
+jobs:
+  test:
+    # Pinned rather than ubuntu-latest: the label moves to the next LTS in
+    # November 2026, and a runner change should be a deliberate commit.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Create the virtual environment
+        run: |
+          set -euo pipefail
+          python -m venv .venv
+          .venv/bin/python -m pip install --upgrade pip
+          #
+          # Install the project itself with its extras, rather than only
+          # requirements.txt: that exercises the packaging metadata, and the
+          # dev extra is what parses the workflow in tests/packaging_tests.py.
+          #
+          .venv/bin/python -m pip install -e ".[dev]" coverage
+          .venv/bin/coverage --version
+
+      - name: Cache the node binaries
+        id: node-binaries
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/s/bitcoin-core
+            ~/s/bitcoin-knots
+          key: bitcoin-binaries-${{ runner.os }}-core${{ env.CORE_VERSION }}-knots${{ env.KNOTS_VERSION }}
+
+      - name: Download and verify both node binaries
+        if: steps.node-binaries.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/s" /tmp/binaries
+          cd /tmp/binaries
+
+          curl -fsSLO \
+            "https://bitcoincore.org/bin/bitcoin-core-${CORE_VERSION}/bitcoin-${CORE_VERSION}-x86_64-linux-gnu.tar.gz"
+          echo "${CORE_SHA256}  bitcoin-${CORE_VERSION}-x86_64-linux-gnu.tar.gz" | sha256sum -c -
+          tar -xzf "bitcoin-${CORE_VERSION}-x86_64-linux-gnu.tar.gz" -C "$HOME/s"
+          mv "$HOME/s/bitcoin-${CORE_VERSION}" "$HOME/s/bitcoin-core"
+
+          curl -fsSLO \
+            "https://bitcoinknots.org/files/29.x/${KNOTS_VERSION}/bitcoin-${KNOTS_VERSION}-x86_64-linux-gnu.tar.gz"
+          echo "${KNOTS_SHA256}  bitcoin-${KNOTS_VERSION}-x86_64-linux-gnu.tar.gz" | sha256sum -c -
+          tar -xzf "bitcoin-${KNOTS_VERSION}-x86_64-linux-gnu.tar.gz" -C "$HOME/s"
+          mv "$HOME/s/bitcoin-${KNOTS_VERSION}" "$HOME/s/bitcoin-knots"
+
+          "$HOME/s/bitcoin-core/bin/bitcoin-cli" --version
+          "$HOME/s/bitcoin-knots/bin/bitcoin-cli" --version
+
+      - name: Fail early on a regtest port conflict
+        run: |
+          set -euo pipefail
+          if ss -ltn | grep -E ':(18443|18444|19443|19444)\b'; then
+            echo "ERROR: a regtest port is already in use on this runner" >&2
+            exit 1
+          fi
+
+      - name: Start the two-chain regtest rig
+        run: |
+          set -euo pipefail
+          #
+          # scripts/test-nodes writes bitcoin.conf itself and exits 2 if
+          # either RPC does not come up within its wait budget, so a rig
+          # that never starts fails the job here rather than letting the
+          # node-backed suites skip.
+          #
+          ulimit -n 65536
+          scripts/test-nodes start
+          scripts/test-nodes status
+
+          rig="$HOME/.blake-swap-test/rig-env.json"
+          test "$(jq -r .running "$rig")" = "true"
+
+          btc_cli="$(jq -r .btc_cli "$rig")"
+          btc_datadir="$(jq -r .btc_datadir "$rig")"
+          blake_cli="$(jq -r .blake_cli "$rig")"
+          blake_datadir="$(jq -r .blake_datadir "$rig")"
+
+          test "$("$btc_cli" -datadir="$btc_datadir" getblockcount)" -ge 101
+          test "$("$blake_cli" -datadir="$blake_datadir" getblockcount)" -ge 101
+
+      - name: Unit suites (fast gate)
+        run: |
+          set -euo pipefail
+          #
+          # --strict turns a SKIP into a failure, so a suite that cannot run
+          # is never counted as a pass.
+          #
+          scripts/test.sh --unit-only --strict
+
+      - name: Documentation alignment
+        run: |
+          set -euo pipefail
+          PYTHONPATH="$PWD/src:$PWD/tests" \
+            .venv/bin/python tests/docs_alignment_tests.py
+
+      - name: Full suite under coverage, gated at 80%
+        run: |
+          set -euo pipefail
+          #
+          # coverage.sh installs the subprocess startup hook itself and
+          # refuses to report without it, so the engine's own coverage is
+          # measured rather than assumed.
+          #
+          scripts/coverage.sh --fail-under 80 --strict --html
+
+      - name: Upload the coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: htmlcov
+          path: htmlcov/
+          if-no-files-found: warn
+
+      - name: Stop the rig
+        if: always()
+        run: scripts/test-nodes stop || true

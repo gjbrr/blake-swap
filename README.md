@@ -156,7 +156,7 @@ scripts/
   stability-check          static safety-invariant checks
   wire_inventory.py        regenerate the wire message inventory
 
-tests/                     50 suites: unit tests and regtest integration
+tests/                     51 suites: unit tests and regtest integration
 tools/minimal_*.py         independent wire-message producers
 checkpoints/v1.5/          frozen earlier snapshot with SHA256SUMS
 ```
@@ -171,7 +171,7 @@ Node-free unit suites run anywhere:
 ./scripts/test.sh --unit-only
 ```
 
-The full suite covers all 50 test files, including the regtest
+The full suite covers all 51 test files, including the regtest
 integration suites and the independent-implementation wire suites. The
 regtest suites need two chain nodes; `scripts/test-nodes` starts a
 disposable Bitcoin Core + Bitcoin Knots rig for them:
@@ -191,6 +191,15 @@ project's coverage gate, which the current suite set meets.
 
 `scripts/test-nodes` and `scripts/coverage.sh` document their own
 options with `--help`.
+
+CI (`.github/workflows/ci.yml`) does the same thing on a clean runner: it
+installs the project with `pip install -e ".[dev]"`, downloads the pinned
+Bitcoin Core and Bitcoin Knots builds with their checksums, starts the rig,
+**verifies the rig actually came up** (a runner exits 0 for a skipped suite, so
+this is checked explicitly), runs the unit suites and the documentation check
+with `--strict`, and then gates the full suite at `--fail-under 80`. The
+public-relay suites never gate a merge. `tests/packaging_tests.py` keeps the
+workflow, the packaging metadata and `requirements.txt` from drifting apart.
 
 See `tests/README.md` for the suite inventory, prerequisites, and the
 environment variables that override node discovery. The integration

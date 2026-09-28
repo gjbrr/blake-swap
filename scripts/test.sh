@@ -80,6 +80,7 @@ UNIT_SUITES=(
     tests/blake_amount_tests.py
     tests/schema_equality_tests.py
     tests/nip44_tests.py
+    tests/packaging_tests.py
 )
 
 REGTEST_SUITES=(

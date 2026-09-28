@@ -383,19 +383,18 @@ def test_accept_match_performs_the_whole_reverse_step():
         "accept-match did not publish Alice's protocol offer"
     )
 
-    # 2. Running it again must fail closed rather than import a second
-    #    time. (The friendlier "already imported" message is only
-    #    reachable when the match is still discoverable; for a
-    #    reverse-direction match that has been imported it is not, so the
-    #    command refuses. Either way the existing swap is untouched —
-    #    see NEW-15 in the correctness review.)
-    repeat = run("alice", "accept-match", match_id, expect_ok=False)
-
-    assert repeat.returncode != 0, repeat.stdout
+    # 2. Running it again must not import a second time. After the import
+    #    the match is no longer pending, so the answer comes from the
+    #    durable binding the import wrote and the command reports the
+    #    duplicate instead of failing: a crash retry of a command that
+    #    already succeeded is not an error. (This used to refuse with
+    #    "No pending valid match begins with ..." — NEW-15 in the
+    #    correctness review, fixed by reading the durable binding first.)
+    repeat = run("alice", "accept-match", match_id)
 
     repeat_text = repeat.stdout + repeat.stderr
 
-    assert "No pending valid match begins with" in repeat_text, repeat_text
+    assert "MARKET MATCH ALREADY IMPORTED" in repeat_text, repeat_text
 
     alice = load_state("alice", swap_id)
 
@@ -407,6 +406,22 @@ def test_accept_match_performs_the_whole_reverse_step():
     assert len(stub_events("blake-swap")) == before_protocol_offers + 1, (
         "a repeat accept-match published a second protocol offer"
     )
+
+    #
+    # And a prefix that matches nothing locally still refuses: the
+    # friendly branch must not have swallowed the fail-closed guard.
+    #
+    unknown = run(
+        "alice",
+        "accept-match",
+        "f" * 64,
+        expect_ok=False,
+    )
+
+    assert unknown.returncode != 0, unknown.stdout
+    assert (
+        "No pending valid match begins with" in unknown.stdout + unknown.stderr
+    ), unknown.stdout
 
 
 def test_market_match_labels_follow_the_direction():

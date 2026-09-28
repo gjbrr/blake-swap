@@ -332,6 +332,61 @@ def test_results_are_decoded_and_text_passes_through():
         raise AssertionError(f"plain text was not passed through: {decoded!r}")
 
 
+def test_a_warning_before_the_json_does_not_hide_it():
+    """
+    The reply is JSON that happens to be preceded by a warning.
+
+    Treating the whole stream as text would hand a caller that expects an
+    object a string, and the caller would then fail somewhere unrelated to
+    the cause.
+    """
+    original = swap_v2.subprocess
+
+    for stdout, expected in (
+        ('Warning: unknown setting\n{"blocks": 7}\n', {"blocks": 7}),
+        ('Warning: one\nWarning: two\n[1, 2, 3]\n', [1, 2, 3]),
+        ('{"blocks": 7}\ntrailing text\n', {"blocks": 7}),
+    ):
+        swap_v2.subprocess = FakeSubprocess(
+            result=SimpleNamespace(
+                returncode=0,
+                stdout=stdout,
+                stderr="",
+            )
+        )
+
+        try:
+            decoded = swap_v2.run_chain_cli("BLAKE", ["bitcoin-cli"])
+        finally:
+            swap_v2.subprocess = original
+
+        if decoded != expected:
+            raise AssertionError(
+                f"warning-prefixed reply decoded as {decoded!r}, "
+                f"expected {expected!r}"
+            )
+
+    #
+    # And genuine text still passes through: a reply with no JSON document
+    # in it is not made into one.
+    #
+    swap_v2.subprocess = FakeSubprocess(
+        result=SimpleNamespace(
+            returncode=0,
+            stdout="error: no JSON here\n",
+            stderr="",
+        )
+    )
+
+    try:
+        decoded = swap_v2.run_chain_cli("BLAKE", ["bitcoin-cli"])
+    finally:
+        swap_v2.subprocess = original
+
+    if decoded != "error: no JSON here":
+        raise AssertionError(f"plain text was not passed through: {decoded!r}")
+
+
 def test_nonzero_exit_raises_the_node_error():
     fake = FakeSubprocess(
         result=SimpleNamespace(
@@ -410,6 +465,7 @@ def main():
     check("the argv/stdin boundary is exact", test_the_boundary_is_exact)
     check("a failed exec becomes a named error", test_exec_failure_becomes_a_named_error)
     check("a timeout names the override", test_timeout_names_the_override)
+    check("a warning before the JSON does not hide it", test_a_warning_before_the_json_does_not_hide_it)
     check("results are decoded, text passes through", test_results_are_decoded_and_text_passes_through)
     check("a non-zero exit raises the node error", test_nonzero_exit_raises_the_node_error)
     check("the real node accepts the stdin transport", test_real_node_accepts_the_stdin_transport)

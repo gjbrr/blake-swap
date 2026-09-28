@@ -321,6 +321,102 @@ def test_accept_only_match_refuses_with_no_matches():
     )
 
 
+def test_accept_match_recognises_an_already_imported_match():
+    """
+    A crash retry must not be told the match does not exist.
+
+    After the import the match is no longer pending, so relay discovery
+    cannot see it again: the answer has to come from the durable binding
+    the import wrote. The guard must survive the fix, so an unknown prefix
+    still refuses.
+    """
+    clear_state()
+
+    binding_dir = SCRATCH / "market-match-bindings"
+    binding_dir.mkdir(parents=True, exist_ok=True)
+
+    match_id = "ab" * 32
+    swap_id = "0123456789ab"
+
+    (binding_dir / f"{swap_id}.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "offer_id": "cd" * 32,
+                "take_id": "ef" * 32,
+                "swap_id": swap_id,
+                "maker": OTHER,
+                "taker": ME,
+                "blake_amount": 0.1,
+                "btc_sats": 25000,
+                "first_match_id": match_id,
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n"
+    )
+
+    captures(
+        "accept-match recognises an already imported match",
+        lambda: swap_v2.command_accept_only_match(
+            SimpleNamespace(match_id=match_id[:10])
+        ),
+        "ALREADY IMPORTED",
+        swap_id,
+    )
+
+    #
+    # The reverse-direction binding records the same relationship under
+    # `match_id`. Both shapes must be recognised, or the fix only works
+    # for one of the two market directions.
+    #
+    reverse_match_id = "12" * 32
+    reverse_swap_id = "fedcba987654"
+
+    (binding_dir / f"{reverse_swap_id}.json").write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "offer_id": "34" * 32,
+                "take_id": "56" * 32,
+                "match_id": reverse_match_id,
+                "swap_id": reverse_swap_id,
+                "maker": OTHER,
+                "taker": ME,
+                "maker_role": "bob",
+                "taker_role": "alice",
+                "blake_amount": 0.1,
+                "btc_sats": 25000,
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n"
+    )
+
+    captures(
+        "accept-match recognises a reverse-direction binding",
+        lambda: swap_v2.command_accept_only_match(
+            SimpleNamespace(match_id=reverse_match_id[:10])
+        ),
+        "ALREADY IMPORTED",
+        reverse_swap_id,
+    )
+
+    refuses(
+        "an unknown prefix still refuses with bindings present",
+        lambda: swap_v2.command_accept_only_match(
+            SimpleNamespace(match_id="ffffffff")
+        ),
+    )
+
+    clear_state()
+
+    for path in binding_dir.glob("*.json"):
+        path.unlink()
+
+
 def test_accept_reverse_swap_offer_refuses_unknown_match():
     clear_state()
 
@@ -1031,6 +1127,111 @@ def test_state_file_and_write_helpers():
     clear_state()
 
 
+def test_oversized_events_are_refused():
+    """
+    The engine bounds what it will publish.
+
+    Relays reject oversized events, but they do not agree on a limit, so
+    without this bound an event with a runaway `content` field is refused
+    by some relays and accepted by others instead of failing once, here.
+    """
+    import asyncio
+
+    guard_name = "BLAKE_SWAP_MAX_EVENT_BYTES"
+    original = os.environ.pop(guard_name, None)
+
+    try:
+        #
+        # A realistic settlement message is far under the default.
+        #
+        size = swap_v2.require_publishable_event_size(
+            {"kind": 1, "content": json.dumps({"txid": "aa" * 32})}
+        )
+
+        holds(
+            "a normal coordination event passes the size guard",
+            0 < size < 64 * 1024,
+            f"the guard measured {size} bytes",
+        )
+
+        refuses(
+            "an oversized event is refused by the guard",
+            lambda: swap_v2.require_publishable_event_size(
+                {"kind": 1, "content": "x" * (200 * 1024)}
+            ),
+        )
+
+        #
+        # And the publish path applies the guard before anything else.
+        #
+        # This must assert the *size* refusal, not merely that something
+        # raised: an unsigned oversized event is refused by signature
+        # verification too, so accepting any exception here would pass
+        # with the guard removed.
+        #
+        def publish_oversized():
+            asyncio.run(
+                swap_v2.nostr_publish_event(
+                    {"kind": 1, "content": "x" * (200 * 1024)}
+                )
+            )
+
+        try:
+            publish_oversized()
+        except RuntimeError as e:
+            holds(
+                "the publish path refuses an oversized event on size",
+                guard_name in str(e),
+                f"the publish path refused for another reason: {e}",
+            )
+        else:
+            fail(
+                "the publish path refuses an oversized event on size",
+                "the oversized event was published",
+            )
+
+        try:
+            swap_v2.require_publishable_event_size(
+                {"kind": 1, "content": "x" * (200 * 1024)}
+            )
+        except RuntimeError as e:
+            holds(
+                "the size refusal names the override",
+                guard_name in str(e),
+                f"the refusal did not name {guard_name}: {e}",
+            )
+        else:
+            fail("the size refusal names the override", "no refusal")
+
+        for bad in ("not-a-number", "10", "-5"):
+            os.environ[guard_name] = bad
+
+            refuses(
+                f"a {bad!r} event-size limit is refused",
+                swap_v2.max_nostr_event_bytes,
+            )
+
+        os.environ[guard_name] = "2048"
+
+        holds(
+            "a larger-than-default limit is accepted",
+            swap_v2.max_nostr_event_bytes() == 2048,
+            "the override was not read",
+        )
+
+        refuses(
+            "the override is applied to real events",
+            lambda: swap_v2.require_publishable_event_size(
+                {"kind": 1, "content": "x" * 4096}
+            ),
+        )
+    finally:
+        if original is None:
+            os.environ.pop(guard_name, None)
+        else:
+            os.environ[guard_name] = original
+
+
 def test_chain_dispatch_and_settlement_lookup():
     """
     The one place that decides what differs between the two chains, and
@@ -1131,6 +1332,7 @@ def main():
         guard("dismiss ambiguous prefix", test_dismiss_ambiguous_prefix)
         guard("dismiss funding evidence", test_dismiss_refuses_funding_evidence)
         guard("accept-match with no matches", test_accept_only_match_refuses_with_no_matches)
+        guard("accept-match already imported", test_accept_match_recognises_an_already_imported_match)
         guard("accept-reverse-swap-offer unknown match", test_accept_reverse_swap_offer_refuses_unknown_match)
         guard("market take unknown ids", test_market_take_refuses_unknown_ids)
         guard("fund readiness", test_fund_ready_swap_refuses_with_nothing_ready)
@@ -1141,6 +1343,7 @@ def main():
         guard("market take validator guards", test_market_take_validator_guards)
         guard("next with nothing to do", test_next_is_safe_with_nothing_to_do)
         guard("state file and write helpers", test_state_file_and_write_helpers)
+        guard("oversized events are refused", test_oversized_events_are_refused)
         guard("chain dispatch and settlement lookup", test_chain_dispatch_and_settlement_lookup)
     finally:
         STUB.stop()

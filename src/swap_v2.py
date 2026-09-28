@@ -1211,7 +1211,43 @@ def run_chain_cli(label, cmd, stdin_text=None):
     try:
         return json.loads(out)
     except json.JSONDecodeError:
-        return out
+        pass
+
+    #
+    # A node can put a warning in front of its JSON. Most warnings go to
+    # stderr, but not all of them, and the wording and destination are not
+    # stable across Bitcoin Core and Knots versions. Decoding from the
+    # first structural character keeps a warning-prefixed reply from being
+    # handed to a caller as a string when it expects an object.
+    #
+    start = _first_json_offset(out)
+
+    if start is not None:
+        try:
+            value, _end = json.JSONDecoder().raw_decode(out, start)
+        except ValueError:
+            pass
+        else:
+            return value
+
+    return out
+
+
+def _first_json_offset(text):
+    """
+    Offset of the first `{` or `[` in `text`, or None.
+
+    Used to find a JSON document that follows a node warning. A bare
+    number or quoted string cannot be found this way, and does not need to
+    be: `json.loads` already handles those.
+    """
+    offsets = [
+        offset
+        for offset in (text.find("{"), text.find("["))
+        if offset >= 0
+    ]
+
+    return min(offsets) if offsets else None
 
 
 def _rpc_argument(x):
@@ -3836,13 +3872,15 @@ def file_send_message(
         "message": message,
     }
 
-    with open(path, "w") as f:
-        json.dump(
-            envelope,
-            f,
-            indent=2,
-            sort_keys=True,
-        )
+    #
+    # A transport spool rather than protocol state: the message can be
+    # re-sent, so the rename does not need to be durable. It does need to
+    # be atomic, so the peer never reads half an envelope.
+    #
+    atomic_write_json(
+        path,
+        envelope,
+    )
 
     return path
 
@@ -4428,8 +4466,85 @@ async def nostr_publish_event_to_relay(
                 }
 
 
+def max_nostr_event_bytes():
+    """
+    The largest serialized event this engine will publish.
+
+    Relays enforce their own limits, advertised in NIP-11 as
+    `max_message_length`, and the useful range across public relays is
+    wide. This is deliberately not an attempt to match any particular
+    relay: it is a bound the engine applies before handing an event to a
+    network it does not control, so that a runaway `content` field is
+    refused here with a clear message instead of being rejected by
+    whichever relay happens to be strictest, after seven others accepted
+    it.
+
+    A settlement or market message is a few kilobytes, so the default
+    leaves more than an order of magnitude of headroom. Override with
+    BLAKE_SWAP_MAX_EVENT_BYTES.
+    """
+    default = 64 * 1024
+
+    raw = os.environ.get(
+        "BLAKE_SWAP_MAX_EVENT_BYTES",
+        "",
+    ).strip()
+
+    if not raw:
+        return default
+
+    try:
+        value = int(raw)
+    except ValueError as e:
+        raise RuntimeError(
+            "BLAKE_SWAP_MAX_EVENT_BYTES must be an integer"
+        ) from e
+
+    if value < 1024:
+        raise RuntimeError(
+            "BLAKE_SWAP_MAX_EVENT_BYTES must be at least 1024"
+        )
+
+    return value
+
+
+def require_publishable_event_size(event):
+    """
+    Refuse to publish an event larger than the configured bound.
+
+    Returns the serialized size in bytes. Raises before any signature
+    verification, caching or network work, so an oversized event costs
+    nothing and cannot be half-published.
+    """
+    size = len(
+        json.dumps(
+            event,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    )
+
+    limit = max_nostr_event_bytes()
+
+    if size > limit:
+        raise RuntimeError(
+            f"Refusing to publish a {size}-byte Nostr event: "
+            f"the limit is {limit} bytes "
+            f"(BLAKE_SWAP_MAX_EVENT_BYTES)"
+        )
+
+    return size
+
+
 async def nostr_publish_event(event):
     import asyncio
+
+    #
+    # Bound the event first. An event too large for the relays must be
+    # refused by the engine, before it is cached or offered to any of
+    # them.
+    #
+    require_publishable_event_size(event)
 
     #
     # Preserve our own exact signed event before
@@ -12428,13 +12543,15 @@ def command_publish_market_match(args):
         "market_match_id"
     ] = match_id
 
-    with open(selection_path, "w") as f:
-        json.dump(
-            selection,
-            f,
-            indent=2,
-            sort_keys=True,
-        )
+    #
+    # Durable: this is what binds the published match to the swap, and a
+    # crash that lost it would leave the match unresolvable locally.
+    #
+    atomic_write_json(
+        selection_path,
+        selection,
+        fsync_directory=True,
+    )
 
     print()
     print("MARKET MATCH PUBLISHED")
@@ -13493,10 +13610,7 @@ def command_accept_reverse_market_match(args):
     #
     # Durable reverse-market binding.
     #
-    binding_dir = (
-        BASE_SWAP_DIR
-        / "market-match-bindings"
-    )
+    binding_dir = market_match_binding_dir()
 
     binding_dir.mkdir(
         parents=True,
@@ -14010,6 +14124,32 @@ def command_accept_only_match(args):
         ]
 
         if not filtered:
+            #
+            # The match may simply not be pending any more because this
+            # participant already imported it. A crash retry runs the same
+            # command again, and "no pending match" would be a false and
+            # alarming report about a swap that exists and is fine.
+            #
+            bound = locally_bound_market_match(requested)
+
+            if bound is not None:
+                bound_swap_id, bound_match_id = bound
+
+                print()
+                print("MARKET MATCH ALREADY IMPORTED")
+                print("=============================")
+                print("match id:", bound_match_id)
+                print("swap id: ", bound_swap_id)
+                print()
+                print(
+                    "PASS: duplicate command did not create a new swap"
+                )
+                print(
+                    "PASS: durable market binding is intact"
+                )
+                print("PASS: no funds moved")
+                return
+
             raise RuntimeError(
                 f"No pending valid match begins with {requested!r}"
             )
@@ -14137,6 +14277,66 @@ def command_accept_only_match(args):
 
 
 
+def market_match_binding_dir():
+    return BASE_SWAP_DIR / "market-match-bindings"
+
+
+def market_match_ids_in_binding(binding):
+    """
+    The match IDs a durable market binding records.
+
+    The two directions store different keys: the reverse binding (written
+    by the maker's side) carries `match_id`, and the forward binding
+    carries `first_match_id` as informational evidence. Both names answer
+    the same question -- which match produced this swap -- so both are
+    read here rather than duplicating the lookup per direction.
+    """
+    return [
+        value
+        for value in (
+            binding.get("match_id"),
+            binding.get("first_match_id"),
+        )
+        if isinstance(value, str)
+    ]
+
+
+def locally_bound_market_match(prefix):
+    """
+    Find a match that has already been imported, by its ID prefix.
+
+    After an import the match is no longer *pending*, so relay discovery
+    cannot be asked about it again. A repeat of a command that was
+    interrupted after the import therefore has to be answered from the
+    durable binding the import wrote, which is what this reads.
+
+    Returns `(swap_id, match_id)`, or None when no local binding matches.
+    """
+    directory = market_match_binding_dir()
+
+    if not directory.exists():
+        return None
+
+    for path in sorted(directory.glob("*.json")):
+        if not is_swap_id(path.stem):
+            continue
+
+        try:
+            with open(path) as f:
+                binding = json.load(f)
+        except Exception:
+            continue
+
+        if not isinstance(binding, dict):
+            continue
+
+        for match_id in market_match_ids_in_binding(binding):
+            if match_id.startswith(prefix):
+                return path.stem, match_id
+
+    return None
+
+
 def command_accept_market_match(args):
     args.match_id = resolve_cached_nostr_prefix(
         args.match_id,
@@ -14183,10 +14383,7 @@ def command_accept_market_match(args):
     #   taker
     #   economic terms
     #
-    binding_dir = (
-        BASE_SWAP_DIR
-        / "market-match-bindings"
-    )
+    binding_dir = market_match_binding_dir()
 
     binding_dir.mkdir(
         parents=True,
@@ -15168,22 +15365,18 @@ def command_accept_market_take(args):
         # if an earlier run stopped between writes.
         #
         if existing_take_selection is None:
-            with open(selection_path, "w") as f:
-                json.dump(
-                    canonical_selection,
-                    f,
-                    indent=2,
-                    sort_keys=True,
-                )
+            atomic_write_json(
+                selection_path,
+                canonical_selection,
+                fsync_directory=True,
+            )
 
         if existing_offer_selection is None:
-            with open(offer_selection_path, "w") as f:
-                json.dump(
-                    canonical_selection,
-                    f,
-                    indent=2,
-                    sort_keys=True,
-                )
+            atomic_write_json(
+                offer_selection_path,
+                canonical_selection,
+                fsync_directory=True,
+            )
 
         print()
         print("MARKET TAKE ALREADY ACCEPTED")
@@ -15310,13 +15503,16 @@ def command_accept_market_take(args):
             bob_nostr_pub,
     }
 
-    with open(selection_path, "w") as f:
-        json.dump(
-            selection_record,
-            f,
-            indent=2,
-            sort_keys=True,
-        )
+    #
+    # Durable before anything is announced: these two files are what stop
+    # a second take creating a second swap from the same offer, so losing
+    # either one is losing that guarantee.
+    #
+    atomic_write_json(
+        selection_path,
+        selection_record,
+        fsync_directory=True,
+    )
 
     #
     # Also bind the original market offer to its
@@ -15324,13 +15520,11 @@ def command_accept_market_take(args):
     # authentic evidence, but cannot create another
     # swap from this offer.
     #
-    with open(offer_selection_path, "w") as f:
-        json.dump(
-            selection_record,
-            f,
-            indent=2,
-            sort_keys=True,
-        )
+    atomic_write_json(
+        offer_selection_path,
+        selection_record,
+        fsync_directory=True,
+    )
 
     print()
     print("MARKET TAKE ACCEPTED")

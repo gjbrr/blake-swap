@@ -28,6 +28,7 @@ from fee_policy import (
 import subprocess
 import os
 import shlex
+import shutil
 import fcntl
 
 BASE_SWAP_DIR = Path(
@@ -125,6 +126,25 @@ BTC_WALLET = os.environ.get(
 
 MARKET_DIRECTION_BLAKE_FOR_BTC = "blake-for-btc"
 MARKET_DIRECTION_BTC_FOR_BLAKE = "btc-for-blake"
+
+
+def market_role_labels(direction):
+    """
+    The protocol role each market role binds, for one market direction.
+
+    `maker` and `taker` are market roles and never move; the protocol
+    roles they bind invert with the direction. Every human-facing view
+    derives its labels here, because the original single-direction
+    implementation hardcoded `blake-for-btc` and therefore mislabelled
+    every `btc-for-blake` negotiation.
+    """
+    if direction == MARKET_DIRECTION_BTC_FOR_BLAKE:
+        return {"maker": "bob", "taker": "alice"}
+
+    if direction == MARKET_DIRECTION_BLAKE_FOR_BTC:
+        return {"maker": "alice", "taker": "bob"}
+
+    return {"maker": "unknown", "taker": "unknown"}
 
 MARKET_DIRECTIONS = {
     MARKET_DIRECTION_BLAKE_FOR_BTC,
@@ -2612,6 +2632,108 @@ def command_fund_blake(args):
     print("block:  ", blockhash)
     print("state:  ", swap.state)
 
+def superseded_placeholders(keep_swap_id, role):
+    """
+    Local OFFERED swaps that are pure, unannounced placeholders.
+
+    A placeholder has no counterparty, no Alice contract keys (filling
+    those in is what `publish-offer` does) and no funding or settlement
+    transaction. Nobody else can be relying on such a record, so creating
+    a new swap supersedes it.
+
+    Anything that has been announced is deliberately excluded: it may
+    still be accepted, so it is left alone and reported instead of being
+    archived behind the operator's back.
+    """
+    placeholders = []
+
+    for path in sorted(BASE_SWAP_DIR.glob("*.json")):
+        if len(path.stem) != 12 or path.stem == keep_swap_id:
+            continue
+
+        try:
+            candidate = load_swap(path.stem, role=role)
+        except Exception:
+            continue
+
+        if candidate.state != State.OFFERED.value:
+            continue
+
+        if (
+            candidate.nostr_bob_pub
+            or candidate.blake_alice_pub
+            or candidate.btc_alice_pub
+        ):
+            continue
+
+        if any(
+            getattr(candidate, field, None)
+            for field in (
+                "blake_funding_txid",
+                "btc_funding_txid",
+                "btc_claim_txid",
+                "blake_claim_txid",
+                "btc_refund_txid",
+                "blake_refund_txid",
+            )
+        ):
+            continue
+
+        placeholders.append(candidate)
+
+    return placeholders
+
+
+def archive_superseded_placeholders(keep_swap_id, role):
+    """
+    Archive the local placeholders a newly created swap supersedes.
+
+    Auto-archiving is safe only for a record nobody else can reference,
+    which is exactly what `superseded_placeholders` identifies, and the
+    archive directory preserves it either way. Every archive is
+    announced: a swap that disappears silently is the failure being
+    fixed, so the replacement must never be quiet about it.
+    """
+    placeholders = superseded_placeholders(keep_swap_id, role)
+
+    if not placeholders:
+        return []
+
+    archive_dir = BASE_SWAP_DIR / "archive"
+    archive_dir.mkdir(parents=True, exist_ok=True)
+
+    archived = []
+
+    for candidate in placeholders:
+        source = swap_path(candidate.swap_id)
+        target = archive_dir / source.name
+
+        if target.exists():
+            continue
+
+        shutil.move(str(source), str(target))
+        archived.append(candidate.swap_id)
+
+    if archived:
+        print()
+        print("SUPERSEDED PLACEHOLDER ARCHIVED")
+        print("==============================")
+        print("new swap:", keep_swap_id)
+
+        for swap_id in archived:
+            print("archived: ", swap_id)
+
+        print()
+        print(
+            "PASS: the archived record was never announced, so no "
+            "counterparty can reference it"
+        )
+        print("PASS: it was preserved under archive/, not deleted")
+        print()
+
+    return archived
+
+
 def command_new(args):
     #
     # v1.5 has two construction modes:
@@ -2774,6 +2896,11 @@ def command_new(args):
 
     path = save_swap(
         swap
+    )
+
+    archive_superseded_placeholders(
+        swap.swap_id,
+        os.environ.get("BLAKE_SWAP_ROLE", "alice"),
     )
 
     print_swap(
@@ -11473,10 +11600,10 @@ def command_publish_market_match(args):
     print("swap id: ", swap.swap_id)
     print()
     print(
-        "PASS: match signed by Alice"
+        "PASS: match is signed by the offer's maker"
     )
     print(
-        "PASS: exact Bob take referenced"
+        "PASS: the exact signed take is referenced"
     )
     print(
         "PASS: no secret was published"
@@ -12203,8 +12330,16 @@ def command_market_matches(args):
     )
 
     print()
-    print("MARKET MATCHES FOR BOB")
-    print("======================")
+    print(
+        "MARKET MATCHES FOR TAKER",
+        bob_pubkey[:12],
+    )
+    print("=" * 40)
+    print()
+    print(
+        "Market role: taker. The maker/taker roles are market roles; "
+        "the protocol role each one binds depends on the direction."
+    )
     print()
 
     if not matches:
@@ -12241,6 +12376,24 @@ def command_market_matches(args):
             "taker:   ",
             item["taker"],
         )
+
+        labels = market_role_labels(
+            item.get("direction")
+        )
+
+        print(
+            "direction:",
+            item.get("direction", "unknown"),
+        )
+        print(
+            "maker is protocol:",
+            labels["maker"],
+        )
+        print(
+            "taker is protocol:",
+            labels["taker"],
+        )
+
         print(
             "selling: ",
             item["blake_amount"],
@@ -12261,10 +12414,10 @@ def command_market_matches(args):
         "PASS: every match signature verifies"
     )
     print(
-        "PASS: Alice maker identity verified"
+        "PASS: maker identity verified"
     )
     print(
-        "PASS: Bob take identity verified"
+        "PASS: taker identity verified"
     )
     print(
         "PASS: market terms preserved"
@@ -12487,6 +12640,11 @@ def command_accept_reverse_market_match(args):
         role="alice",
     )
 
+    archive_superseded_placeholders(
+        swap.swap_id,
+        "alice",
+    )
+
     #
     # Durable reverse-market binding.
     #
@@ -12557,8 +12715,13 @@ def command_accept_reverse_market_match(args):
     print("swap id: ", swap.swap_id)
     print()
     print("direction: btc-for-blake")
-    print("maker role: bob")
-    print("taker role: alice")
+
+    labels = market_role_labels(
+        MARKET_DIRECTION_BTC_FOR_BLAKE
+    )
+
+    print("maker is protocol:", labels["maker"])
+    print("taker is protocol:", labels["taker"])
     print()
     print(
         "Alice Nostr:",
@@ -13756,8 +13919,11 @@ def accept_reverse_market_take(
     print("swap id: ", swap_id)
     print()
     print("direction:", direction)
-    print("maker role: bob")
-    print("taker role: alice")
+
+    labels = market_role_labels(direction)
+
+    print("maker is protocol:", labels["maker"])
+    print("taker is protocol:", labels["taker"])
     print()
     print(
         "PASS: maker selected exact signed take"
@@ -14314,6 +14480,15 @@ def command_accept_market_take(args):
     save_swap(
         swap,
         role="alice",
+    )
+
+    #
+    # Accepting a take creates the swap for this participation, so any
+    # earlier unannounced placeholder is now superseded.
+    #
+    archive_superseded_placeholders(
+        swap.swap_id,
+        "alice",
     )
 
     #
@@ -18224,7 +18399,6 @@ def command_dismiss(args):
     import contextlib
     import io
     import json
-    import shutil
 
     prefix = args.swap_id.strip().lower()
 

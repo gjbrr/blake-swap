@@ -484,6 +484,25 @@ def test_market_views_render_for_a_human():
             f"`market-matches` did not list the taker's match:\n{matches}"
         )
 
+    #
+    # The labels must follow the direction. This flow is blake-for-btc:
+    # the market maker is protocol Alice and the taker is protocol Bob.
+    #
+    for expected in (
+        "direction: blake-for-btc",
+        "maker is protocol: alice",
+        "taker is protocol: bob",
+    ):
+        if expected not in matches:
+            raise AssertionError(
+                f"`market-matches` omitted {expected!r}:\n{matches}"
+            )
+
+    if "FOR BOB" in matches or "Alice maker identity" in matches:
+        raise AssertionError(
+            f"`market-matches` still hardcodes the forward labels:\n{matches}"
+        )
+
     maker_view = quiet("alice", "market-matches").stdout
 
     if "No valid matches found." not in maker_view:
@@ -1397,6 +1416,77 @@ def test_resume_all_reports_attention_without_blocking_safe_swaps():
         raise AssertionError(f"`resume-all` changed swap state: {changed}")
 
 
+def test_a_new_swap_archives_an_unannounced_placeholder_loudly():
+    """
+    Creating a swap supersedes an earlier unannounced placeholder.
+
+    A placeholder (OFFERED, no counterparty, no Alice contract keys, no
+    funds) cannot be referenced by anyone else, so the record is moved to
+    archive/ rather than left behind to confuse `next`, `fund` and
+    `resume` -- and the move is announced, because a swap disappearing
+    silently is the failure being fixed.
+    """
+
+    quiet(
+        "alice",
+        "new",
+        "--blake", "0.13",
+        "--sats", "22000",
+        "--btc-timeout", "300",
+        "--blake-timeout", "200",
+    )
+
+    first = local_swaps("alice")
+
+    # A second placeholder supersedes the first.
+    result = quiet(
+        "alice",
+        "new",
+        "--blake", "0.14",
+        "--sats", "23000",
+        "--btc-timeout", "300",
+        "--blake-timeout", "200",
+    )
+
+    text = result.stdout + result.stderr
+
+    if "SUPERSEDED PLACEHOLDER ARCHIVED" not in text:
+        raise AssertionError(
+            f"the superseded placeholder was archived silently:\n{text}"
+        )
+
+    if "PASS: it was preserved under archive/, not deleted" not in text:
+        raise AssertionError(
+            f"the archive was not explained:\n{text}"
+        )
+
+    after = local_swaps("alice") - first
+
+    if len(after) != 1:
+        raise AssertionError(
+            f"expected exactly one live placeholder, found {sorted(after)}"
+        )
+
+    superseded = first - local_swaps("alice")
+
+    if len(superseded) != 1:
+        raise AssertionError(
+            "the earlier placeholder was not archived: "
+            f"{sorted(first)} -> {sorted(local_swaps('alice'))}"
+        )
+
+    archived = PROFILES["alice"]["state"] / "archive" / f"{superseded.pop()}.json"
+
+    if not archived.exists():
+        raise AssertionError(f"no archived copy was preserved: {archived}")
+
+    #
+    # An announced swap must never be touched by this sweep.
+    #
+    if SWAP_ID not in local_swaps("alice"):
+        raise AssertionError("the sweep archived an announced swap")
+
+
 def test_fund_refuses_when_several_swaps_are_ready():
     """
     With two funding-ready trades, `fund` must refuse: the choice of
@@ -1525,6 +1615,7 @@ def main():
         check("`accept-match` imports a fresh match", test_accept_match_imports_a_fresh_match)
         check("`next` refuses two different kinds of action", test_next_refuses_two_different_kinds_of_action)
         check("explicit resolution reaches two funding-ready swaps", test_explicit_resolution_reaches_two_funding_ready_swaps)
+        check("a new swap archives an unannounced placeholder loudly", test_a_new_swap_archives_an_unannounced_placeholder_loudly)
         check("`resume` reports a swap it cannot classify", test_resume_reports_manual_attention)
         check("`resume-all` reports attention without blocking", test_resume_all_reports_attention_without_blocking_safe_swaps)
         check("`fund` refuses when several swaps are ready", test_fund_refuses_when_several_swaps_are_ready)

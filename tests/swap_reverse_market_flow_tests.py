@@ -409,6 +409,23 @@ def test_accept_match_performs_the_whole_reverse_step():
     )
 
 
+def test_market_match_labels_follow_the_direction():
+    """
+    In `btc-for-blake` the market roles still read maker/taker but the
+    protocol roles they bind invert: the maker is protocol Bob and the
+    taker is protocol Alice. The human view must say so, rather than
+    repeating the blake-for-btc labels.
+    """
+
+    view = run("alice", "market-matches").stdout
+
+    assert "MARKET MATCHES FOR TAKER" in view, view
+    assert "direction: btc-for-blake" in view, view
+    assert "maker is protocol: bob" in view, view
+    assert "taker is protocol: alice" in view, view
+    assert "FOR BOB" not in view, view
+
+
 def main():
     print()
     print("=" * 72)
@@ -429,6 +446,7 @@ def main():
         check("both participants reach COMPLETE", test_both_complete)
         check("reconcile derives the maker's reverse protocol role", test_reconcile_reports_reverse_roles)
         check("accept-match performs the whole reverse step", test_accept_match_performs_the_whole_reverse_step)
+        check("market-match labels follow the direction", test_market_match_labels_follow_the_direction)
     finally:
         STUB.stop()
 

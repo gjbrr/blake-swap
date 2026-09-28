@@ -8,7 +8,13 @@ PROJECT_DIR="$(
 
 SWAP="$PROJECT_DIR/scripts/swap"
 
-if [[ -x "$HOME/blake-swap-venv/bin/python3" ]]; then
+#
+# One interpreter convention: the checkout-local .venv first, then the
+# historical $HOME/blake-swap-venv, then whatever python3 is on PATH.
+#
+if [[ -x "$PROJECT_DIR/.venv/bin/python" ]]; then
+    PY="$PROJECT_DIR/.venv/bin/python"
+elif [[ -x "$HOME/blake-swap-venv/bin/python3" ]]; then
     PY="$HOME/blake-swap-venv/bin/python3"
 else
     PY="${PYTHON:-python3}"
@@ -61,7 +67,7 @@ case "$COMMAND" in
 
     market)
         exec env \
-            PYTHONPATH="$PROJECT_DIR/src:$PROJECT_DIR/vendor${PYTHONPATH:+:$PYTHONPATH}" \
+            PYTHONPATH="$PROJECT_DIR/src${PYTHONPATH:+:$PYTHONPATH}" \
             "$PY" \
             "$PROJECT_DIR/scripts/market-view" \
             "${@:-all}"

@@ -7,9 +7,14 @@ PROJECT_DIR="$(
 )"
 
 SWAP_V2="$PROJECT_DIR/src/swap_v2.py"
-VENDOR="$PROJECT_DIR/vendor"
 
-if [[ -x "$HOME/blake-swap-venv/bin/python3" ]]; then
+#
+# One interpreter convention: the checkout-local .venv first, then the
+# historical $HOME/blake-swap-venv, then whatever python3 is on PATH.
+#
+if [[ -x "$PROJECT_DIR/.venv/bin/python" ]]; then
+    PYTHON="$PROJECT_DIR/.venv/bin/python"
+elif [[ -x "$HOME/blake-swap-venv/bin/python3" ]]; then
     PYTHON="$HOME/blake-swap-venv/bin/python3"
 else
     PYTHON="$(command -v python3)"
@@ -120,7 +125,7 @@ esac
 # requested command.  Never print the private key itself.
 #
 NOSTR_PUB="$(
-    PYTHONPATH="$PROJECT_DIR/src:$VENDOR${PYTHONPATH:+:$PYTHONPATH}" \
+    PYTHONPATH="$PROJECT_DIR/src${PYTHONPATH:+:$PYTHONPATH}" \
     "$PYTHON" - <<'PY'
 import swap_v2
 print(swap_v2.current_nostr_pubkey())
@@ -139,7 +144,7 @@ echo
 
 
 exec env \
-    PYTHONPATH="$PROJECT_DIR/src:$VENDOR${PYTHONPATH:+:$PYTHONPATH}" \
+    PYTHONPATH="$PROJECT_DIR/src${PYTHONPATH:+:$PYTHONPATH}" \
     "$PYTHON" \
     "$SWAP_V2" \
     "$@"

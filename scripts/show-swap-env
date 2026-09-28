@@ -26,8 +26,25 @@ if [[ "${BLAKE_SWAP_ROLE}" != "alice" && "${BLAKE_SWAP_ROLE}" != "bob" ]]; then
     exit 1
 fi
 
-PYTHONPATH="${PYTHONPATH:-}:$HOME/blake-swap/src:$HOME/blake-swap/vendor" \
-python3 - <<'PY'
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+if [[ -x "$ROOT/.venv/bin/python" ]]; then
+    PY="$ROOT/.venv/bin/python"
+elif [[ -x "$HOME/blake-swap-venv/bin/python3" ]]; then
+    PY="$HOME/blake-swap-venv/bin/python3"
+else
+    PY="${PYTHON:-python3}"
+fi
+
+#
+# The interpreter that showed the environment should be the same one
+# that resolves it, so print it along with the engine's own view.
+#
+echo "interpreter: $PY"
+echo
+
+PYTHONPATH="$ROOT/src${PYTHONPATH:+:$PYTHONPATH}" \
+"$PY" - <<'PY'
 import swap_v2
 
 print(

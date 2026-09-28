@@ -208,6 +208,7 @@ silently omitting them.
 | `docs/WIRE_PROTOCOL.md` | transport bindings, every settlement and market message, validation rules, verification obligations |
 | `docs/REGTEST_TWO_HOST.md` | step-by-step two-host reproduction, health checks, troubleshooting |
 | `docs/PERFORMANCE_AND_RECOVERY.md` | why live coordination, historical recovery, and chain settlement are separated |
+| `docs/ROADMAP.md` | known, scoped work that is not yet done, and what is deliberately deferred |
 | `tests/README.md` | test suite inventory, prerequisites, and node configuration |
 | `CONTRIBUTOR_ORIENTATION.md` | orientation for new contributors |
 
@@ -229,5 +230,19 @@ This is experimental software and has not been audited. In particular:
 - The implementation requires at least one confirmation before treating
   a spend as confirmed, and refuses to rebroadcast when a UTXO has
   disappeared but no confirmed spender can be found.
+
+---
+
+## Licence
+
+MIT. See `LICENSE`.
+
+The coordination transport is plaintext by default, and the default
+posture is documented rather than assumed: the protocol does not depend
+on transport confidentiality, because the secret `S` is never
+transported and every fact taken from a message is re-verified against a
+chain. An optional NIP-44 encrypted mode for coordination content is
+being added for deployments that want the metadata shielded as well; see
+`docs/ROADMAP.md` for its status.
 
 **Do not use with valuable funds.**

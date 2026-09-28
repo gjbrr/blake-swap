@@ -216,7 +216,14 @@ run (missing `.venv`, nothing collected); `exit 1` means the threshold
 was not met.
 
 `--fail-under 80` is the project's gate, and the suite set currently
-meets it. A suite that cannot run in the current environment inflates
+meets it.
+
+`coverage.sh` installs the subprocess startup hook
+(`site-packages/a1_coverage.pth`) itself if it is missing, and refuses
+to run without it: the engine runs as a subprocess, so a checkout that
+never had the hook would produce a report that silently omits `src/`
+and still appear to pass. It also refuses to report on stale parallel
+data, so each run measures that run. A suite that cannot run in the current environment inflates
 nothing: it reports `SKIP` and contributes no coverage, which is the
 honest reading — run `scripts/test-nodes start` first.
 

@@ -4,13 +4,28 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ENGINE="$ROOT/src/swap_v2.py"
 
-if [[ -x "$HOME/blake-swap-venv/bin/python3" ]]; then
-  PY="$HOME/blake-swap-venv/bin/python3"
-else
-  PY="${PYTHON:-python3}"
-fi
+#
+# One interpreter convention: the checkout-local .venv first, then the
+# historical $HOME/blake-swap-venv, then whatever python3 is on PATH.
+#
+resolve_python() {
+    if [[ -x "$ROOT/.venv/bin/python" ]]; then
+        printf '%s\n' "$ROOT/.venv/bin/python"
+    elif [[ -x "$HOME/blake-swap-venv/bin/python3" ]]; then
+        printf '%s\n' "$HOME/blake-swap-venv/bin/python3"
+    else
+        printf '%s\n' "${PYTHON:-python3}"
+    fi
+}
 
-export PYTHONPATH="$ROOT/src:$ROOT/vendor${PYTHONPATH:+:$PYTHONPATH}"
+PY="$(resolve_python)"
+
+#
+# The engine is a single module in src/; there is no vendored runtime
+# dependency directory, and pretending there is put a nonexistent path
+# on the import path.
+#
+export PYTHONPATH="$ROOT/src${PYTHONPATH:+:$PYTHONPATH}"
 
 need_profile() {
   if [[ -z "${BLAKE_SWAP_ROLE:-}"      || -z "${BLAKE_SWAP_STATE_DIR:-}" ]]; then

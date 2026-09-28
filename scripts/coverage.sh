@@ -21,6 +21,12 @@
 # Any other argument is passed through to scripts/test.sh, so
 # --list, --strict and --verbose all work.
 #
+# The engine runs as a subprocess, so coverage of it is only collected if
+# a startup hook in the venv's site-packages calls
+# coverage.process_startup(). This script installs that hook when it is
+# missing: without it the report would cover only the test processes and
+# the percentage would be meaningless.
+#
 # Exit status mirrors scripts/test.sh, or 2 if coverage itself could not
 # run, or 1 if --fail-under was not met.
 
@@ -49,6 +55,40 @@ fi
 
 if [[ ! -f "$CONFIG" ]]; then
     echo "ERROR: coverage config not found: $CONFIG" >&2
+    exit 2
+fi
+
+#
+# Subprocess coverage needs the startup hook below to exist in the venv's
+# site-packages. No packaging step creates it, so a checkout that never
+# ran this script would produce a report that silently omits the engine
+# and still pass the threshold.
+#
+SITE_PACKAGES="$("$PYTHON_BIN" -c 'import site; print(site.getsitepackages()[0])' 2>/dev/null || true)"
+HOOK="$SITE_PACKAGES/a1_coverage.pth"
+
+if [[ -n "$SITE_PACKAGES" && -d "$SITE_PACKAGES" && ! -f "$HOOK" ]]; then
+    if printf '%s\n' 'import coverage; coverage.process_startup()' > "$HOOK" 2>/dev/null; then
+        echo "installed the subprocess coverage hook: $HOOK"
+        echo
+    fi
+fi
+
+if [[ ! -f "$HOOK" && "${BLAKE_SWAP_ALLOW_NO_COVERAGE_HOOK:-}" != "1" ]]; then
+    cat >&2 <<EOF
+ERROR: the subprocess coverage hook is missing.
+
+  expected: $HOOK
+
+The engine runs as a subprocess, so without this hook its code is never
+measured and the coverage percentage would be misleading. Install it with:
+
+  printf '%s\n' 'import coverage; coverage.process_startup()' \
+      > "$SITE_PACKAGES/a1_coverage.pth"
+
+Set BLAKE_SWAP_ALLOW_NO_COVERAGE_HOOK=1 to run anyway, accepting that the
+report covers only the test processes.
+EOF
     exit 2
 fi
 
@@ -91,9 +131,19 @@ echo "BLAKE SWAP COVERAGE"
 echo "============================================================"
 echo "python:   $PYTHON_BIN"
 echo "config:   $CONFIG"
+echo "hook:     ${HOOK:-<unknown>}"
 echo
 
-"$COVERAGE" erase -q
+#
+# `erase` has no --quiet option (unlike combine/html), and a silent
+# failure here would leave earlier runs' parallel data files in place, so
+# the report would be the union of every historical run rather than this
+# one. Check it explicitly.
+#
+if ! "$COVERAGE" erase; then
+    echo "ERROR: coverage erase failed; refusing to report on stale data" >&2
+    exit 2
+fi
 
 echo "== running suites under coverage =="
 echo

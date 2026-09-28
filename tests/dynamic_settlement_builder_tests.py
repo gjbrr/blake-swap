@@ -1,4 +1,5 @@
 import contextlib
+import io
 import os
 
 import swap_v2
@@ -342,6 +343,196 @@ def check_rate_override():
                 )
 
 
+def check_fee_rate_parameter():
+    """
+    `--fee-rate` is the client's parameter, and a parameter outranks the
+    environment.
+
+    The environment is the host's standing default; the client driving a
+    particular swap is the party that knows what it wants to pay for it.
+    So the parameter must win over the rate variable *and* over the
+    exact-satoshis variable, must leave the caps in force, and must not be
+    silently passed over the other way: an operator whose emergency
+    setting was ignored has to be told.
+    """
+    blake_rate = "BLAKE_SWAP_BLAKE_SPEND_FEE_RATE"
+    blake_sats = "BLAKE_SWAP_BLAKE_SPEND_FEE_SATS"
+    blake_label = "--fee-rate"
+
+    decoded = {
+        "hex-fee-1": 100,
+        "hex-fee-100": 100,
+        "hex-fee-200": 100,
+        "hex-fee-300": 100,
+        "hex-fee-500": 100,
+    }
+
+    built = []
+
+    def build(fee_sats):
+        built.append(fee_sats)
+        return f"hex-fee-{fee_sats}"
+
+    with environment(
+        **{
+            blake_rate: None,
+            blake_sats: None,
+            "BLAKE_SWAP_MAX_SETTLEMENT_FEE_PERCENT": None,
+            "BLAKE_SWAP_MAX_SETTLEMENT_FEE_SATS": None,
+        }
+    ):
+        #
+        # The parameter alone: 100 vB at 2 sat/vB is 200 sats, and the
+        # estimator (1 sat/vB) is not consulted.
+        #
+        cli = RecordingCli(decoded)
+
+        plan = swap_v2.build_dynamic_settlement_spend(
+            chain="blake",
+            cli=cli,
+            input_sats=20_000,
+            build_finalized=build,
+            fee_rate="2",
+        )
+
+        assert built == [1, 200], built
+        assert plan["fee_sats"] == 200, plan
+        assert plan["source"] == "rate-option", plan
+        assert not cli.called("estimatesmartfee"), cli.calls
+
+        #
+        # The parameter against both environment knobs at once. The rate
+        # variable would give 1000 and the satoshis variable 300; only the
+        # parameter's 200 shows that it outranks them.
+        #
+        built.clear()
+
+        with environment(**{blake_rate: "10", blake_sats: "300"}):
+            stdout = io.StringIO()
+
+            with contextlib.redirect_stdout(stdout):
+                plan = swap_v2.build_dynamic_settlement_spend(
+                    chain="blake",
+                    cli=RecordingCli(decoded),
+                    input_sats=20_000,
+                    build_finalized=build,
+                    fee_rate="2",
+                )
+
+        assert built == [1, 200], built
+        assert plan["fee_sats"] == 200, plan
+        assert plan["source"] == "rate-option", plan
+
+        # The passed-over emergency setting is announced, not swallowed.
+        assert blake_sats in stdout.getvalue(), stdout.getvalue()
+        assert "300" in stdout.getvalue(), stdout.getvalue()
+
+        #
+        # The same environment without the parameter still behaves as it
+        # did: the satoshis variable wins over the rate variable. This is
+        # what makes the case above a test of precedence rather than of
+        # the environment being ignored outright.
+        #
+        built.clear()
+
+        with environment(**{blake_rate: "10", blake_sats: "300"}):
+            plan = swap_v2.build_dynamic_settlement_spend(
+                chain="blake",
+                cli=RecordingCli(decoded),
+                input_sats=20_000,
+                build_finalized=build,
+            )
+
+        assert built == [300], built
+        assert plan["fee_sats"] == 300, plan
+        assert plan["source"] == "override", plan
+
+        #
+        # An unusable parameter is refused by name, and nothing is built.
+        #
+        for bad in ("abc", "0", "-1", "nan", "inf", " "):
+            built.clear()
+
+            try:
+                swap_v2.build_dynamic_settlement_spend(
+                    chain="blake",
+                    cli=RecordingCli(decoded),
+                    input_sats=20_000,
+                    build_finalized=build,
+                    fee_rate=bad,
+                )
+            except ValueError as exc:
+                assert blake_label in str(exc), exc
+            else:
+                raise AssertionError(
+                    f"a --fee-rate of {bad!r} was accepted"
+                )
+
+            assert built == [], (bad, built)
+
+        #
+        # The parameter is held to the node's acceptance floors like
+        # every other rate, and the refusal names the parameter and says
+        # how to get back to the other surfaces.
+        #
+        below_relay = {
+            "minrelaytxfee": 0.00005000,
+            "mempoolminfee": 0.00000100,
+        }
+
+        try:
+            swap_v2.build_dynamic_settlement_spend(
+                chain="blake",
+                cli=RecordingCli(decoded, below_relay),
+                input_sats=20_000,
+                build_finalized=build,
+                fee_rate="3",
+            )
+        except ValueError as exc:
+            assert blake_label in str(exc), exc
+            assert "minrelaytxfee" in str(exc), exc
+            assert "omit --fee-rate" in str(exc), exc
+        else:
+            raise AssertionError(
+                "a --fee-rate below minrelaytxfee was accepted"
+            )
+
+        #
+        # And both caps still bind on the parameter path. 100 vB at
+        # 100 sat/vB is 10,000 sats against a 20,000-sat input.
+        #
+        try:
+            swap_v2.build_dynamic_settlement_spend(
+                chain="blake",
+                cli=RecordingCli(decoded),
+                input_sats=20_000,
+                build_finalized=build,
+                fee_rate="100",
+            )
+        except ValueError as exc:
+            assert "safety cap" in str(exc), exc
+        else:
+            raise AssertionError(
+                "a --fee-rate bypassed the percentage cap"
+            )
+
+        with environment(**{"BLAKE_SWAP_MAX_SETTLEMENT_FEE_SATS": "500"}):
+            try:
+                swap_v2.build_dynamic_settlement_spend(
+                    chain="blake",
+                    cli=RecordingCli(decoded),
+                    input_sats=20_000,
+                    build_finalized=build,
+                    fee_rate="10",
+                )
+            except ValueError as exc:
+                assert "BLAKE_SWAP_MAX_SETTLEMENT_FEE_SATS" in str(exc), exc
+            else:
+                raise AssertionError(
+                    "a --fee-rate bypassed the absolute cap"
+                )
+
+
 def main():
     name = "BLAKE_SWAP_BLAKE_SPEND_FEE_SATS"
     old = os.environ.pop(name, None)
@@ -426,6 +617,7 @@ def main():
         assert plan["fee_sats"] >= plan["vsize"], plan
 
         check_rate_override()
+        check_fee_rate_parameter()
 
         print(
             "PASS: dynamic settlement builder tests"

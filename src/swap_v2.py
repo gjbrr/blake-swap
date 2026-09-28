@@ -7771,6 +7771,7 @@ def build_dynamic_settlement_spend(
     cli,
     input_sats,
     build_finalized,
+    fee_rate=None,
 ):
     """
     Build a finalized HTLC spend whose actual vsize agrees with
@@ -7778,10 +7779,34 @@ def build_dynamic_settlement_spend(
 
     build_finalized(fee_sats) must return fully finalized raw hex.
     It must not broadcast.
+
+    `fee_rate` is the `--fee-rate` parameter, in sat/vB. It outranks
+    every environment knob, including the exact-satoshis override: a
+    parameter is this invocation's instruction, and the environment is
+    the host's standing default.
     """
     input_sats = int(input_sats)
 
-    override = settlement_fee_override_sats(chain)
+    #
+    # A parameter outranks the environment, so the exact-satoshis
+    # variable is not even consulted when `--fee-rate` was given. If an
+    # operator has set it -- typically as an emergency -- say that it was
+    # passed over, because a silently ignored override is worse than no
+    # override at all.
+    #
+    if fee_rate is not None:
+        sats_name = settlement_fee_sats_env_name(chain)
+        env_sats = settlement_fee_override_sats(chain)
+
+        if env_sats is not None:
+            print(
+                f"NOTE: {sats_name}={env_sats} is overridden by "
+                f"--fee-rate {fee_rate} sat/vB"
+            )
+
+        override = None
+    else:
+        override = settlement_fee_override_sats(chain)
 
     if override is not None:
         enforce_fee_cap(
@@ -7805,7 +7830,7 @@ def build_dynamic_settlement_spend(
             "source": "override",
         }
 
-    rate, rate_source = settlement_fee_rate(cli, chain)
+    rate, rate_source = settlement_fee_rate(cli, chain, fee_rate)
 
     if rate_source != "dynamic":
         print(
@@ -8048,6 +8073,7 @@ def command_claim_blake(args):
         cli=blake_cli,
         input_sats=input_sats,
         build_finalized=build_claim_with_fee,
+        fee_rate=args.fee_rate,
     )
 
     claim_hex = fee_plan["hex"]
@@ -8497,6 +8523,7 @@ def command_refund_blake(args):
             cli=blake_cli,
             input_sats=input_sats,
             build_finalized=build_refund_with_fee,
+            fee_rate=args.fee_rate,
         )
 
         refund_hex = fee_plan["hex"]
@@ -9097,6 +9124,7 @@ def command_claim_btc(args):
         cli=btc_cli,
         input_sats=input_sats,
         build_finalized=build_claim_with_fee,
+        fee_rate=args.fee_rate,
     )
 
     claim_hex = fee_plan["hex"]
@@ -9382,6 +9410,7 @@ def command_refund_btc(args):
             cli=btc_cli,
             input_sats=input_sats,
             build_finalized=build_refund_with_fee,
+            fee_rate=args.fee_rate,
         )
 
         refund_hex = fee_plan["hex"]
@@ -11459,15 +11488,23 @@ def settlement_fee_absolute_cap_sats():
     return value
 
 
-def settlement_fee_override_sats(chain):
+def settlement_fee_sats_env_name(chain):
+    """
+    The environment variable carrying the per-chain exact-fee override.
+    """
     if chain == "btc":
-        name = "BLAKE_SWAP_BTC_SPEND_FEE_SATS"
-    elif chain == "blake":
-        name = "BLAKE_SWAP_BLAKE_SPEND_FEE_SATS"
-    else:
-        raise ValueError(
-            f"unknown settlement-fee chain: {chain}"
-        )
+        return "BLAKE_SWAP_BTC_SPEND_FEE_SATS"
+
+    if chain == "blake":
+        return "BLAKE_SWAP_BLAKE_SPEND_FEE_SATS"
+
+    raise ValueError(
+        f"unknown settlement-fee chain: {chain}"
+    )
+
+
+def settlement_fee_override_sats(chain):
+    name = settlement_fee_sats_env_name(chain)
 
     raw = os.environ.get(name)
 
@@ -11482,6 +11519,71 @@ def settlement_fee_override_sats(chain):
         )
 
     return value
+
+
+def parse_settlement_fee_rate(raw, label):
+    """
+    Parse a settlement feerate given in sat/vB.
+
+    `label` names the surface it arrived on -- `--fee-rate` or an
+    environment variable -- so a refusal tells the operator which knob to
+    fix rather than showing a bare number.
+
+    Fractional rates are allowed on purpose: a rate is a price per vbyte,
+    and rounding it up to a whole number is the engine inventing a policy
+    the client did not ask for.
+    """
+    try:
+        value = Decimal(str(raw).strip())
+    except (InvalidOperation, ValueError):
+        raise ValueError(
+            f"{label} must be a number in sat/vB"
+        ) from None
+
+    if not value.is_finite() or value <= 0:
+        raise ValueError(
+            f"{label} must be a positive number in sat/vB"
+        )
+
+    return value
+
+
+def settlement_fee_rate_argument(value):
+    """
+    argparse `type` for `--fee-rate`.
+
+    Validating here makes an unusable rate a usage error: the CLI exits 2
+    before it has read any state or built any transaction. The engine
+    validates the same value again, because a rate can also arrive through
+    the function API and `build_dynamic_settlement_spend` is the only
+    place that must not be wrong.
+    """
+    try:
+        return parse_settlement_fee_rate(value, "--fee-rate")
+    except ValueError as e:
+        raise argparse.ArgumentTypeError(str(e)) from None
+
+
+def add_settlement_fee_rate_argument(parser):
+    """
+    Give a command the client's explicit settlement feerate, in sat/vB.
+
+    The parameter outranks the environment, which is the whole point of
+    offering it: the environment is a host default, and the client driving
+    this swap is the party that knows what it wants to pay. Both fee caps
+    still apply -- this says what to pay, not what may be paid.
+    """
+    parser.add_argument(
+        "--fee-rate",
+        type=settlement_fee_rate_argument,
+        default=None,
+        help=(
+            "Settlement fee rate in sat/vB; overrides "
+            "BLAKE_SWAP_{BTC,BLAKE}_SPEND_FEE_RATE and "
+            "BLAKE_SWAP_{BTC,BLAKE}_SPEND_FEE_SATS. Both fee caps "
+            "still apply."
+        ),
+    )
 
 
 def settlement_fee_rate_env_name(chain):
@@ -11530,31 +11632,24 @@ def settlement_fee_rate_override(chain):
     if raw in (None, ""):
         return None
 
-    try:
-        value = Decimal(str(raw).strip())
-    except (InvalidOperation, ValueError):
-        raise ValueError(
-            f"{name} must be a number in sat/vB"
-        ) from None
-
-    if not value.is_finite() or value <= 0:
-        raise ValueError(
-            f"{name} must be a positive number in sat/vB"
-        )
-
-    return value
+    return parse_settlement_fee_rate(raw, name)
 
 
-def settlement_fee_rate(cli, chain):
+def settlement_fee_rate(cli, chain, fee_rate=None):
     """
     The feerate to build a settlement transaction at, and where it came
     from.
 
-    Returns `(rate, source)`. With an explicit rate override the node is
-    still asked for its acceptance floors, because a rate below them
-    cannot be relayed or admitted at all: failing here names the knob and
-    the binding floor, where letting the node refuse later would surface
-    as an unrelated-looking broadcast failure.
+    Returns `(rate, source)`. `fee_rate` is the `--fee-rate` parameter, if
+    the caller passed one, and it outranks the environment: the
+    environment is the host's default, while the client driving this
+    particular swap is the party that knows what it wants to pay.
+
+    With an explicit rate the node is still asked for its acceptance
+    floors, because a rate below them cannot be relayed or admitted at
+    all: failing here names the knob and the binding floor, where letting
+    the node refuse later would surface as an unrelated-looking broadcast
+    failure.
 
     Both floors are checked, not just `minrelaytxfee`: `mempoolminfee`
     rises above relay policy when the mempool is congested, and a
@@ -11563,7 +11658,15 @@ def settlement_fee_rate(cli, chain):
     right now is a settlement that stalls, so it is refused with the
     node's own numbers.
     """
-    override = settlement_fee_rate_override(chain)
+    if fee_rate is not None:
+        override = parse_settlement_fee_rate(
+            fee_rate,
+            "--fee-rate",
+        )
+        source = "--fee-rate"
+    else:
+        override = settlement_fee_rate_override(chain)
+        source = settlement_fee_rate_env_name(chain)
 
     if override is None:
         estimate = cli(
@@ -11606,16 +11709,29 @@ def settlement_fee_rate(cli, chain):
                 floor_field = field
 
     if floor > 0 and override < floor:
-        name = settlement_fee_rate_env_name(chain)
+        if fee_rate is not None:
+            advice = (
+                "Raise it, or omit --fee-rate to fall back to "
+                f"{settlement_fee_rate_env_name(chain)} and the node's "
+                "estimator."
+            )
+        else:
+            advice = (
+                f"Raise the rate, or unset {source} to use the node's "
+                "estimator."
+            )
 
         raise ValueError(
-            f"{name} is {override} sat/vB, below the node's {floor} "
+            f"{source} is {override} sat/vB, below the node's {floor} "
             f"sat/vB {floor_field}; a transaction paying it would not "
-            "be accepted. Raise the rate, or unset the variable to use "
-            "the node's estimator."
+            f"be accepted. {advice}"
         )
 
-    return override, "rate-override"
+    return override, (
+        "rate-option"
+        if fee_rate is not None
+        else "rate-override"
+    )
 
 
 def estimate_dynamic_settlement_fee(
@@ -21327,6 +21443,7 @@ def command_resume(args):
         SimpleNamespace(
             swap_id=swap.swap_id,
             max_steps=int(getattr(args, "max_steps", 6)),
+            fee_rate=getattr(args, "fee_rate", None),
         )
     )
 
@@ -21334,6 +21451,14 @@ def command_resume(args):
 
 def command_run(args):
     from types import SimpleNamespace
+
+    #
+    # The driver may be reached from `run` (which declares --fee-rate) or
+    # from `resume`, which passes this namespace on. The defensive read
+    # keeps a caller that constructs a namespace by hand -- the tests do
+    # -- meaningful: no parameter means "use the environment".
+    #
+    fee_rate = getattr(args, "fee_rate", None)
 
     safe_actions = {
         "sync-funding",
@@ -21606,6 +21731,7 @@ def command_run(args):
             ns = SimpleNamespace(
                 swap_id=args.swap_id,
                 role=role,
+                fee_rate=fee_rate,
             )
 
             if action == "sync-funding":
@@ -21838,6 +21964,7 @@ def main():
     )
 
     p.add_argument("swap_id")
+    add_settlement_fee_rate_argument(p)
     p.set_defaults(func=command_claim_btc)
 
     # extract-secret
@@ -21856,6 +21983,7 @@ def main():
     )
 
     p.add_argument("swap_id")
+    add_settlement_fee_rate_argument(p)
     p.set_defaults(func=command_claim_blake)
 
     # refund-blake
@@ -21865,6 +21993,7 @@ def main():
     )
 
     p.add_argument("swap_id")
+    add_settlement_fee_rate_argument(p)
     p.set_defaults(func=command_refund_blake)
 
     # refund-btc
@@ -21874,6 +22003,7 @@ def main():
     )
 
     p.add_argument("swap_id")
+    add_settlement_fee_rate_argument(p)
     p.set_defaults(func=command_refund_btc)
 
     # Discover public BLAKE/BTC offers.
@@ -22491,6 +22621,8 @@ def main():
         ),
     )
 
+    add_settlement_fee_rate_argument(p)
+
     p.set_defaults(
         func=command_resume
     )
@@ -22514,6 +22646,8 @@ def main():
             "(default: 6)"
         ),
     )
+
+    add_settlement_fee_rate_argument(p)
 
     p.set_defaults(func=command_run)
 

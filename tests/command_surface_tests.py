@@ -506,6 +506,61 @@ def test_psbt_bounds():
         raise AssertionError("multi-input hashlock injection was allowed")
 
 
+def test_fee_rate_option_is_wired():
+    """
+    The client passes the settlement rate as a parameter, so the real
+    parser must accept `--fee-rate` on every command that can spend an
+    HTLC, and must refuse a rate it cannot pay before doing any work.
+
+    The parser is built inside `main()`, so this asks the actual CLI
+    rather than rebuilding the tree the test believes should exist. A bad
+    rate has to be a usage error (exit 2), because discovering it after a
+    transaction has been built is exactly the failure this prevents.
+    """
+    import subprocess
+
+    engine = ROOT / "src" / "swap_v2.py"
+
+    def invoke(*argv):
+        return subprocess.run(
+            [sys.executable, str(engine), *argv],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+
+    for command in (
+        "claim-btc",
+        "claim-blake",
+        "refund-btc",
+        "refund-blake",
+        # The autonomous driver and the resume path reach the same
+        # settlement spends, so a client that drives rather than calls
+        # must be able to set the rate too.
+        "run",
+        "resume",
+    ):
+        done = invoke(command, "--help")
+
+        assert done.returncode == 0, (command, done.stderr)
+        assert "--fee-rate" in done.stdout, command
+
+    for bad in ("abc", "0", "-1", "nan"):
+        done = invoke("claim-btc", "--fee-rate", bad, "111111111111")
+
+        assert done.returncode == 2, (bad, done.returncode, done.stderr)
+        assert "--fee-rate" in (done.stderr + done.stdout), bad
+
+    #
+    # A fractional rate is usable and must get past the parser: the
+    # engine's own complaint about the swap ID is what proves the value
+    # was accepted, and it is not a usage error.
+    #
+    done = invoke("claim-btc", "--fee-rate", "2.5", "not-a-swap-id")
+
+    assert done.returncode != 2, (done.returncode, done.stderr)
+
+
 def main():
     print()
     print("=" * 72)
@@ -521,6 +576,7 @@ def main():
     check("run reports a settled swap cleanly", test_run_reports_settled_cleanly)
     check("ignored-match tombstones expire and are reclaimed", test_ignored_match_ttl_expiry)
     check("operational env knobs fail closed on bad values", test_env_knob_validation)
+    check("--fee-rate is accepted where an HTLC can be spent", test_fee_rate_option_is_wired)
     check("reorg transitions are table-driven and refuse other edges", test_reorg_transition_table)
     check("funding-scan guards refuse unanchored and oversized scans", test_funding_scan_guards)
     check("HTLC spend classification is structural", test_htlc_spend_classification_shapes)

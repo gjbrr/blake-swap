@@ -157,23 +157,31 @@ larger share of the HTLC — that is the cap doing its job, not a bug — and
 the refusal now says which rate the cap permits, how small the HTLC is
 against the current rate, and which knob to change.
 
-The controls, in the order to reach for them. Every one is an **environment
-variable**: fee policy has no command-line option, in the engine or in the
-`scripts/` wrappers, so a client sets these in the environment of the process it
-launches:
+The controls, in the order to reach for them:
 
 | Knob | Effect |
 |---|---|
+| `--fee-rate` | the client's explicit settlement rate in sat/vB, on `claim-btc`, `claim-blake`, `refund-btc`, `refund-blake`, `run` and `resume`. **A parameter outranks the environment**, including the exact-satoshis variable: the environment is the host's default, and this is the instruction for this invocation. An unusable value is a usage error, refused before any state is read |
 | `BLAKE_SWAP_MAX_SETTLEMENT_FEE_PERCENT` | the cap as a share of the HTLC input; raising it makes small swaps settleable at the cost of the fee being a larger share of the swap |
 | `BLAKE_SWAP_MAX_SETTLEMENT_FEE_SATS` | a flat ceiling, applied in addition to the percentage. It can only make the cap stricter, and it is the right control for a *large* HTLC in a spike, where a percentage can permit far more than an operator wants to pay |
 | `BLAKE_SWAP_FEE_TARGET_BLOCKS`, `BLAKE_SWAP_FEE_RATE_MULTIPLIER` | what the estimator is asked for, and how much above it to pay; neither helps if the cap is the binding constraint |
 | `BLAKE_SWAP_BTC_SPEND_FEE_RATE` / `BLAKE_SWAP_BLAKE_SPEND_FEE_RATE` | an explicit **rate** in sat/vB, for a client that reads the fee market itself; takes precedence over the estimator, and over `FEE_TARGET_BLOCKS`/`FEE_RATE_MULTIPLIER`, which it makes irrelevant |
-| `BLAKE_SWAP_BTC_SPEND_FEE_SATS` / `BLAKE_SWAP_BLAKE_SPEND_FEE_SATS` | an explicit **fee** in sats, for an emergency; the most specific knob, so it wins over the rate; it is still subject to both caps |
+| `BLAKE_SWAP_BTC_SPEND_FEE_SATS` / `BLAKE_SWAP_BLAKE_SPEND_FEE_SATS` | an explicit **fee** in sats, for an emergency; the most specific *environment* knob, so it wins over the rate variable; it is still subject to both caps |
 
-Precedence, most explicit first: an exact **fee** in sats, an exact **rate**
-in sat/vB, then the node's estimator at the configured target with the
-configured multiplier. Both caps apply to every path — an override says what
-to pay, not what may be paid.
+The rate is available two ways, and they are not equal. `--fee-rate` is the
+parameter a client passes on the command that spends the HTLC; the
+`BLAKE_SWAP_*_SPEND_FEE_RATE` variables are the host's standing default. When
+both are present the parameter wins — and if the exact-satoshis variable is also
+set, the run says so on stdout, because an operator's override being silently
+passed over is worse than no override at all. Fee policy has no *other* option:
+funding transactions let the node wallet choose the fee at
+`BLAKE_SWAP_BTC_FUNDING_FEE_TARGET_BLOCKS`, so `--fee-rate` applies to
+settlement spends, not to funding.
+
+Precedence, most explicit first: `--fee-rate`, an exact **fee** in sats from the
+environment, an exact **rate** in sat/vB from the environment, then the node's
+estimator at the configured target with the configured multiplier. Both caps
+apply to every path — an override says what to pay, not what may be paid.
 
 The rate knob is the one that matters for the intended clients. This engine
 does not know how urgent a particular swap is, and a node's estimator is one

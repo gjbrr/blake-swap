@@ -57,7 +57,50 @@ def dest_from_flag(flag):
     return flag.lstrip("-").replace("-", "_")
 
 
-def collect_parser_attributes(main_node):
+def collect_argument_helpers(tree):
+    """
+    Return ``{function name: {attribute, ...}}`` for module-level helpers
+    that add arguments to a parser they are given.
+
+    Six subcommands can spend an HTLC, and each needs the same
+    ``--fee-rate`` option, so the engine adds it with one helper rather
+    than six copies. That is the right shape for the engine and an
+    awkward one for this suite: a call to the helper is not an
+    ``add_argument`` call, so the walk below would see those parsers as
+    defining nothing but ``swap_id`` and report a wiring failure that is
+    not real.
+
+    The fix is to resolve the helper rather than to weaken the check: the
+    attributes come from the helper's own ``add_argument`` calls, so
+    renaming the option in the helper keeps this suite honest instead of
+    letting it drift.
+    """
+    helpers = {}
+
+    for node in tree.body:
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+
+        dests = set()
+
+        for call in ast.walk(node):
+            if (
+                isinstance(call, ast.Call)
+                and isinstance(call.func, ast.Attribute)
+                and call.func.attr == "add_argument"
+            ):
+                for arg in call.args:
+                    if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+                        dests.add(dest_from_flag(arg.value))
+                        break
+
+        if dests:
+            helpers[node.name] = dests
+
+    return helpers
+
+
+def collect_parser_attributes(main_node, helpers=None):
     """
     Return ``(allowed, subcommands)``.
 
@@ -68,10 +111,16 @@ def collect_parser_attributes(main_node):
     Walks main() in source order, tracking the parser currently being
     configured and binding its accumulated arguments when
     ``p.set_defaults(func=...)`` is reached.
+
+    ``helpers`` maps a helper function name to the attributes it adds, so
+    a shared option block counts as defined for every subparser that
+    calls it.
     """
     allowed = {}
     subcommands = {}
     state = {"current": None, "current_name": None}
+
+    helpers = helpers or {}
 
     def walk(statements):
         for stmt in statements:
@@ -109,6 +158,15 @@ def collect_parser_attributes(main_node):
                 continue
 
             func = call.func
+
+            if isinstance(func, ast.Name):
+                #
+                # A shared option block: `add_fee_rate_argument(p)`.
+                #
+                if state["current"] is not None:
+                    state["current"].update(helpers.get(func.id, ()))
+
+                continue
 
             if not isinstance(func, ast.Attribute):
                 continue
@@ -261,7 +319,10 @@ def main():
         fail("main() is present", "could not find def main() in the engine")
         return 1
 
-    allowed, subcommands = collect_parser_attributes(main_node)
+    allowed, subcommands = collect_parser_attributes(
+        main_node,
+        collect_argument_helpers(tree),
+    )
 
     if not allowed:
         fail(

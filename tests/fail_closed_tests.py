@@ -19,6 +19,7 @@ import contextlib
 import io
 import json
 import os
+import stat
 import sys
 import tempfile
 from pathlib import Path
@@ -73,6 +74,14 @@ def accepts(name, fn):
         return
 
     ok(name)
+
+
+def holds(name, condition, detail="the condition is false"):
+    """Assert a predicate the suite evaluates directly."""
+    if condition:
+        ok(name)
+    else:
+        fail(name, detail)
 
 
 def captures(name, fn, *expected):
@@ -895,6 +904,212 @@ def test_next_is_safe_with_nothing_to_do():
     )
 
 
+def test_state_file_and_write_helpers():
+    """
+    The shared state-file rules and the shared durable write.
+
+    Every scan and every durable write in the engine goes through these,
+    so a defect here would have been repeated at each call site. The
+    interesting cases are the ones the copies disagreed about: a
+    12-character name that is not hex, and a write that dies before its
+    rename.
+    """
+    clear_state()
+
+    holds(
+        "the swap ID rule accepts 12 lowercase hex characters",
+        all(
+            swap_v2.is_swap_id(value)
+            for value in ("0123456789ab", "ffffffffffff", "deadbeefcafe")
+        ),
+        "a canonical swap ID was rejected",
+    )
+
+    holds(
+        "the swap ID rule rejects everything else",
+        not any(
+            swap_v2.is_swap_id(value)
+            for value in (
+                "0123456789AB",
+                "0123456789a",
+                "0123456789abc",
+                "zzzzzzzzzzzz",
+                "",
+                None,
+                12,
+            )
+        ),
+        "a name the wire rule rejects was accepted as a swap ID",
+    )
+
+    write_swap("0123456789ab")
+    write_swap("ffffffffffff")
+    (SCRATCH / "notes.json").write_text("{}\n")
+    (SCRATCH / "ZZZZZZZZZZZZ.json").write_text("{}\n")
+    (SCRATCH / "0123456789cd.txt").write_text("{}\n")
+
+    found = [path.stem for path in swap_v2.local_swap_paths()]
+
+    holds(
+        "a state scan sees exactly the canonical records",
+        found == ["0123456789ab", "ffffffffffff"],
+        f"the scan returned {found}",
+    )
+
+    holds(
+        "a canonical record loads",
+        swap_v2.load_local_swap(SCRATCH / "0123456789ab.json") is not None,
+        "load_local_swap returned None for a valid record",
+    )
+
+    (SCRATCH / "ffffffffffff.json").write_text("{ not json")
+
+    holds(
+        "an unreadable record is skipped, not fatal",
+        swap_v2.load_local_swap(SCRATCH / "ffffffffffff.json") is None,
+        "an unreadable record was not reported as None",
+    )
+
+    target = SCRATCH / "atomic.json"
+
+    swap_v2.atomic_write_json(
+        target,
+        {"b": 1, "a": 2},
+        mode=0o600,
+        fsync_directory=True,
+    )
+
+    holds(
+        "an atomic write publishes sorted, newline-terminated JSON",
+        target.read_text() == '{\n  "a": 2,\n  "b": 1\n}\n',
+        f"the published bytes were {target.read_text()!r}",
+    )
+
+    holds(
+        "an atomic write applies its mode before publication",
+        stat.S_IMODE(target.stat().st_mode) == 0o600,
+        f"the mode is {oct(stat.S_IMODE(target.stat().st_mode))}",
+    )
+
+    holds(
+        "a successful atomic write leaves no temp file",
+        not list(SCRATCH.glob("*.tmp")),
+        f"left behind {[p.name for p in SCRATCH.glob('*.tmp')]}",
+    )
+
+    before = target.read_text()
+
+    #
+    # Simulate a crash between the fsync and the rename. This is the case
+    # the shared helper exists for: the canonical file must still hold the
+    # complete previous document.
+    #
+    original_fsync = os.fsync
+
+    def exploding_fsync(fd):
+        raise OSError("simulated power failure")
+
+    os.fsync = exploding_fsync
+
+    try:
+        refuses(
+            "a write that cannot be flushed fails loudly",
+            lambda: swap_v2.atomic_write_json(target, {"a": 999}),
+        )
+    finally:
+        os.fsync = original_fsync
+
+    holds(
+        "a write that dies before its rename leaves the old document",
+        target.read_text() == before,
+        f"the canonical file now holds {target.read_text()!r}",
+    )
+
+    for leftover in SCRATCH.glob("*.tmp"):
+        leftover.unlink()
+
+    clear_state()
+
+
+def test_chain_dispatch_and_settlement_lookup():
+    """
+    The one place that decides what differs between the two chains, and
+    the narrow settlement question the reorg-recovery paths ask.
+
+    Both replaced a pair of hand-written branches, so what is pinned here
+    is the property the branches had to maintain by hand: the module-level
+    RPC entry points are read at call time, and the HTLC lookup does not
+    run at all when the recorded transaction is no longer confirmed.
+    """
+    for chain, name in (("btc", "Bitcoin"), ("blake", "BLAKE")):
+        fields = swap_v2.chain_dispatch(chain)
+
+        holds(
+            f"the {chain} dispatch names its chain and funding fields",
+            fields["name"] == name
+            and fields["tx_field"] == f"{chain}_funding_txid"
+            and fields["vout_field"] == f"{chain}_funding_vout"
+            and fields["block_field"] == f"{chain}_funding_blockhash",
+            f"the dispatch returned {fields}",
+        )
+
+    refuses(
+        "an unknown chain is refused by the dispatch",
+        lambda: swap_v2.chain_dispatch("dogecoin"),
+    )
+
+    sentinel = lambda *args, **kwargs: None
+    original_cli = swap_v2.blake_cli
+    swap_v2.blake_cli = sentinel
+
+    try:
+        holds(
+            "the dispatch resolves the RPC entry point at call time",
+            swap_v2.chain_dispatch("blake")["cli"] is sentinel,
+            "the dispatch captured the entry point instead of resolving it",
+        )
+    finally:
+        swap_v2.blake_cli = original_cli
+
+    calls = []
+
+    original_confirmed = swap_v2.recorded_settlement_confirmed
+    original_find = swap_v2.find_confirmed_htlc_spend
+
+    swap_v2.recorded_settlement_confirmed = (
+        lambda cli, txid, blockhash: False
+    )
+    swap_v2.find_confirmed_htlc_spend = (
+        lambda swap, chain: calls.append(chain) or "spend"
+    )
+
+    try:
+        holds(
+            "an unconfirmed recorded settlement skips the HTLC lookup",
+            swap_v2.active_htlc_spend_or_none(
+                object(), "blake", "aa" * 32, "bb" * 32,
+            ) is None
+            and calls == [],
+            f"the HTLC lookup ran anyway: {calls}",
+        )
+
+        swap_v2.recorded_settlement_confirmed = (
+            lambda cli, txid, blockhash: True
+        )
+
+        holds(
+            "a confirmed recorded settlement resolves the HTLC spend",
+            swap_v2.active_htlc_spend_or_none(
+                object(), "blake", "aa" * 32, "bb" * 32,
+            ) == "spend"
+            and calls == ["blake"],
+            f"the lookup calls were {calls}",
+        )
+    finally:
+        swap_v2.recorded_settlement_confirmed = original_confirmed
+        swap_v2.find_confirmed_htlc_spend = original_find
+
+
 def guard(name, fn):
     """Run one test function, surfacing a crash as a single failure."""
     try:
@@ -925,6 +1140,8 @@ def main():
         guard("market offer parser guards", test_market_offer_parser_guards)
         guard("market take validator guards", test_market_take_validator_guards)
         guard("next with nothing to do", test_next_is_safe_with_nothing_to_do)
+        guard("state file and write helpers", test_state_file_and_write_helpers)
+        guard("chain dispatch and settlement lookup", test_chain_dispatch_and_settlement_lookup)
     finally:
         STUB.stop()
 

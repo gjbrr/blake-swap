@@ -655,6 +655,187 @@ def swap_id_is_locally_retired(swap_id):
     return archived_swap_path(swap_id).exists()
 
 
+def fsync_directory_best_effort(directory):
+    """
+    Persist a directory entry update, where the platform allows it.
+
+    os.replace() is atomic with respect to concurrent readers, but the
+    rename itself is only durable once the containing directory is
+    fsynced. Some filesystems and platforms do not support fsync on a
+    directory; a failure there says nothing about whether the data
+    write succeeded, so it is deliberately not fatal.
+    """
+    try:
+        dir_fd = os.open(
+            directory,
+            os.O_RDONLY,
+        )
+    except OSError:
+        return
+
+    try:
+        os.fsync(dir_fd)
+    except OSError:
+        pass
+    finally:
+        os.close(dir_fd)
+
+
+def atomic_write_bytes(
+    path,
+    payload,
+    *,
+    mode=None,
+    fsync_directory=False,
+):
+    """
+    Replace `path` with `payload` so a crash never leaves it truncated.
+
+    The bytes go to a sibling temp file which is flushed and fsynced
+    before an atomic os.replace() publishes it. Any reader therefore
+    sees either the complete previous contents or the complete new
+    contents, never a prefix of either, and never a mix.
+
+    `mode` is applied to the temp file before publication, so the
+    published file is never briefly more permissive than the caller
+    asked for.
+
+    `fsync_directory` additionally persists the rename. Without it the
+    directory entry update can be lost by a power failure even though
+    the file contents reached the disk, so durable protocol state asks
+    for it and disposable caches do not.
+    """
+    path = Path(path)
+
+    tmp_path = path.with_name(
+        path.name + ".tmp"
+    )
+
+    with open(tmp_path, "wb") as f:
+        f.write(payload)
+        f.flush()
+        os.fsync(f.fileno())
+
+    if mode is not None:
+        os.chmod(
+            tmp_path,
+            mode,
+        )
+
+    os.replace(
+        tmp_path,
+        path,
+    )
+
+    if fsync_directory:
+        fsync_directory_best_effort(
+            path.parent
+        )
+
+    return path
+
+
+def atomic_write_text(path, text, **kwargs):
+    return atomic_write_bytes(
+        path,
+        text.encode("utf-8"),
+        **kwargs,
+    )
+
+
+def atomic_write_json(
+    path,
+    data,
+    *,
+    indent=2,
+    compact=False,
+    mode=None,
+    fsync_directory=False,
+):
+    """
+    Write one JSON document atomically.
+
+    `compact` selects the single-line form used for network event
+    caches; the default is the indented, key-sorted form used for local
+    protocol state. The trailing newline is unconditional, so a
+    text-mode diff of two state files is well behaved.
+    """
+    if compact:
+        text = json.dumps(
+            data,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+    else:
+        text = json.dumps(
+            data,
+            indent=indent,
+            sort_keys=True,
+        )
+
+    return atomic_write_text(
+        path,
+        text + "\n",
+        mode=mode,
+        fsync_directory=fsync_directory,
+    )
+
+
+def is_swap_id(value):
+    """
+    Whether `value` is a canonical swap ID.
+
+    The rule itself lives in `swap_wire`, which owns the externally
+    visible schema, and is reused rather than restated here: a local scan
+    that accepted a name the wire rejects would load a record that can
+    never be named in a message.
+    """
+    return (
+        isinstance(value, str)
+        and swap_wire.SWAP_ID_RE.fullmatch(value) is not None
+    )
+
+
+def local_swap_paths(directory=None):
+    """
+    Every canonical swap record in one state directory, sorted by name.
+
+    A file whose name is not a canonical swap ID is not a swap record.
+    The state root is a directory the operator also uses for other
+    things, and a scan that tried to load those would report them as
+    corrupt swaps.
+    """
+    root = BASE_SWAP_DIR if directory is None else directory
+
+    return [
+        path
+        for path in sorted(root.glob("*.json"))
+        if is_swap_id(path.stem)
+    ]
+
+
+def load_local_swap(path):
+    """
+    Load one canonical local swap record, or None when it is unreadable.
+
+    Scans use this rather than `load_swap` because a record that cannot
+    be read is not a reason to abort a dashboard or a work queue. The
+    failure is still reported where it matters: `command_resume_all`
+    reads the raw JSON itself and puts every unreadable record in its
+    attention list instead of skipping it.
+    """
+    try:
+        return load_swap(
+            Path(path).stem,
+            role=os.environ.get(
+                "BLAKE_SWAP_ROLE",
+                "alice",
+            ),
+        )
+    except Exception:
+        return None
+
+
 def save_swap(swap, role="alice"):
     directory = role_dir(role)
 
@@ -670,41 +851,16 @@ def save_swap(swap, role="alice"):
         role,
     )
 
-    # Crash-safe state replacement:
-    # write complete JSON to a sibling temp file, fsync it,
-    # then atomically replace the canonical state file.
-    tmp_path = path.with_name(
-        path.name + ".tmp"
+    #
+    # Crash-safe state replacement. The swap file is the protocol's
+    # authoritative local record, so the rename itself must be durable,
+    # not merely the file contents.
+    #
+    return atomic_write_json(
+        path,
+        asdict(swap),
+        fsync_directory=True,
     )
-
-    with open(tmp_path, "w") as f:
-        json.dump(
-            asdict(swap),
-            f,
-            indent=2,
-            sort_keys=True,
-        )
-        f.write("\n")
-        f.flush()
-        os.fsync(f.fileno())
-
-    os.replace(tmp_path, path)
-
-    # Persist the directory entry update as well.
-    try:
-        dir_fd = os.open(
-            directory,
-            os.O_RDONLY,
-        )
-        try:
-            os.fsync(dir_fd)
-        finally:
-            os.close(dir_fd)
-    except OSError:
-        # Some filesystems/platforms do not support directory fsync.
-        pass
-
-    return path
 
 
 def migrate_swap_record(data):
@@ -1133,6 +1289,46 @@ def btc_cli(*args, wallet=None):
 
     return _call_chain_cli("Bitcoin", cmd, wallet, args)
 
+def chain_dispatch(chain):
+    """
+    Everything the engine needs that differs between the two HTLC chains.
+
+    The chains differ only in prefix, entry point and contract verifier,
+    so this is derived rather than repeated as a pair of if/elif branches
+    at every call site: a per-chain fact added here cannot be wired up
+    for one chain and forgotten for the other.
+
+    Returns a dict with `name`, `cli`, `wallet`, `tx_field`, `vout_field`,
+    `block_field` and `verifier`. Function references are resolved at call
+    time rather than stored in a module-level table, so replacing
+    `blake_cli`/`btc_cli` on the module keeps working: the transport and
+    fail-closed suites rely on exactly that.
+    """
+    if chain == "btc":
+        return {
+            "name": "Bitcoin",
+            "cli": btc_cli,
+            "wallet": BTC_WALLET,
+            "tx_field": "btc_funding_txid",
+            "vout_field": "btc_funding_vout",
+            "block_field": "btc_funding_blockhash",
+            "verifier": verify_btc_contract,
+        }
+
+    if chain == "blake":
+        return {
+            "name": "BLAKE",
+            "cli": blake_cli,
+            "wallet": BLAKE_WALLET,
+            "tx_field": "blake_funding_txid",
+            "vout_field": "blake_funding_vout",
+            "block_field": "blake_funding_blockhash",
+            "verifier": verify_blake_contract,
+        }
+
+    raise ValueError(f"Unknown HTLC chain: {chain}")
+
+
 def htlc_descriptor_body(swap, chain, private_keys=None):
     """
     The swap's HTLC descriptor, optionally carrying private keys.
@@ -1437,24 +1633,14 @@ def find_confirmed_htlc_spend(
     yet be found, fail closed rather than risk rebroadcasting
     a competing transaction.
     """
-    if chain == "btc":
-        cli = btc_cli
-        funding_txid = swap.btc_funding_txid
-        funding_vout = swap.btc_funding_vout
-        funding_blockhash = swap.btc_funding_blockhash
-        chain_name = "Bitcoin"
+    fields = chain_dispatch(chain)
 
-    elif chain == "blake":
-        cli = blake_cli
-        funding_txid = swap.blake_funding_txid
-        funding_vout = swap.blake_funding_vout
-        funding_blockhash = swap.blake_funding_blockhash
-        chain_name = "BLAKE"
+    cli = fields["cli"]
+    chain_name = fields["name"]
 
-    else:
-        raise ValueError(
-            f"Unknown HTLC chain: {chain}"
-        )
+    funding_txid = getattr(swap, fields["tx_field"])
+    funding_vout = getattr(swap, fields["vout_field"])
+    funding_blockhash = getattr(swap, fields["block_field"])
 
     if not funding_txid:
         raise ValueError(
@@ -1833,40 +2019,23 @@ def require_recovered_branch(
     chain,
     expected_branch,
 ):
-    if chain == "btc":
-        cli = btc_cli
+    fields = chain_dispatch(chain)
 
-        if expected_branch == "claim":
-            recorded_txid = swap.btc_claim_txid
-        elif expected_branch == "refund":
-            recorded_txid = swap.btc_refund_txid
-        else:
-            raise ValueError(
-                f"Unknown Bitcoin settlement branch: {expected_branch}"
-            )
+    cli = fields["cli"]
 
-        funding_txid = swap.btc_funding_txid
-        funding_vout = swap.btc_funding_vout
-
-    elif chain == "blake":
-        cli = blake_cli
-
-        if expected_branch == "claim":
-            recorded_txid = swap.blake_claim_txid
-        elif expected_branch == "refund":
-            recorded_txid = swap.blake_refund_txid
-        else:
-            raise ValueError(
-                f"Unknown BLAKE settlement branch: {expected_branch}"
-            )
-
-        funding_txid = swap.blake_funding_txid
-        funding_vout = swap.blake_funding_vout
-
-    else:
+    if expected_branch not in ("claim", "refund"):
         raise ValueError(
-            f"Unknown HTLC chain: {chain}"
+            f"Unknown {fields['name']} settlement branch: "
+            f"{expected_branch}"
         )
+
+    recorded_txid = getattr(
+        swap,
+        f"{chain}_{expected_branch}_txid",
+    )
+
+    funding_txid = getattr(swap, fields["tx_field"])
+    funding_vout = getattr(swap, fields["vout_field"])
 
     #
     # If this participant previously broadcast an exact settlement
@@ -2093,20 +2262,15 @@ def write_funding_intent(
         "secret_hash": swap.secret_hash,
     }
 
-    tmp = path.with_name(path.name + ".tmp")
-
-    with open(tmp, "w") as f:
-        json.dump(
-            data,
-            f,
-            indent=2,
-            sort_keys=True,
-        )
-        f.write("\n")
-        f.flush()
-        os.fsync(f.fileno())
-
-    os.replace(tmp, path)
+    #
+    # The funding marker is what makes a broadcast resumable, so the
+    # rename must be durable before any funds can move.
+    #
+    atomic_write_json(
+        path,
+        data,
+        fsync_directory=True,
+    )
 
     return path
 
@@ -2139,20 +2303,16 @@ def record_funding_broadcast(
     data["txid"] = str(txid)
     data["vout"] = int(vout)
 
-    tmp = path.with_name(path.name + ".tmp")
-
-    with open(tmp, "w") as f:
-        json.dump(
-            data,
-            f,
-            indent=2,
-            sort_keys=True,
-        )
-        f.write("\n")
-        f.flush()
-        os.fsync(f.fileno())
-
-    os.replace(tmp, path)
+    #
+    # Extending the marker must be at least as durable as creating it:
+    # a broadcast whose identity was lost would send a second funding
+    # transaction for a contract that is already paid.
+    #
+    atomic_write_json(
+        path,
+        data,
+        fsync_directory=True,
+    )
 
 
 def locate_wallet_payment_output(
@@ -2585,11 +2745,7 @@ def command_fund_ready_swap(args):
     me = current_nostr_pubkey()
     candidates = []
 
-    for path in sorted(BASE_SWAP_DIR.glob("*.json")):
-        # Exclude non-swap JSON files that may live in the state root.
-        if len(path.stem) != 12:
-            continue
-
+    for path in local_swap_paths():
         try:
             with open(path) as f:
                 data = json.load(f)
@@ -2959,8 +3115,8 @@ def superseded_placeholders(keep_swap_id, role):
     """
     placeholders = []
 
-    for path in sorted(BASE_SWAP_DIR.glob("*.json")):
-        if len(path.stem) != 12 or path.stem == keep_swap_id:
+    for path in local_swap_paths():
+        if path.stem == keep_swap_id:
             continue
 
         try:
@@ -8808,6 +8964,36 @@ def recorded_settlement_confirmed(cli, txid, blockhash):
     return int(tx.get("confirmations", 0) or 0) >= 1
 
 
+def active_htlc_spend_or_none(swap, chain, txid, blockhash):
+    """
+    The confirmed active-chain spend of this swap's HTLC, if any.
+
+    `find_confirmed_htlc_spend` fails closed on a reorg-disconnected
+    recorded settlement. That is right for an action path, but it would
+    make the recovery paths unreachable, because a disconnected
+    transaction is precisely the input they exist to handle. So the
+    narrow "is this exact recorded transaction still confirmed?" question
+    is asked first, and only then is the HTLC spend looked up.
+
+    Returns None when the recorded transaction is not confirmed. A
+    *conflicting* confirmed spend is not None; the caller must treat that
+    as the security failure it is rather than as "nothing to recover".
+    """
+    cli = chain_dispatch(chain)["cli"]
+
+    if not recorded_settlement_confirmed(
+        cli,
+        txid,
+        blockhash,
+    ):
+        return None
+
+    return find_confirmed_htlc_spend(
+        swap,
+        chain,
+    )
+
+
 def recover_final_blake_claim_reorg(swap):
     """
     Recover from a reorg which removed Bob's final BLAKE claim.
@@ -8821,25 +9007,16 @@ def recover_final_blake_claim_reorg(swap):
 
     #
     # First ask the active BLAKE chain what currently spends
-    # the original HTLC.
+    # the original HTLC. A recorded final claim that a reorg has
+    # disconnected is the normal input here; see
+    # active_htlc_spend_or_none() for why the narrow question comes first.
     #
-    # A reorg-disconnected recorded claim is the normal input here, and
-    # find_confirmed_htlc_spend fails closed on exactly that, so ask the
-    # narrow question first. A conflicting confirmed spend is still
-    # caught below: the rollback path requires the HTLC outpoint to
-    # reappear ignoring mempool effects, and fails closed otherwise.
-    #
-    if recorded_settlement_confirmed(
-        blake_cli,
+    current_blake_spend = active_htlc_spend_or_none(
+        swap,
+        "blake",
         swap.blake_claim_txid,
         swap.blake_claim_blockhash,
-    ):
-        current_blake_spend = find_confirmed_htlc_spend(
-            swap,
-            "blake",
-        )
-    else:
-        current_blake_spend = None
+    )
 
     if current_blake_spend is not None:
         #
@@ -8991,25 +9168,16 @@ def recover_final_blake_refund_reorg(swap):
         )
 
     #
-    # First inspect confirmed active-chain truth.
+    # First inspect confirmed active-chain truth for the recorded refund;
+    # see active_htlc_spend_or_none() for why the narrow question comes
+    # first.
     #
-    # A reorg-disconnected recorded refund is the normal input here, and
-    # find_confirmed_htlc_spend fails closed on exactly that, so ask the
-    # narrow question first. A conflicting confirmed spend is still
-    # caught below: the rollback path requires the HTLC outpoint to
-    # reappear ignoring mempool effects, and fails closed otherwise.
-    #
-    if recorded_settlement_confirmed(
-        blake_cli,
+    active = active_htlc_spend_or_none(
+        swap,
+        "blake",
         swap.blake_refund_txid,
         swap.blake_refund_blockhash,
-    ):
-        active = find_confirmed_htlc_spend(
-            swap,
-            "blake",
-        )
-    else:
-        active = None
+    )
 
     if active is not None:
         if (
@@ -9269,7 +9437,6 @@ def nostr_cache_event(event):
         )
 
     path = nostr_event_cache_path(event_id)
-    temp_path = path.with_suffix(".json.tmp")
 
     #
     # The directory is created at import, but recreate it defensively
@@ -9281,19 +9448,18 @@ def nostr_cache_event(event):
         mode=0o700,
     )
 
-    with open(temp_path, "w") as f:
-        json.dump(
-            event,
-            f,
-            sort_keys=True,
-            separators=(",", ":"),
-        )
-        f.write("\n")
-        f.flush()
-        os.fsync(f.fileno())
-
-    os.chmod(temp_path, 0o600)
-    os.replace(temp_path, path)
+    #
+    # A cache, not protocol state: the event is re-verified on every read
+    # and can be fetched again, so the rename does not need to be durable.
+    # It does need to be atomic and private, which is what mode=0o600 on
+    # the temp file guarantees before publication.
+    #
+    atomic_write_json(
+        path,
+        event,
+        compact=True,
+        mode=0o600,
+    )
 
     return path
 
@@ -13367,24 +13533,14 @@ def command_accept_reverse_market_match(args):
         ),
     }
 
-    tmp = binding_path.with_name(
-        binding_path.name + ".tmp"
-    )
-
-    with open(tmp, "w") as f:
-        json.dump(
-            binding,
-            f,
-            indent=2,
-            sort_keys=True,
-        )
-        f.write("\n")
-        f.flush()
-        os.fsync(f.fileno())
-
-    os.replace(
-        tmp,
+    #
+    # The binding reserves the swap ID for this exact match, so it must
+    # survive a crash that loses the process but not the disk.
+    #
+    atomic_write_json(
         binding_path,
+        binding,
+        fsync_directory=True,
     )
 
     print()
@@ -14134,29 +14290,10 @@ def command_accept_market_match(args):
             )
 
     def write_binding():
-        #
-        # Write through a temporary file so an
-        # interrupted write does not leave a
-        # partially-written JSON binding.
-        #
-        temp_path = binding_path.with_name(
-            binding_path.name + ".tmp"
-        )
-
-        with open(temp_path, "w") as f:
-            json.dump(
-                proposed_binding,
-                f,
-                indent=2,
-                sort_keys=True,
-            )
-            f.write("\n")
-            f.flush()
-            os.fsync(f.fileno())
-
-        os.replace(
-            temp_path,
+        atomic_write_json(
             binding_path,
+            proposed_binding,
+            fsync_directory=True,
         )
 
     existing_path = swap_path(
@@ -14509,24 +14646,15 @@ def accept_reverse_market_take(
         selection_path,
         offer_selection_path,
     ):
-        tmp = path.with_name(
-            path.name + ".tmp"
-        )
-
-        with open(tmp, "w") as f:
-            json.dump(
-                selection,
-                f,
-                indent=2,
-                sort_keys=True,
-            )
-            f.write("\n")
-            f.flush()
-            os.fsync(f.fileno())
-
-        os.replace(
-            tmp,
+        #
+        # Both copies of the selection are written before either is
+        # announced, and both must survive a crash: losing one would make
+        # the two agree on different terms.
+        #
+        atomic_write_json(
             path,
+            selection,
+            fsync_directory=True,
         )
 
     #
@@ -14574,24 +14702,15 @@ def accept_reverse_market_take(
         selection_path,
         offer_selection_path,
     ):
-        tmp = path.with_name(
-            path.name + ".tmp"
-        )
-
-        with open(tmp, "w") as f:
-            json.dump(
-                selection,
-                f,
-                indent=2,
-                sort_keys=True,
-            )
-            f.write("\n")
-            f.flush()
-            os.fsync(f.fileno())
-
-        os.replace(
-            tmp,
+        #
+        # Both copies of the selection are written before either is
+        # announced, and both must survive a crash: losing one would make
+        # the two agree on different terms.
+        #
+        atomic_write_json(
             path,
+            selection,
+            fsync_directory=True,
         )
 
     print()
@@ -16029,25 +16148,14 @@ def recover_recorded_confirmed_funding(swap, chain):
     not silently fall back to a different transaction.
     """
 
-    if chain == "blake":
-        cli = blake_cli
-        wallet = BLAKE_WALLET
-        tx_field = "blake_funding_txid"
-        vout_field = "blake_funding_vout"
-        block_field = "blake_funding_blockhash"
-    elif chain == "btc":
-        cli = btc_cli
-        wallet = BTC_WALLET
-        tx_field = "btc_funding_txid"
-        vout_field = "btc_funding_vout"
-        block_field = "btc_funding_blockhash"
-    else:
-        raise ValueError(
-            f"Unknown funding chain: {chain}"
-        )
+    fields = chain_dispatch(chain)
 
-    txid = getattr(swap, tx_field)
-    vout = getattr(swap, vout_field)
+    cli = fields["cli"]
+    wallet = fields["wallet"]
+    block_field = fields["block_field"]
+
+    txid = getattr(swap, fields["tx_field"])
+    vout = getattr(swap, fields["vout_field"])
 
     if txid is None and vout is None:
         return None
@@ -16765,20 +16873,13 @@ def _reconcile_observe_htlc(swap, chain):
 
     work = copy.copy(swap)
 
-    if chain == "blake":
-        cli = blake_cli
-        tx_field = "blake_funding_txid"
-        vout_field = "blake_funding_vout"
-        block_field = "blake_funding_blockhash"
-        verifier = verify_blake_contract
-    elif chain == "btc":
-        cli = btc_cli
-        tx_field = "btc_funding_txid"
-        vout_field = "btc_funding_vout"
-        block_field = "btc_funding_blockhash"
-        verifier = verify_btc_contract
-    else:
-        raise ValueError(f"Unknown chain: {chain}")
+    fields = chain_dispatch(chain)
+
+    cli = fields["cli"]
+    tx_field = fields["tx_field"]
+    vout_field = fields["vout_field"]
+    block_field = fields["block_field"]
+    verifier = fields["verifier"]
 
     txid = getattr(work, tx_field)
     vout = getattr(work, vout_field)
@@ -18355,14 +18456,15 @@ def command_ignore_match(args):
         "local_only": True,
     }
 
-    tmp = path.with_suffix(".tmp")
-    with open(tmp, "w") as f:
-        json.dump(record, f, indent=2, sort_keys=True)
-        f.write("\n")
-        f.flush()
-        os.fsync(f.fileno())
-
-    os.replace(tmp, path)
+    #
+    # The tombstone is what stops this match being offered again, so it
+    # has to outlive the process that wrote it.
+    #
+    atomic_write_json(
+        path,
+        record,
+        fsync_directory=True,
+    )
 
     print()
     print("MARKET MATCH IGNORED")
@@ -18446,19 +18548,11 @@ def command_next(args):
     # A. Authenticated Bob accept messages waiting to be imported.
     #    This is coordination only: no funds move.
     # --------------------------------------------------------------
-    for path in sorted(BASE_SWAP_DIR.glob("*.json")):
-        if len(path.stem) != 12:
-            continue
+    for path in local_swap_paths():
 
-        try:
-            swap = load_swap(
-                path.stem,
-                role=os.environ.get(
-                    "BLAKE_SWAP_ROLE",
-                    "alice",
-                ),
-            )
-        except Exception:
+        swap = load_local_swap(path)
+
+        if swap is None:
             continue
 
         if swap.state != State.OFFERED.value:
@@ -18926,19 +19020,11 @@ def command_next(args):
     # --------------------------------------------------------------
     resumable = []
 
-    for path in sorted(BASE_SWAP_DIR.glob("*.json")):
-        if len(path.stem) != 12:
-            continue
+    for path in local_swap_paths():
 
-        try:
-            swap = load_swap(
-                path.stem,
-                role=os.environ.get(
-                    "BLAKE_SWAP_ROLE",
-                    "alice",
-                ),
-            )
-        except Exception:
+        swap = load_local_swap(path)
+
+        if swap is None:
             continue
 
         if me not in {
@@ -19056,19 +19142,11 @@ def command_next(args):
     # --------------------------------------------------------------
     funding_ready = []
 
-    for path in sorted(BASE_SWAP_DIR.glob("*.json")):
-        if len(path.stem) != 12:
-            continue
+    for path in local_swap_paths():
 
-        try:
-            swap = load_swap(
-                path.stem,
-                role=os.environ.get(
-                    "BLAKE_SWAP_ROLE",
-                    "alice",
-                ),
-            )
-        except Exception:
+        swap = load_local_swap(path)
+
+        if swap is None:
             continue
 
         if swap.state != State.OFFERED.value:
@@ -19249,19 +19327,11 @@ def command_dashboard(args):
         }
         return mapping.get(action, str(action))
 
-    for path in sorted(BASE_SWAP_DIR.glob("*.json")):
-        if len(path.stem) != 12:
-            continue
+    for path in local_swap_paths():
 
-        try:
-            swap = load_swap(
-                path.stem,
-                role=os.environ.get(
-                    "BLAKE_SWAP_ROLE",
-                    "alice",
-                ),
-            )
-        except Exception:
+        swap = load_local_swap(path)
+
+        if swap is None:
             continue
 
         if me not in {
@@ -19299,9 +19369,7 @@ def command_dashboard(args):
     archive_dir = BASE_SWAP_DIR / "archive"
 
     if archive_dir.exists():
-        for path in sorted(archive_dir.glob("*.json")):
-            if len(path.stem) != 12:
-                continue
+        for path in local_swap_paths(archive_dir):
 
             try:
                 with open(path) as f:
@@ -19502,9 +19570,7 @@ def command_dismiss(args):
 
     matches = []
 
-    for path in sorted(BASE_SWAP_DIR.glob("*.json")):
-        if len(path.stem) != 12:
-            continue
+    for path in local_swap_paths():
         if path.stem.startswith(prefix):
             matches.append(path)
 
@@ -19693,21 +19759,13 @@ def command_resume_all(args):
     candidates = []
     attention = []
 
-    for path in sorted(BASE_SWAP_DIR.glob("*.json")):
+    for path in local_swap_paths():
         #
-        # Only canonical local swap records belong here: a 12-hex stem
-        # that names the swap. Anything else in the state root is not
-        # ours to drive.
+        # Only canonical local swap records reach this loop: a 12-hex
+        # stem that names the swap. Anything else in the state root is
+        # not ours to drive.
         #
         stem = path.stem
-
-        if len(stem) != 12:
-            continue
-
-        try:
-            int(stem, 16)
-        except ValueError:
-            continue
 
         try:
             with open(path) as f:
@@ -19850,9 +19908,7 @@ def command_resume(args):
                 "swap ID prefix is too short; use at least 4 characters"
             )
 
-    for path in sorted(BASE_SWAP_DIR.glob("*.json")):
-        if len(path.stem) != 12:
-            continue
+    for path in local_swap_paths():
 
         if (
             requested_prefix is not None
@@ -19860,15 +19916,9 @@ def command_resume(args):
         ):
             continue
 
-        try:
-            swap = load_swap(
-                path.stem,
-                role=os.environ.get(
-                    "BLAKE_SWAP_ROLE",
-                    "alice",
-                ),
-            )
-        except Exception:
+        swap = load_local_swap(path)
+
+        if swap is None:
             continue
 
         if me not in {
@@ -19911,12 +19961,14 @@ def command_resume(args):
         all_matches = resumable + attention
 
         if not all_matches:
-                        # A terminal swap is deliberately excluded from the live
+            #
+            # A terminal swap is deliberately excluded from the live
             # resume queue, but an explicit prefix should still return
             # a friendly terminal result.
+            #
             terminal_matches = []
 
-            for path in sorted(BASE_SWAP_DIR.glob("*.json")):
+            for path in local_swap_paths():
                 try:
                     with open(path) as f:
                         data = json.load(f)
@@ -19929,7 +19981,7 @@ def command_resume(args):
                 if (
                     isinstance(swap_id, str)
                     and requested_prefix is not None
-                and swap_id.startswith(requested_prefix)
+                    and swap_id.startswith(requested_prefix)
                     and state in (
                         State.COMPLETE.value,
                         State.BLAKE_REFUNDED.value,

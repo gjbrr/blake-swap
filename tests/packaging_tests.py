@@ -400,6 +400,33 @@ def test_the_workflow_gates_at_the_documented_threshold():
         )
 
 
+def test_the_workflow_installs_every_extra_the_suites_need():
+    """
+    A unit suite that cannot run in the environment CI builds.
+
+    `tests/nip44_tests.py` exercises the cipher whenever `cryptography` is
+    installed and exits 77 when it is not; `--strict` then makes that skip a
+    failure. So a workflow that installs only the `dev` extra either fails
+    the unit gate outright, or, without `--strict`, reports a unit gate that
+    silently stopped covering the encrypted coordination path. The extras it
+    installs must therefore include the optional one the suites use.
+    """
+
+    text = workflow_text()
+
+    installs = [
+        line.strip()
+        for line in text.splitlines()
+        if "pip install" in line and not line.strip().startswith("#")
+    ]
+
+    if not any("crypto" in line for line in installs):
+        raise AssertionError(
+            "the workflow never installs the crypto extra, so the NIP-44 "
+            f"cipher is not covered by the unit gate: {installs}"
+        )
+
+
 def test_the_workflow_never_depends_on_public_relays():
     text = workflow_text()
 
@@ -442,6 +469,7 @@ def main():
     check("the workflow provisions both chains", test_the_workflow_provisions_both_chains)
     check("the workflow proves the rig came up", test_the_workflow_proves_the_rig_came_up)
     check("the workflow gates at the documented threshold", test_the_workflow_gates_at_the_documented_threshold)
+    check("the workflow installs every extra the suites need", test_the_workflow_installs_every_extra_the_suites_need)
     check("the workflow never depends on public relays", test_the_workflow_never_depends_on_public_relays)
 
     print()

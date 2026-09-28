@@ -47,6 +47,22 @@ A `unit` suite needs no nodes and no relays. A few of them exercise the
 engine's signing path and therefore need `coincurve`, which is a declared
 dependency; those skip cleanly when it is unavailable.
 
+`nip44_tests.py` is the one suite with an **optional** dependency. NIP-44's
+key derivation is pure Python, but its cipher and per-message keys need
+`cryptography`, which is the `crypto` extra rather than a runtime
+dependency. The eight cipher-dependent checks are skipped, not failed, when
+it is absent, and the suite exits 77 so the runner reports `SKIP` instead of
+claiming a pass for checks that never ran. Install the extra to run them:
+
+```bash
+pip install -e ".[dev,crypto]"   # everything the suites can use
+scripts/test.sh --unit-only --strict
+```
+
+`--strict` makes that skip a failure, which is why CI installs the extra:
+a unit gate that silently stopped covering the encrypted coordination path
+is the outcome the flag exists to prevent.
+
 ---
 
 ## Node configuration
@@ -255,7 +271,7 @@ honest reading — run `scripts/test-nodes start` first.
 | `swap_resume_step_budget_tests.py` | `resume --max-steps` forwards an explicit step budget to the driver |
 | `schema_equality_tests.py` | the engine's acceptance boundary *is* the canonical schema, for all seven settlement types: a schema-valid message is accepted field for field, every required field is required, unknown fields and a nested `secret_hex` are refused by both, internal annotations are tolerated on receipt and refused on send, and a static check that every message type the engine hands to the transport has a schema (and vice versa) |
 | `packaging_tests.py` | `pyproject.toml` against `requirements.txt` and `src/` (runtime pins, the optional extra, the declared modules, the licence and the Python range), and the CI workflow itself: it parses, pins the runner and Python, provisions **both** node binaries with matching version/checksum pairs, verifies the rig came up, gates the full suite at the documented threshold, and never makes a merge depend on public relays |
-| `nip44_tests.py` | the NIP-44 v2 codec against the **official** test vectors rather than its own output: conversation keys, message keys, all published padding lengths, plaintext/payload pairs (ASCII, multi-plane Unicode, emoji, right-to-left), long messages by hash, the 2026 extended length-prefix boundary, and every published invalid class |
+| `nip44_tests.py` | the NIP-44 v2 codec against the **official** test vectors rather than its own output: conversation keys, message keys, all published padding lengths, plaintext/payload pairs (ASCII, multi-plane Unicode, emoji, right-to-left), long messages by hash, the 2026 extended length-prefix boundary, and every published invalid class. Eight cipher-dependent checks need the `crypto` extra and skip without it |
 | `blake_amount_tests.py` | BLAKE amounts as integer base units: exact parse/render round-trips, canonical wire strings, refusal of anything finer than one base unit, the legacy float record migration (including the rounded-and-reported case), and the one-base-unit difference that the old `1e-8` tolerance accepted |
 | `agent_policy_tests.py` | the autonomous agent's (state → command) table for both roles, the child-process environment and output forwarding, escalation of a child's `SECURITY FAILURE`, the give-up bound on consecutive failures, and clean SIGTERM unwinding |
 | `driver_policy_tests.py` | the autonomous driver's decision table, driven directly through its only input (the reconciliation report) with every action executor replaced by a recorder: `claim-btc`, `fund-btc`, `refund-btc` and `refund-blake` are attempted exactly when protocol role, checkpoint, chain status, secret provenance and timeout margin all permit, and never otherwise; a violated precondition is a contained, reported step failure |

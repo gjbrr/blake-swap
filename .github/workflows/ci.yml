@@ -53,7 +53,13 @@ jobs:
           # requirements.txt: that exercises the packaging metadata, and the
           # dev extra is what parses the workflow in tests/packaging_tests.py.
           #
-          .venv/bin/python -m pip install -e ".[dev]" coverage
+          # The crypto extra is not optional here. tests/nip44_tests.py is a
+          # unit suite, and its eight cipher-dependent checks exit 77 when
+          # `cryptography` is absent, which --strict turns into a failure.
+          # Installing it is what keeps the encrypted coordination path
+          # covered instead of merely unbroken.
+          #
+          .venv/bin/python -m pip install -e ".[dev,crypto]" coverage
           .venv/bin/coverage --version
 
       - name: Cache the node binaries

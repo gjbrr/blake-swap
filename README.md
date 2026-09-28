@@ -193,13 +193,17 @@ project's coverage gate, which the current suite set meets.
 options with `--help`.
 
 CI (`.github/workflows/ci.yml`) does the same thing on a clean runner: it
-installs the project with `pip install -e ".[dev]"`, downloads the pinned
-Bitcoin Core and Bitcoin Knots builds with their checksums, starts the rig,
-**verifies the rig actually came up** (a runner exits 0 for a skipped suite, so
-this is checked explicitly), runs the unit suites and the documentation check
-with `--strict`, and then gates the full suite at `--fail-under 80`. The
-public-relay suites never gate a merge. `tests/packaging_tests.py` keeps the
-workflow, the packaging metadata and `requirements.txt` from drifting apart.
+installs the project with `pip install -e ".[dev,crypto]"` (the `crypto`
+extra is what the NIP-44 suite's cipher checks need, and `--strict` makes
+their absence a failure rather than a quietly uncovered feature), downloads
+the pinned Bitcoin Core and Bitcoin Knots builds with their checksums, starts
+the rig, **verifies the rig actually came up** (a runner exits 0 for a skipped
+suite, so this is checked explicitly), runs the unit suites and the
+documentation check with `--strict`, and then gates the full suite at
+`--fail-under 80`. The public-relay suites never gate a merge.
+`tests/packaging_tests.py` keeps the workflow, the packaging metadata and
+`requirements.txt` from drifting apart — including that the workflow installs
+every extra the suites use.
 
 See `tests/README.md` for the suite inventory, prerequisites, and the
 environment variables that override node discovery. The integration

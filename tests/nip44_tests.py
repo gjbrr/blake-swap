@@ -34,9 +34,11 @@ It also pins the deterministic discrimination a plaintext reader relies
 on: JSON begins with `{`, which is not base64, so a NIP-44 payload can
 never be mistaken for a JSON object.
 
-Needs no chain nodes and no relays.
+Needs no chain nodes and no relays. Eight of the checks need the optional
+`cryptography` package (the `crypto` extra) and are skipped, with the suite
+exiting 77, when it is absent.
 
-Exit status: 0 pass, 1 fail.
+Exit status: 0 pass, 1 fail, 77 cipher dependency absent.
 """
 
 from __future__ import annotations
@@ -53,6 +55,32 @@ import nip44  # noqa: E402
 
 PASS = 0
 FAIL = 0
+SKIPPED = 0
+
+#
+# NIP-44's key derivation needs only `coincurve` and `hmac`, but the cipher
+# and the message keys need the optional `cryptography` package, which is
+# the `crypto` extra and is not a runtime dependency. A plaintext-only
+# checkout is therefore a supported environment rather than a broken one,
+# so the cipher-dependent checks are skipped instead of failed when it is
+# absent. They are skipped *loudly* and the suite exits 77 rather than 0:
+# reporting a pass for a check that never ran is the vacuous result this
+# whole suite exists to avoid, and `scripts/test.sh --strict` turns the
+# skip into a failure wherever the full environment is expected.
+#
+try:
+    import cryptography  # noqa: F401
+except ImportError:
+    HAVE_CRYPTO = False
+else:
+    HAVE_CRYPTO = True
+
+CRYPTO_MISSING = (
+    "the optional 'cryptography' package is not installed; "
+    "install it with `pip install -e '.[crypto]'`"
+)
+
+SKIP_EXIT_CODE = 77
 
 
 def ok(name):
@@ -69,6 +97,16 @@ def fail(name, detail):
         print(f"      {line}")
 
 
+def skip(name):
+    global SKIPPED
+
+    if SKIPPED == 0:
+        print(f"SKIP: {CRYPTO_MISSING}")
+
+    SKIPPED += 1
+    print(f"SKIP  {name}")
+
+
 def check(name, fn):
     try:
         fn()
@@ -76,6 +114,22 @@ def check(name, fn):
         fail(name, f"{type(e).__name__}: {e}")
     else:
         ok(name)
+
+
+def check_crypto(name, fn):
+    """
+    Run one cipher-dependent check, or skip it if the extra is absent.
+
+    These checks cannot be allowed to run without `cryptography`: the
+    module's refusals are all `Nip44Error`, so a missing dependency is
+    indistinguishable from the rejection under test and the check would
+    pass having proved nothing.
+    """
+    if not HAVE_CRYPTO:
+        skip(name)
+        return
+
+    check(name, fn)
 
 
 def refuses(name, fn):
@@ -381,13 +435,6 @@ def test_extended_length_prefix_boundary():
 
 
 def test_empty_plaintext_is_refused():
-    key = bytes.fromhex(BOUNDARY_CONVERSATION_KEY)
-
-    refuses(
-        "an empty plaintext is refused",
-        lambda: nip44.encrypt("", key),
-    )
-
     refuses(
         "padding an empty plaintext is refused",
         lambda: nip44.pad(b""),
@@ -396,6 +443,20 @@ def test_empty_plaintext_is_refused():
     refuses(
         "calc_padded_len(0) is refused",
         lambda: nip44.calc_padded_len(0),
+    )
+
+    # `encrypt("")` is covered separately: it needs the cipher dependency,
+    # and without it the refusal would come from the missing import rather
+    # than from the padding rule under test.
+
+
+def test_encrypting_an_empty_plaintext_is_refused():
+    refuses(
+        "an empty plaintext is refused",
+        lambda: nip44.encrypt(
+            "",
+            bytes.fromhex(BOUNDARY_CONVERSATION_KEY),
+        ),
     )
 
 
@@ -415,15 +476,28 @@ def test_invalid_payloads_are_refused():
             "invalid base64",
             "Atфupco0WyaOW2IGDKcshwxI9xO8HgD/P8Ddt46CbxDbrhdG8VmJZE0UICD06CUvEvdnr1cp1fiMtlM/GrE92xAc1EwsVCQEgWEu2gsHUVf4JAa3TpgkmFc3TWsax0v6n/Wq",
         ),
-        (
-            "an invalid MAC",
-            "Agn/l3ULCEAS4V7LhGFM6IGA17jsDUaFCKhrbXDANholyySBfeh+EN8wNB9gaLlg4j6wdBYh+3oK+mnxWu3NKRbSvQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
-        ),
     ):
         refuses(
             f"{name} is refused",
             lambda payload=payload: nip44.decrypt(payload, key),
         )
+
+
+def test_authentication_failures_are_refused():
+    """
+    A well-formed payload whose MAC does not verify.
+
+    Separate from the structural refusals above because this one reaches
+    the message keys, and therefore the optional cipher dependency, before
+    it can fail.
+    """
+    refuses(
+        "an invalid MAC is refused",
+        lambda: nip44.decrypt(
+            "Agn/l3ULCEAS4V7LhGFM6IGA17jsDUaFCKhrbXDANholyySBfeh+EN8wNB9gaLlg4j6wdBYh+3oK+mnxWu3NKRbSvQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            bytes.fromhex(BOUNDARY_CONVERSATION_KEY),
+        ),
+    )
 
 
 def test_invalid_conversation_keys_are_refused():
@@ -533,20 +607,22 @@ def main():
 
     check("conversation keys match the vectors", test_conversation_key_vectors)
     check("the conversation key is symmetric", test_conversation_key_is_symmetric)
-    check("message keys match the vector", test_message_key_vector)
+    check_crypto("message keys match the vector", test_message_key_vector)
     check("padded lengths match the vectors", test_padded_length_vectors)
-    check("encryption matches the vectors and round-trips", test_encrypt_matches_the_vectors_and_decrypts_back)
-    check("long messages match the vectors", test_long_message_vectors)
-    check("the extended length prefix is exact", test_extended_length_prefix_boundary)
+    check_crypto("encryption matches the vectors and round-trips", test_encrypt_matches_the_vectors_and_decrypts_back)
+    check_crypto("long messages match the vectors", test_long_message_vectors)
+    check_crypto("the extended length prefix is exact", test_extended_length_prefix_boundary)
 
     check("an empty plaintext is refused", test_empty_plaintext_is_refused)
+    check_crypto("encrypting an empty plaintext is refused", test_encrypting_an_empty_plaintext_is_refused)
     check("invalid payloads are refused", test_invalid_payloads_are_refused)
+    check_crypto("authentication failures are refused", test_authentication_failures_are_refused)
     check("invalid conversation keys are refused", test_invalid_conversation_keys_are_refused)
     check("padding round-trips every boundary", test_padding_round_trips_every_boundary)
     check("corrupt padding lengths are refused", test_unpad_rejects_corrupt_lengths)
 
-    check("payloads are distinguishable from JSON", test_discrimination_from_json)
-    check("descriptions are safe and total", test_describe_payload_is_safe_and_total)
+    check_crypto("payloads are distinguishable from JSON", test_discrimination_from_json)
+    check_crypto("descriptions are safe and total", test_describe_payload_is_safe_and_total)
 
     print()
     print("=" * 72)
@@ -554,9 +630,28 @@ def main():
     print("=" * 72)
     print(f"passes:   {PASS}")
     print(f"failures: {FAIL}")
+    print(f"skipped:  {SKIPPED}")
     print()
 
-    return 1 if FAIL else 0
+    if FAIL:
+        return 1
+
+    if SKIPPED:
+        #
+        # Report the partial run as a skip, not a pass. See the note at the
+        # top of this file: the checks that did not run cover the cipher, and
+        # a green summary would claim coverage this run does not have.
+        #
+        print(f"SKIP: {CRYPTO_MISSING}")
+        print()
+        print(
+            f"{PASS} checks ran; {SKIPPED} cipher-dependent checks "
+            f"were NOT run."
+        )
+        print()
+        return SKIP_EXIT_CODE
+
+    return 0
 
 
 if __name__ == "__main__":

@@ -41,10 +41,16 @@ settlement content as well:
 
 What remains before it can be described as generally deployable:
 
-1. The two independent implementations in `tools/minimal_*.py` must gain
-   the same mode, or the cross-implementation evidence lapses for
-   encrypted runs. The existing compatibility evidence is plaintext, and
-   `tests/swap_encrypted_coordination_tests.py` covers this engine only.
+1. The cross-implementation half now exists for the codec and the event:
+   `tools/minimal_nip44.py` is a second, standalone NIP-44 v2
+   implementation that matches the official vectors on its own, and
+   `tests/nip44_tests.py` checks that it decrypts what the engine
+   encrypts, that the engine decrypts what the tool encrypts, and that the
+   engine verifies, decrypts and parses a coordination event the tool
+   signed. The remaining gap is narrower than it was: the `tools/minimal_*`
+   message producers still write *files*, and the file transport has no
+   encryption layer, so encrypted end-to-end evidence through `tools/`
+   would mean giving those producers a Nostr path rather than a codec.
 2. A `nip44`-native peer will encrypt *every* message it can address,
    including an `offer` it has already seen a pubkey for. This engine
    decrypts an encrypted offer when it can derive the conversation key, but
@@ -118,28 +124,35 @@ injects it into a PSBT, so spending a recovered HTLC uses an existing path.
 
 ## 3. Public-network observation and scanning
 
-**Status: in progress.**
+**Status: the observation path is implemented; validation against a live
+public network is not.**
 
-Recovery currently establishes funding from the wallet and from bounded
-block scans. Two changes are being made:
+Funding confirmation is derived from the funding transaction and its block
+hash, so recovering an older record no longer depends on the HTLC still being
+unspent in the current UTXO set (`gettxout` remains a fast path), and a missing
+scan anchor is a hard error rather than a silent scan from genesis, with
+`BLAKE_SWAP_ALLOW_UNANCHORED_FUNDING_SCAN=1` as the explicit legacy opt-in.
 
-- Funding confirmation is derived from the funding transaction and its
-  block hash, so recovery of an older record no longer depends on the HTLC
-  still being unspent in the current UTXO set (`gettxout` remains a fast
-  path).
-- A missing scan anchor is a hard error, matching the posture the spender
-  scan already takes, rather than silently degrading to a scan from
-  genesis. An explicit opt-in remains for legacy state that predates
-  anchors.
+Known-outpoint observation is now the path `sync-funding` takes: the HTLC
+descriptor imported before funding (see §2) means one `listunspent` for the
+HTLC's own address finds the output, and the watch-only wallet's
+`gettransaction` supplies the block hash. No block scan and no transaction
+index — the wallet holds the script, so a pruned or non-indexed node is enough.
+`observe_funding_from_watch_wallet()` is that path, and it sits between the
+recorded-outpoint fast path and the bounded scan. It was verified on the rig by
+capping the fallback scan at one block, so a run that could not observe would
+have to refuse rather than quietly scan.
 
-Still deferred, for when the BLAKE chain is run as a public network:
+The bounded verbosity-2 scan stays as the fallback for a swap funded before the
+descriptor was imported, and for an output already spent before this
+participant looked — a spent HTLC is not in `listunspent`. Both are bounded by
+the recorded anchor.
 
-- Known-outpoint and transaction-indexed observation instead of
-  verbosity-2 block scans. `docs/PERFORMANCE_AND_RECOVERY.md` describes
-  this as the intended production design.
-- A review of fee policy against live public mempools, and of the RPC
-  timeout and retry posture against a node that is merely slow rather than
-  down.
+Still open, and not verifiable without a live public network:
+
+- a review of the fee policy against real mempool conditions;
+- the RPC timeout and retry posture against a node that is merely slow rather
+  than down.
 
 ## 4. Wire compatibility and legacy messages
 
@@ -163,8 +176,8 @@ deleted.
 |---|---|
 | Dashboard status labels | `WAITING FOR ALICE` / `WAITING FOR BOB` are protocol-role labels and are correct, but they read as names rather than roles. Renaming them would change an operator-visible string, so it is deferred rather than done quietly. |
 | Unreachable defensive raises | Three `raise` statements cannot currently be reached because an earlier equivalent check fires first (the wire integer type guards, one settlement state dispatch, and the runner's allowlist mismatch). They are kept deliberately as restatements of safety invariants, and are annotated where they live. |
-| Engine internals duplication | Several blocks are duplicated between commands (the recorded-settlement block, the glob/load/report block, the atomic-write pattern, the chain dispatch tables). De-duplicating them is a readability change with regression risk, so it is sequenced last. |
-| `run_chain_cli` response parsing | A node that prints anything before its JSON is treated as "not JSON" and the raw text is returned. Parsing structurally, or failing closed, is a small follow-up. |
+| ~~Engine internals duplication~~ | **Done.** The recorded-settlement block, the glob/load/report block, the atomic-write pattern and the chain dispatch tables each have one implementation now. Six further state writers that had no crash protection at all were found and fixed at the same time, because the original inventory had counted only the writers that already used a temp file. |
+| ~~`run_chain_cli` response parsing~~ | **Done.** A reply that does not parse is re-decoded from its first `{`/`[`, so a warning prefixed to the JSON no longer hides it. Genuinely non-JSON text still passes through. |
 
 ## 6. Independent implementations
 

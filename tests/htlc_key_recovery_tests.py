@@ -220,6 +220,69 @@ def test_the_original_wallet_cannot_spend_it():
     h.ok("the HTLC is not spendable by the original wallet")
 
 
+
+def test_funding_is_observed_without_a_block_scan():
+    """
+    Known-outpoint observation: once the watch-only wallet holds the
+    descriptor, a stale local record is re-synced with no block scan.
+
+    The scan is capped at one block for this run, so if the observation
+    path did not answer the command would have to *refuse* rather than
+    quietly scan. That is what makes this a test of the new path instead
+    of a test of the fallback.
+    """
+    path = h.state_file(SWAP_ID, "alice")
+    original = path.read_text()
+    record = json.loads(original)
+
+    txid = record["blake_funding_txid"]
+
+    #
+    # Simulate a record that never learned its outpoint: exactly the
+    # situation a public-network participant is in when the first
+    # observation happens somewhere other than this wallet.
+    #
+    record["blake_funding_txid"] = None
+    record["blake_funding_vout"] = None
+    record["blake_funding_blockhash"] = None
+    record["state"] = "OFFERED"
+
+    path.write_text(
+        json.dumps(record, indent=2, sort_keys=True) + "\n"
+    )
+
+    try:
+        result = h.swap_cmd(
+            "sync-funding",
+            SWAP_ID,
+            "--role", "alice",
+            role="alice",
+            extra_env={
+                "BLAKE_SWAP_BLAKE_WATCH_WALLET": WATCH_WALLET,
+                "BLAKE_SWAP_MAX_FUNDING_SCAN_BLOCKS": "1",
+            },
+        ).stdout
+    finally:
+        path.write_text(original)
+
+    if "FUNDING OBSERVATION:" not in result:
+        raise AssertionError(
+            "sync-funding did not observe funding from the watch-only "
+            f"wallet:\n{result}"
+        )
+
+    if "FUNDING SCAN:" in result:
+        raise AssertionError(
+            f"sync-funding fell back to a block scan:\n{result}"
+        )
+
+    if txid not in result:
+        raise AssertionError(
+            f"the observation did not recover the funding txid:\n{result}"
+        )
+
+    h.ok("funding is observed from the watch-only wallet with no block scan")
+
 def test_the_plan_reports_what_is_needed():
     plan = h.swap_cmd("recovery-plan", SWAP_ID, role="alice").stdout
 
@@ -525,6 +588,7 @@ def main():
         check("the original wallet cannot spend the HTLC", test_the_original_wallet_cannot_spend_it)
         check("the watch-only wallet solves it without owning it", test_the_watch_only_wallet_makes_it_solvable)
         check("the signing wallet is unchanged", test_the_original_wallet_still_cannot_spend_it)
+        check("funding is observed without a block scan", test_funding_is_observed_without_a_block_scan)
         check("the plan reports what is needed", test_the_plan_reports_what_is_needed)
         check("the private descriptor imports into a fresh wallet", test_the_private_descriptor_imports_into_a_fresh_wallet)
         check("the recovered wallet can solve the HTLC", test_the_recovered_wallet_can_spend_it)

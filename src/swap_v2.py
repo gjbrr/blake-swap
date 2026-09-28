@@ -16710,6 +16710,147 @@ def recover_recorded_confirmed_funding(swap, chain):
         "spent_evidence": True,
     }
 
+def observe_funding_from_watch_wallet(swap, chain):
+    """
+    Find this swap's confirmed funding output from the watch-only wallet.
+
+    This is the observation path a public chain needs, and it is the
+    reason the descriptor is imported before funding. The wallet already
+    holds the HTLC's script, so one `listunspent` for that address answers
+    where the output is and how deep it is -- no block scan, no
+    transaction index, and it works equally on a pruned node. The
+    verbosity-2 scan remains the fallback for the cases this cannot see:
+    a swap funded before the descriptor was imported, or an output already
+    spent before the participant ever looked.
+
+    Returns None when the wallet has not seen a confirmed output for this
+    swap, which is the normal answer before funding and the only reason to
+    fall back to a scan. A present-but-wrong output is a security failure
+    and is not resolved by scanning for a different one.
+    """
+    fields = chain_dispatch(chain)
+
+    cli = fields["cli"]
+
+    try:
+        descriptor, expected_address = htlc_contract(swap, chain)
+    except Exception:
+        return None
+
+    status = import_watch_only_htlc(swap, chain)
+
+    if not status["imported"]:
+        #
+        # No watch-only wallet, so this path is unavailable rather than
+        # empty: say so once and let the caller fall back.
+        #
+        print(
+            "FUNDING OBSERVATION:",
+            chain.upper(),
+            "watch-only wallet unavailable:",
+            status["reason"],
+        )
+        return None
+
+    wallet = status["wallet"]
+
+    unspent = cli(
+        "listunspent",
+        1,
+        9_999_999,
+        [expected_address],
+        True,
+        wallet=wallet,
+    )
+
+    if not isinstance(unspent, list) or not unspent:
+        return None
+
+    expected_base_units = (
+        swap.blake_amount_base_units
+        if chain == "blake"
+        else int(swap.btc_sats)
+    )
+
+    for output in unspent:
+        if not isinstance(output, dict):
+            continue
+
+        if output.get("address") != expected_address:
+            continue
+
+        try:
+            if chain == "blake":
+                value = blake_base_units(output["amount"])
+            else:
+                value = btc_sats_from_coin(output["amount"])
+        except Exception:
+            continue
+
+        if value != expected_base_units:
+            continue
+
+        confirmations = int(output.get("confirmations", 0) or 0)
+
+        if confirmations < 1:
+            continue
+
+        txid = output.get("txid")
+        vout = output.get("vout")
+
+        if not isinstance(txid, str) or vout is None:
+            continue
+
+        #
+        # The block hash has to come from the transaction: `listunspent`
+        # reports depth, not the block, and every later step anchors on
+        # the hash rather than on a height that a reorg can invalidate.
+        # The watch-only wallet holds the transaction, so its own
+        # `gettransaction` answers this without an index.
+        #
+        facts = funding_transaction_facts(
+            cli,
+            wallet,
+            txid,
+            int(vout),
+            None,
+        )
+
+        if facts is None:
+            continue
+
+        _require_funding_output_matches(
+            swap,
+            chain,
+            facts["output"],
+        )
+
+        blockhash = facts["blockhash"]
+
+        if not blockhash:
+            continue
+
+        print(
+            "FUNDING OBSERVATION:",
+            chain.upper(),
+            f"watch-only wallet {wallet!r}",
+            f"txid={txid}",
+            f"vout={int(vout)}",
+            f"confirmations={confirmations}",
+        )
+
+        return {
+            "txid": txid,
+            "vout": int(vout),
+            "blockhash": blockhash,
+            "confirmations": confirmations,
+            "watch_only_observation": True,
+            "spent_evidence": True,
+        }
+
+    return None
+
+
 def command_sync_funding(args):
     """
     Reconcile funding state directly from confirmed chain history.
@@ -16748,6 +16889,10 @@ def command_sync_funding(args):
 
             recovered = (
                 recover_recorded_confirmed_funding(
+                    swap,
+                    "blake",
+                )
+                or observe_funding_from_watch_wallet(
                     swap,
                     "blake",
                 )
@@ -16849,6 +16994,10 @@ def command_sync_funding(args):
 
             recovered = (
                 recover_recorded_confirmed_funding(
+                    swap,
+                    "btc",
+                )
+                or observe_funding_from_watch_wallet(
                     swap,
                     "btc",
                 )

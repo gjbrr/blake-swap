@@ -35,6 +35,39 @@ def scan_blocks(output: str, chain: str) -> int:
     )
 
 
+def discovery_work(output: str, chain: str):
+    """
+    How the engine found the funding: ("observed", 0) or ("scan", blocks).
+
+    The watch-only wallet answers this without reading the chain's history
+    at all, which is the point: recovery work must not grow with the age of
+    the chain. The bounded scan is the fallback for when that observation is
+    unavailable, and it must stay bounded too.
+    """
+    #
+    # The observation path prints one line either way: the outpoint when it
+    # worked, or "wallet unavailable" when it could not be used. Only the
+    # first is an observation.
+    #
+    observed = [
+        line
+        for line in output.splitlines()
+        if line.startswith("FUNDING OBSERVATION:")
+        and "unavailable" not in line
+    ]
+
+    if observed:
+        if "FUNDING SCAN:" in output:
+            raise h.TestFailure(
+                "the engine both observed and scanned for funding:\n"
+                f"{output}"
+            )
+
+        return "observed", 0
+
+    return "scan", scan_blocks(output, chain)
+
+
 def main():
     started = time.time()
 
@@ -148,7 +181,7 @@ def main():
         role="bob",
     )
 
-    bob_blake_scan = scan_blocks(
+    kind, bob_blake_scan = discovery_work(
         (proc.stdout or "")
         + "\n"
         + (proc.stderr or ""),
@@ -156,10 +189,10 @@ def main():
     )
 
     h.require(
-        bob_blake_scan <= 5,
+        kind == "observed",
         (
-            "Bob's BLAKE funding recovery scanned "
-            f"{bob_blake_scan} blocks; expected <= 5"
+            "Bob's BLAKE funding recovery used a block scan "
+            f"({bob_blake_scan} blocks) with a watch-only wallet available"
         ),
     )
 
@@ -170,7 +203,8 @@ def main():
     )
 
     h.ok(
-        f"Bob discovered BLAKE funding with bounded scan ({bob_blake_scan} blocks)"
+        "Bob observed BLAKE funding from the watch-only wallet with no "
+        "block scan"
     )
 
     # ---------------------------------------------------------
@@ -185,19 +219,34 @@ def main():
         role="bob",
     )
 
+    #
+    # Force the fallback for this half: a wallet name the node rejects
+    # means the descriptor cannot be recorded, so the observation path is
+    # unavailable and the bounded scan has to answer. Otherwise both halves
+    # of this suite would take the same path and the scan would go
+    # unexercised.
+    #
     proc = h.swap_cmd(
         "sync-funding",
         swap_id,
         "--role",
         "alice",
         role="alice",
+        extra_env={
+            "BLAKE_SWAP_BTC_WATCH_WALLET": "not a valid wallet name",
+        },
     )
 
-    alice_btc_scan = scan_blocks(
+    kind, alice_btc_scan = discovery_work(
         (proc.stdout or "")
         + "\n"
         + (proc.stderr or ""),
         "BTC",
+    )
+
+    h.require(
+        kind == "scan",
+        "Alice's Bitcoin recovery did not fall back to the bounded scan",
     )
 
     h.require(
@@ -215,7 +264,8 @@ def main():
     )
 
     h.ok(
-        f"Alice discovered BTC funding with bounded scan ({alice_btc_scan} blocks)"
+        "Alice discovered BTC funding with the bounded scan fallback "
+        f"({alice_btc_scan} blocks)"
     )
 
     h.banner(

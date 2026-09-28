@@ -158,6 +158,7 @@ scripts/
 
 tests/                     51 suites: unit tests and regtest integration
 tools/minimal_*.py         independent wire-message producers
+tools/minimal_nip44.py     standalone NIP-44 v2 implementation (cross-checks src/nip44.py)
 checkpoints/v1.5/          frozen earlier snapshot with SHA256SUMS
 ```
 

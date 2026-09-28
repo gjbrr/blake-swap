@@ -99,10 +99,7 @@ historical matches.
 
 ## Public-network implications
 
-The current regtest implementation still contains development-oriented chain
-observation and recovery mechanisms.
-
-For public-network packaging, the preferred design is:
+For public-network packaging, the design is:
 
 - dedicated Bitcoin wallet/node backend;
 - small/pruned validating BLAKE node;
@@ -113,3 +110,28 @@ For public-network packaging, the preferred design is:
 
 A pruned validating BLAKE node is preferred over trusting a public RPC server
 when the goal is fully self-verifying operation.
+
+**Known-outpoint observation is implemented.** Each swap's HTLC descriptor is
+imported into a dedicated watch-only wallet before that chain is funded
+(`docs/ROADMAP.md` §2), so `sync-funding` finds the output with one
+`listunspent` for the HTLC's own address and reads its block hash from the
+watch-only wallet's `gettransaction`. No block scan, and no transaction index:
+the wallet already holds the script, and it is the wallet that knows the
+transaction. `docs/KEY_RECOVERY.md` §6 documents the wallets and the explicit
+`watch-htlc` command, `dashboard` reports a live swap whose HTLC no loaded
+wallet can solve, and `tests/htlc_key_recovery_tests.py` proves the scan-free
+observation on the rig by capping the fallback scan at one block, so a run that
+could not observe would have to refuse.
+
+The bounded verbosity-2 scan remains the fallback for two cases it is still the
+only answer to: a swap funded before the descriptor was imported, and an output
+that was already spent before this participant looked (a wallet's `listunspent`
+reports unspent outputs, and a spent HTLC is not one). Both are bounded by the
+recorded scan anchor and refuse to run unbounded; see
+`BLAKE_SWAP_MAX_FUNDING_SCAN_BLOCKS` and
+`BLAKE_SWAP_ALLOW_UNANCHORED_FUNDING_SCAN` in `tests/README.md`.
+
+What is still open for a live public deployment, and cannot be settled against
+a regtest rig: reviewing the fee policy against real mempool conditions, and
+the RPC timeout and retry posture against a node that is merely slow rather
+than down.

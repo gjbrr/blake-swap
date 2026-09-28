@@ -150,7 +150,10 @@ recovered into a throwaway wallet, do not leave funds there.
 
 Each chain's HTLC is recorded in a **dedicated watch-only wallet** before that
 chain is funded, so a funded swap stays observable even if the signing wallet
-later loses its keys. That is a second copy of the *swap*, not of the keys: the
+later loses its keys. That wallet is also how `sync-funding` finds the output
+on a public chain: one `listunspent` for the HTLC's own address and a
+`gettransaction` for its block hash, with no block scan and no transaction
+index. That is a second copy of the *swap*, not of the keys: the
 wallet holds the same descriptor with every key public, has private keys
 disabled, and can confirm and report the outpoint without being able to spend
 it. `dashboard` says so when a live swap's HTLC is not solvable by any loaded

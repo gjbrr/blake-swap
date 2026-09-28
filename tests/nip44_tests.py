@@ -598,6 +598,165 @@ def test_describe_payload_is_safe_and_total():
             raise AssertionError(f"describe_payload({bad!r}) did not return text")
 
 
+
+# ------------------------------------------------- the second implementation
+#
+# `tools/minimal_nip44.py` is a standalone NIP-44 v2 implementation that
+# imports neither this module nor the engine. The vectors prove each
+# implementation is right on its own; these checks prove they can talk to
+# each other, which is the property a coordinated swap depends on and
+# which a module's own tests cannot demonstrate.
+
+TOOL = ROOT / "tools" / "minimal_nip44.py"
+
+SENDER_SECRET = "11" * 32
+PEER_SECRET = "22" * 32
+
+
+def _public_key(secret_hex):
+    from coincurve import PrivateKey
+
+    return (
+        PrivateKey(bytes.fromhex(secret_hex))
+        .public_key.format(compressed=True)[1:]
+        .hex()
+    )
+
+
+def run_tool(*args):
+    import subprocess
+
+    result = subprocess.run(
+        [sys.executable, str(TOOL), *args],
+        text=True,
+        capture_output=True,
+    )
+
+    if result.returncode != 0:
+        raise AssertionError(
+            f"the independent tool failed ({result.returncode}):\n"
+            f"{result.stdout}{result.stderr}"
+        )
+
+    return result.stdout.strip()
+
+
+def test_the_tool_matches_the_official_vectors():
+    run_tool("selftest")
+
+
+def test_the_tool_and_the_engine_interoperate():
+    plaintext = '{"note":"cross-implementation","unicode":"🍕🫃"}'
+
+    sender_pub = _public_key(SENDER_SECRET)
+    peer_pub = _public_key(PEER_SECRET)
+
+    #
+    # The tool encrypts, the engine decrypts.
+    #
+    from_tool = run_tool(
+        "encrypt",
+        plaintext,
+        "--sender-priv", SENDER_SECRET,
+        "--peer-pub", peer_pub,
+    )
+
+    if nip44.decrypt(
+        from_tool,
+        nip44.conversation_key(PEER_SECRET, sender_pub),
+    ) != plaintext:
+        raise AssertionError(
+            "the engine could not decrypt the independent implementation's "
+            f"payload: {from_tool}"
+        )
+
+    #
+    # And the other way round.
+    #
+    from_engine = nip44.encrypt(
+        plaintext,
+        nip44.conversation_key(SENDER_SECRET, peer_pub),
+    )
+
+    recovered = run_tool(
+        "decrypt",
+        from_engine,
+        "--sender-priv", PEER_SECRET,
+        "--peer-pub", sender_pub,
+    )
+
+    if recovered != plaintext:
+        raise AssertionError(
+            f"the independent implementation decrypted {recovered!r}, "
+            f"expected {plaintext!r}"
+        )
+
+
+def test_the_engine_reads_the_tools_encrypted_event():
+    """
+    The whole coordination path, not just the codec: the tool signs a
+    kind-1 event whose content is encrypted and which carries the
+    `encryption` tag, and the engine verifies, decrypts and parses it.
+    """
+    import json as _json
+    import os as _os
+    import tempfile
+    from pathlib import Path as _Path
+
+    swap_id = "0123456789ab"
+    message = {"type": "accept", "swap_id": swap_id}
+
+    event = _json.loads(
+        run_tool(
+            "event",
+            "--sender-priv", SENDER_SECRET,
+            "--peer-pub", _public_key(PEER_SECRET),
+            "--swap-id", swap_id,
+            "--type", "accept",
+            "--message-json", _json.dumps(message),
+        )
+    )
+
+    keys = (
+        "BLAKE_SWAP_PARTICIPANT_KEY_FILE",
+        "BLAKE_SWAP_STATE_DIR",
+        "BLAKE_SWAP_NOSTR_ENCRYPTION",
+    )
+
+    saved = {name: _os.environ.get(name) for name in keys}
+
+    with tempfile.TemporaryDirectory() as td:
+        key_file = _Path(td) / "participant.key"
+        key_file.write_text(PEER_SECRET + "\n")
+        key_file.chmod(0o600)
+
+        _os.environ["BLAKE_SWAP_PARTICIPANT_KEY_FILE"] = str(key_file)
+        _os.environ["BLAKE_SWAP_STATE_DIR"] = td
+        _os.environ["BLAKE_SWAP_NOSTR_ENCRYPTION"] = "nip44_v2"
+
+        try:
+            import swap_v2
+
+            # The tool's BIP-340 signature and NIP-01 id must verify.
+            swap_v2.verify_nostr_event(event)
+
+            decoded = swap_v2.decode_coordination_content(
+                event,
+                swap_id=swap_id,
+                message_type="accept",
+            )
+        finally:
+            for name, value in saved.items():
+                if value is None:
+                    _os.environ.pop(name, None)
+                else:
+                    _os.environ[name] = value
+
+    if decoded != message:
+        raise AssertionError(
+            f"the engine decoded {decoded!r}, expected {message!r}"
+        )
+
 def main():
     print()
     print("=" * 72)
@@ -623,6 +782,10 @@ def main():
 
     check_crypto("payloads are distinguishable from JSON", test_discrimination_from_json)
     check_crypto("descriptions are safe and total", test_describe_payload_is_safe_and_total)
+
+    check_crypto("the independent tool matches the vectors", test_the_tool_matches_the_official_vectors)
+    check_crypto("the tool and the engine interoperate", test_the_tool_and_the_engine_interoperate)
+    check_crypto("the engine reads the tool's encrypted event", test_the_engine_reads_the_tools_encrypted_event)
 
     print()
     print("=" * 72)

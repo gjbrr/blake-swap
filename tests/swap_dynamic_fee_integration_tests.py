@@ -34,7 +34,7 @@ def main():
         "BLAKE_SWAP_BTC_SPEND_FEE_SATS",
         "BLAKE_SWAP_BTC_SPEND_FEE_RATE",
         "BLAKE_SWAP_FEE_TARGET_BLOCKS",
-        "BLAKE_SWAP_BTC_FUNDING_FEE_TARGET_BLOCKS",
+        "BLAKE_SWAP_BTC_FUNDING_MIN_FEE_RATE",
         "BLAKE_SWAP_FEE_RATE_MULTIPLIER",
         "BLAKE_SWAP_BTC_SETTLEMENT_VSIZE_ESTIMATE",
     ]
@@ -50,18 +50,41 @@ def main():
         for name in names:
             os.environ.pop(name, None)
 
-        # BTC funding is intentionally more urgent than settlement:
-        # one-block target by default.
-        assert swap_v2.btc_funding_fee_target_blocks() == 1
+        # Wallet-built BTC funding transactions must also satisfy the
+        # Bitcoin Core wallet transaction-creation floor. Core's default
+        # -mintxfee is 1 sat/vB.
+        assert swap_v2.btc_funding_min_fee_rate() == Decimal("1.0")
 
         os.environ[
-            "BLAKE_SWAP_BTC_FUNDING_FEE_TARGET_BLOCKS"
-        ] = "3"
+            "BLAKE_SWAP_BTC_FUNDING_MIN_FEE_RATE"
+        ] = "2.5"
 
-        assert swap_v2.btc_funding_fee_target_blocks() == 3
+        assert (
+            swap_v2.btc_funding_min_fee_rate()
+            == Decimal("2.5")
+        )
 
         os.environ.pop(
-            "BLAKE_SWAP_BTC_FUNDING_FEE_TARGET_BLOCKS",
+            "BLAKE_SWAP_BTC_FUNDING_MIN_FEE_RATE",
+            None,
+        )
+
+        # Invalid funding floors fail closed.
+        os.environ[
+            "BLAKE_SWAP_BTC_FUNDING_MIN_FEE_RATE"
+        ] = "0"
+
+        try:
+            swap_v2.btc_funding_min_fee_rate()
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(
+                "zero BTC funding minimum was accepted"
+            )
+
+        os.environ.pop(
+            "BLAKE_SWAP_BTC_FUNDING_MIN_FEE_RATE",
             None,
         )
 

@@ -3557,10 +3557,30 @@ def command_fund_blake(args):
             swap.blake_amount,
         )
 
+        funding_rate, funding_rate_source = funding_fee_rate(
+            blake_cli,
+            "blake",
+        )
+
+        print(
+            "BLAKE funding fee rate:",
+            funding_rate,
+            "sat/vB",
+            f"({funding_rate_source})",
+        )
+
         txid = blake_cli(
             "sendtoaddress",
             address,
             swap.blake_amount,
+            "",
+            "",
+            "false",
+            "true",
+            "null",
+            "unset",
+            "null",
+            str(funding_rate),
             wallet=BLAKE_WALLET,
         )
 
@@ -7046,12 +7066,16 @@ def command_fund_btc(args):
             swap.btc_sats,
         )
 
-        funding_target = btc_funding_fee_target_blocks()
+        funding_rate, funding_rate_source = funding_fee_rate(
+            btc_cli,
+            "btc",
+        )
 
         print(
-            "Bitcoin funding confirmation target:",
-            funding_target,
-            "block(s)",
+            "Bitcoin funding fee rate:",
+            funding_rate,
+            "sat/vB",
+            f"({funding_rate_source})",
         )
 
         txid = btc_cli(
@@ -7062,8 +7086,10 @@ def command_fund_btc(args):
             "",
             "false",
             "true",
-            str(funding_target),
-            "conservative",
+            "null",
+            "unset",
+            "null",
+            str(funding_rate),
             wallet=BTC_WALLET,
         )
 
@@ -11413,21 +11439,52 @@ def settlement_fee_target_blocks():
     return target
 
 
-def btc_funding_fee_target_blocks():
+def funding_fee_target_blocks(chain):
+    """
+    Wallet-funding confirmation target, separate from settlement policy.
+    """
+    if chain == "btc":
+        name = "BLAKE_SWAP_BTC_FUNDING_FEE_TARGET_BLOCKS"
+    elif chain == "blake":
+        name = "BLAKE_SWAP_BLAKE_FUNDING_FEE_TARGET_BLOCKS"
+    else:
+        raise ValueError(
+            f"unknown funding-fee chain: {chain}"
+        )
+
     target = int(
         os.environ.get(
-            "BLAKE_SWAP_BTC_FUNDING_FEE_TARGET_BLOCKS",
+            name,
             "1",
         )
     )
 
     if target < 1:
         raise ValueError(
-            "BLAKE_SWAP_BTC_FUNDING_FEE_TARGET_BLOCKS "
-            "must be >= 1"
+            f"{name} must be >= 1"
         )
 
     return target
+
+
+def btc_funding_min_fee_rate():
+    """
+    Minimum feerate accepted by the Bitcoin wallet for transaction
+    creation, in sat/vB.
+
+    Bitcoin Core's default -mintxfee is 0.00001 BTC/kvB = 1 sat/vB.
+    This is a wallet-construction floor, separate from relay and mempool
+    policy, so it applies to wallet-built BTC funding transactions only.
+    """
+    raw = os.environ.get(
+        "BLAKE_SWAP_BTC_FUNDING_MIN_FEE_RATE",
+        "1.0",
+    )
+
+    return parse_settlement_fee_rate(
+        raw,
+        "BLAKE_SWAP_BTC_FUNDING_MIN_FEE_RATE",
+    )
 
 
 def settlement_fee_multiplier():
@@ -11635,6 +11692,73 @@ def settlement_fee_rate_override(chain):
     return parse_settlement_fee_rate(raw, name)
 
 
+def node_fee_rate_floor(cli):
+    """
+    Highest currently enforced node feerate floor, in sat/vB.
+    """
+    mempool = cli("getmempoolinfo")
+
+    floor = Decimal("0")
+    floor_field = None
+
+    if isinstance(mempool, dict):
+        for field in ("minrelaytxfee", "mempoolminfee"):
+            value = mempool.get(field)
+
+            if value is None:
+                continue
+
+            try:
+                candidate = coin_per_kvb_to_sat_vb(value)
+            except (ValueError, TypeError, ArithmeticError):
+                continue
+
+            if candidate > floor:
+                floor = candidate
+                floor_field = field
+
+    return floor, floor_field
+
+
+def funding_fee_rate(cli, chain):
+    """
+    Explicit feerate for a wallet-built funding transaction.
+
+    Funding deliberately does not use the settlement-only
+    BLAKE_SWAP_{BTC,BLAKE}_SPEND_FEE_* overrides or --fee-rate.
+    It derives a rate from the node estimator and current policy floors,
+    then applies any wallet-construction floor required by that chain.
+    """
+    estimate = cli(
+        "estimatesmartfee",
+        funding_fee_target_blocks(chain),
+    )
+
+    mempool = cli("getmempoolinfo")
+
+    rate = choose_fee_rate_sat_vb(
+        estimate,
+        mempool,
+        multiplier=settlement_fee_multiplier(),
+    )
+
+    source = "dynamic"
+
+    if chain == "btc":
+        wallet_floor = btc_funding_min_fee_rate()
+
+        if rate < wallet_floor:
+            rate = wallet_floor
+            source = "wallet-minimum"
+
+    elif chain != "blake":
+        raise ValueError(
+            f"unknown funding-fee chain: {chain}"
+        )
+
+    return rate, source
+
+
 def settlement_fee_rate(cli, chain, fee_rate=None):
     """
     The feerate to build a settlement transaction at, and where it came
@@ -11687,26 +11811,7 @@ def settlement_fee_rate(cli, chain, fee_rate=None):
             "dynamic",
         )
 
-    mempool = cli("getmempoolinfo")
-
-    floor = Decimal("0")
-    floor_field = None
-
-    if isinstance(mempool, dict):
-        for field in ("minrelaytxfee", "mempoolminfee"):
-            value = mempool.get(field)
-
-            if value is None:
-                continue
-
-            try:
-                candidate = coin_per_kvb_to_sat_vb(value)
-            except (ValueError, TypeError, ArithmeticError):
-                continue
-
-            if candidate > floor:
-                floor = candidate
-                floor_field = field
+    floor, floor_field = node_fee_rate_floor(cli)
 
     if floor > 0 and override < floor:
         if fee_rate is not None:

@@ -82,6 +82,7 @@ Set BLAKE_SWAP_TEST_BLAKE_CLI, or see ~/s/bitcoin-knots/README.md"
 
 write_conf() {
     local datadir="$1" rpcport="$2" port="$3" label="$4"
+    local extra_config="${5:-}"
 
     mkdir -p "$datadir"
 
@@ -107,6 +108,8 @@ rpcallowip=127.0.0.1
 rpcport=$rpcport
 bind=127.0.0.1
 port=$port
+
+$extra_config
 EOF
 }
 
@@ -235,7 +238,7 @@ cmd_start() {
     echo
 
     write_conf "$BTC_DATADIR" "$BTC_RPCPORT" "$BTC_PORT" "btc (Bitcoin Core)"
-    write_conf "$BLAKE_DATADIR" "$BLAKE_RPCPORT" "$BLAKE_PORT" "blake (Bitcoin Knots)"
+    write_conf "$BLAKE_DATADIR" "$BLAKE_RPCPORT" "$BLAKE_PORT" "blake (Bitcoin Knots)" "blake2b_headline="
 
     echo "starting nodes..."
 

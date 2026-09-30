@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 
 import re
+import sys
+import tempfile
 import time
+from pathlib import Path
 
 import swap_protocol_tests as h
 
@@ -220,22 +223,69 @@ def main():
     )
 
     #
-    # Force the fallback for this half: a wallet name the node rejects
-    # means the descriptor cannot be recorded, so the observation path is
-    # unavailable and the bounded scan has to answer. Otherwise both halves
-    # of this suite would take the same path and the scan would go
-    # unexercised.
+    # Force the fallback for this half without depending on Bitcoin Core's
+    # wallet-name validation rules.  A temporary bitcoin-cli wrapper rejects
+    # only operations involving this test's watch wallet and forwards every
+    # other RPC unchanged to the real node.
     #
-    proc = h.swap_cmd(
-        "sync-funding",
-        swap_id,
-        "--role",
-        "alice",
-        role="alice",
-        extra_env={
-            "BLAKE_SWAP_BTC_WATCH_WALLET": "not a valid wallet name",
-        },
+    with tempfile.TemporaryDirectory(
+        prefix="blake-bounded-scan-",
+    ) as temporary:
+        wrapper = Path(temporary) / "bitcoin-cli"
+
+        wrapper.write_text(
+            f"""#!{sys.executable}
+import os
+import sys
+
+REAL_CLI = {str(h.BTC_CLI)!r}
+SPECIAL = "bounded-scan-watch"
+WATCH_COMMANDS = {{
+    "loadwallet",
+    "createwallet",
+    "importdescriptors",
+    "listunspent",
+    "gettransaction",
+}}
+
+args = sys.argv[1:]
+
+uses_special_wallet = (
+    SPECIAL in args
+    or ("-rpcwallet=" + SPECIAL) in args
+)
+
+if uses_special_wallet and any(
+    arg in WATCH_COMMANDS
+    for arg in args
+):
+    print(
+        "forced watch-wallet failure for bounded-scan test",
+        file=sys.stderr,
     )
+    raise SystemExit(1)
+
+os.execv(
+    REAL_CLI,
+    [REAL_CLI, *args],
+)
+""",
+            encoding="utf-8",
+        )
+
+        wrapper.chmod(0o755)
+
+        proc = h.swap_cmd(
+            "sync-funding",
+            swap_id,
+            "--role",
+            "alice",
+            role="alice",
+            extra_env={
+                "BLAKE_SWAP_BTC_WATCH_WALLET": "bounded-scan-watch",
+                "BLAKE_SWAP_BTC_CLI": str(wrapper),
+            },
+        )
 
     kind, alice_btc_scan = discovery_work(
         (proc.stdout or "")

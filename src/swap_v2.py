@@ -19384,31 +19384,69 @@ def command_recovery_plan(args):
             "(the refund branch is spendable at or after this height)",
         )
 
+        descriptor_known = None
+        private_keys_enabled = None
+
         try:
             info = cli("getaddressinfo", address, wallet=wallet)
-            can_spend = bool(
+            descriptor_known = bool(
                 isinstance(info, dict)
                 and info.get("solvable")
             )
             print(
-                "wallet can spend:",
-                "yes" if can_spend else "no",
+                "descriptor known:",
+                "yes" if descriptor_known else "no",
                 f"(wallet {wallet!r}, solvable={info.get('solvable') if isinstance(info, dict) else 'unknown'})",
             )
         except Exception as e:  # noqa: BLE001
             print(
-                "wallet can spend: unknown",
+                "descriptor known: unknown",
                 f"({type(e).__name__}: {e})",
             )
-            can_spend = False
 
-        if can_spend:
+        try:
+            wallet_info = cli("getwalletinfo", wallet=wallet)
+            if isinstance(wallet_info, dict):
+                private_keys_enabled = bool(
+                    wallet_info.get("private_keys_enabled")
+                )
+
+            if private_keys_enabled is None:
+                print("private keys enabled: unknown")
+            else:
+                print(
+                    "private keys enabled:",
+                    "yes" if private_keys_enabled else "no",
+                )
+        except Exception as e:  # noqa: BLE001
+            print(
+                "private keys enabled: unknown",
+                f"({type(e).__name__}: {e})",
+            )
+
+        #
+        # `solvable` means the wallet knows enough of the descriptor/script
+        # to construct the spend.  A watch-only wallet can therefore report
+        # solvable=true while private_keys_enabled=false.  Do not describe
+        # that condition as "can spend".
+        #
+        if descriptor_known and private_keys_enabled:
+            print(
+                "signing prerequisites: present "
+                "(descriptor known and private keys enabled)"
+            )
             print()
             print(
-                "This wallet can already spend the HTLC; use:"
+                "The signing wallet has the HTLC descriptor and private-key "
+                "capability. Actual branch-key availability is proven only "
+                "when the spend signs successfully."
             )
             print(f"  scripts/blake {branch}-{chain} {swap.swap_id}")
             continue
+
+        print(
+            "signing prerequisites: not established"
+        )
 
         print()
         print("RECOVER IT")

@@ -529,6 +529,10 @@ class Swap:
     btc_refund_blockhash: str | None = None
     blake_refund_blockhash: str | None = None
 
+    # Exact prior BLAKE refund remembered across a reorg rollback.
+    # This is a recovery hint, not authoritative settlement state.
+    blake_reorg_refund_txid: str | None = None
+
     @property
     def blake_amount(self):
         """
@@ -8406,6 +8410,73 @@ def command_refund_blake(args):
             "Swap has no BLAKE funding vout"
         )
 
+    #
+    # A final refund may have been rolled out of the active chain,
+    # disappeared from mempool, and later been rebroadcast by the
+    # signing wallet. Recognize that exact prior transaction before
+    # treating the HTLC as unavailable.
+    #
+    if swap.blake_reorg_refund_txid:
+        prior_txid = swap.blake_reorg_refund_txid
+
+        entry = transaction_in_mempool(
+            blake_cli,
+            prior_txid,
+        )
+
+        if entry is not None:
+            prior_tx = blake_cli(
+                "getrawtransaction",
+                prior_txid,
+                True,
+            )
+
+            branch = classify_htlc_spend(
+                prior_tx,
+                swap.blake_funding_txid,
+                swap.blake_funding_vout,
+                swap.secret_hash,
+            )
+
+            if branch != "refund":
+                raise RuntimeError(
+                    "SECURITY FAILURE: reorged BLAKE refund txid "
+                    "reappeared in mempool using the wrong branch"
+                )
+
+            swap.blake_refund_txid = prior_txid
+            swap.blake_refund_blockhash = None
+            swap.blake_reorg_refund_txid = None
+
+            save_swap(
+                swap,
+                role="alice",
+            )
+
+            print()
+            print("BLAKE REFUND PENDING AFTER REORG")
+            print("================================")
+            print("txid:  ", prior_txid)
+            print("block:  pending")
+            print("state: ", swap.state)
+            print()
+            print(
+                "PASS: exact reorged BLAKE refund "
+                "was recognized after wallet rebroadcast"
+            )
+            return
+
+        #
+        # The old refund is no longer live. Drop the recovery hint and
+        # permit normal replacement-refund construction.
+        #
+        swap.blake_reorg_refund_txid = None
+
+        save_swap(
+            swap,
+            role="alice",
+        )
+
     recovered = require_recovered_branch(
         swap,
         "blake",
@@ -10007,6 +10078,11 @@ def recover_final_blake_refund_reorg(swap):
     verify_confirmed_btc_refund_for_blake(
         swap
     )
+
+    # Preserve the exact old refund identity as a recovery hint before
+    # clearing canonical settlement state. A wallet may rebroadcast this
+    # same transaction after restart.
+    swap.blake_reorg_refund_txid = swap.blake_refund_txid
 
     swap.blake_refund_txid = None
     swap.blake_refund_blockhash = None

@@ -868,6 +868,175 @@ def test_final_blake_refund_pending_reorg():
         )
 
 
+
+def test_final_blake_refund_reappears_after_rollback():
+    banner(
+        "REORG: FINAL BLAKE REFUND "
+        "REAPPEARS AFTER DURABLE ROLLBACK"
+    )
+
+    swap_id = h.make_fresh_swap()
+    print("swap:", swap_id)
+
+    h.handshake(swap_id)
+    h.fund_blake_and_sync(swap_id)
+    h.fund_btc_and_sync(swap_id)
+
+    bob = h.load_state(
+        swap_id,
+        "bob",
+    )
+
+    blocks = (
+        int(bob["btc_timeout"])
+        - int(h.btc_cli("getblockcount"))
+    )
+
+    if blocks > 0:
+        h.mine_btc(blocks)
+
+    h.swap_cmd(
+        "refund-btc",
+        swap_id,
+        role="bob",
+    )
+
+    h.swap_cmd(
+        "publish-btc-refunded",
+        swap_id,
+        role="bob",
+    )
+
+    h.swap_cmd(
+        "receive-btc-refunded",
+        swap_id,
+        role="alice",
+    )
+
+    alice = h.load_state(
+        swap_id,
+        "alice",
+    )
+
+    blocks = (
+        int(alice["blake_timeout"])
+        - int(h.blake_cli("getblockcount"))
+    )
+
+    if blocks > 0:
+        h.mine_blake(blocks)
+
+    h.swap_cmd(
+        "refund-blake",
+        swap_id,
+        role="alice",
+    )
+
+    alice = h.load_state(
+        swap_id,
+        "alice",
+    )
+
+    txid = alice["blake_refund_txid"]
+    blockhash = alice["blake_refund_blockhash"]
+
+    h.blake_cli(
+        "invalidateblock",
+        blockhash,
+    )
+
+    try:
+        #
+        # invalidateblock returns the exact old refund to mempool.
+        #
+        entry = h.blake_cli(
+            "getmempoolentry",
+            txid,
+        )
+
+        h.require(
+            bool(entry),
+            "reorged BLAKE refund did not return to mempool",
+        )
+
+        #
+        # Model the authoritative durable rollback:
+        # Bitcoin refund remains confirmed, while the final
+        # BLAKE refund is no longer confirmed.
+        #
+        state = h.load_state(
+            swap_id,
+            "alice",
+        )
+
+        state["blake_reorg_refund_txid"] = txid
+        state["blake_refund_txid"] = None
+        state["blake_refund_blockhash"] = None
+        state["state"] = "BTC_REFUNDED"
+
+        state_path = (
+            h.ALICE_DIR
+            / f"{swap_id}.json"
+        )
+
+        state_path.write_text(
+            json.dumps(
+                state,
+                indent=2,
+            )
+            + "\n"
+        )
+
+        proc = h.swap_cmd(
+            "refund-blake",
+            swap_id,
+            role="alice",
+            expect_ok=False,
+        )
+
+        text = output_of(proc)
+
+        h.require(
+            "BLAKE REFUND PENDING AFTER REORG"
+            in text,
+            (
+                "reappeared refund was not recognized:\n"
+                + text[-1600:]
+            ),
+        )
+
+        after = h.load_state(
+            swap_id,
+            "alice",
+        )
+
+        h.require(
+            after["state"] == "BTC_REFUNDED",
+            "pending reorged refund advanced durable state",
+        )
+
+        h.require(
+            after["blake_refund_txid"] == txid,
+            "pending reorged refund txid was not restored",
+        )
+
+        h.require(
+            after["blake_refund_blockhash"] is None,
+            "pending reorged refund incorrectly has a blockhash",
+        )
+
+        ok(
+            "wallet-rebroadcast final BLAKE refund "
+            "is recognized without competing spend"
+        )
+
+    finally:
+        h.blake_cli(
+            "reconsiderblock",
+            blockhash,
+        )
+
+
 def main():
     global FAIL
 
@@ -904,6 +1073,10 @@ def main():
         (
             "FINAL BLAKE REFUND REORG",
             test_final_blake_refund_pending_reorg,
+        ),
+        (
+            "FINAL BLAKE REFUND REAPPEARS",
+            test_final_blake_refund_reappears_after_rollback,
         ),
     ]
 

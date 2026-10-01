@@ -518,6 +518,14 @@ class Swap:
     blake_claim_txid: str | None = None
     blake_claim_blockhash: str | None = None
 
+    # Exact signed BLAKE claim transaction prepared by Bob.
+    #
+    # This is durable recovery material.  If the node loses its
+    # mempool and Bob's wallet is unavailable, the engine can
+    # independently verify and rebroadcast this exact transaction
+    # rather than constructing a competing spend.
+    blake_claim_hex: str | None = None
+
     # Exact prior BLAKE claim remembered across a reorg rollback.
     # This is not authoritative settlement state. It exists so a
     # wallet-rebroadcast of the previously confirmed claim can be
@@ -2619,6 +2627,122 @@ def require_recovered_branch(
                 )
 
             return "pending"
+
+        #
+        # A node restart can legitimately lose its mempool.  If durable
+        # state also contains the exact signed transaction, verify that
+        # transaction independently before rebroadcasting it.
+        #
+        # For now only BLAKE claim stores this recovery material.  The
+        # getattr keeps older swap records and the other settlement
+        # branches backward-compatible.
+        #
+        recorded_hex = getattr(
+            swap,
+            f"{chain}_{expected_branch}_hex",
+            None,
+        )
+
+        if recorded_hex:
+            decoded = cli(
+                "decoderawtransaction",
+                recorded_hex,
+            )
+
+            decoded_txid = decoded.get("txid")
+
+            if decoded_txid != recorded_txid:
+                raise RuntimeError(
+                    "SECURITY FAILURE: durable signed settlement "
+                    "transaction does not match recorded txid"
+                )
+
+            actual = classify_htlc_spend(
+                decoded,
+                funding_txid,
+                funding_vout,
+                swap.secret_hash,
+            )
+
+            if actual != expected_branch:
+                raise RuntimeError(
+                    "SECURITY FAILURE: durable signed settlement "
+                    f"uses {actual} branch; expected {expected_branch}"
+                )
+
+            #
+            # include_mempool=True is intentional.  If some other
+            # unconfirmed transaction is already spending the HTLC,
+            # gettxout returns None and we MUST NOT rebroadcast.
+            #
+            utxo = cli(
+                "gettxout",
+                funding_txid,
+                funding_vout,
+            )
+
+            if utxo is not None:
+                try:
+                    rebroadcast_txid = cli(
+                        "sendrawtransaction",
+                        recorded_hex,
+                    )
+                except RuntimeError as broadcast_error:
+                    #
+                    # The exact transaction may already be confirmed.
+                    # Do not infer that from node error text or numeric
+                    # codes.  Ask the existing active-chain recovery
+                    # logic to prove it independently.
+                    #
+                    found = find_confirmed_htlc_spend(
+                        swap,
+                        chain,
+                    )
+
+                    if found is None:
+                        raise broadcast_error
+
+                    actual = found["branch"]
+
+                    if actual != expected_branch:
+                        raise RuntimeError(
+                            "SECURITY FAILURE: HTLC was already "
+                            f"spent by the {actual} branch; "
+                            f"expected {expected_branch}"
+                        )
+
+                    if found["txid"] != recorded_txid:
+                        raise RuntimeError(
+                            "SECURITY FAILURE: confirmed settlement "
+                            "txid differs from durable signed "
+                            "transaction"
+                        )
+
+                    return found
+
+                if rebroadcast_txid != recorded_txid:
+                    raise RuntimeError(
+                        "SECURITY FAILURE: exact settlement "
+                        "rebroadcast returned a different txid"
+                    )
+
+                print()
+                print(
+                    f"{fields['name']} "
+                    f"{expected_branch.upper()} "
+                    "REBROADCAST FROM DURABLE STATE"
+                )
+                print("=" * 46)
+                print("txid:  ", recorded_txid)
+                print("block:  pending")
+                print("state: ", swap.state)
+                print()
+                print(
+                    "PASS: exact stored signed transaction "
+                    "was rebroadcast"
+                )
+
+                return "pending"
 
     found = find_confirmed_htlc_spend(
         swap,
@@ -8201,21 +8325,56 @@ def command_claim_blake(args):
     print("source:", fee_plan["source"])
     print()
 
-    txid = blake_cli(
-        "sendrawtransaction",
+    #
+    # Derive and persist the exact transaction identity BEFORE
+    # broadcast.  This closes the crash window between signing and
+    # durable recording: after this save, every retry is bound to this
+    # exact transaction even if sendrawtransaction or the node dies.
+    #
+    decoded_claim = blake_cli(
+        "decoderawtransaction",
         claim_hex,
     )
 
-    # Persist exact broadcast identity before any crash point.
-    # Durable protocol state remains BTC_CLAIMED until the
-    # exact claim is confirmed on the active BLAKE chain.
+    txid = decoded_claim.get("txid")
+
+    if not txid:
+        raise RuntimeError(
+            "Signed BLAKE claim has no decodable txid"
+        )
+
+    actual = classify_htlc_spend(
+        decoded_claim,
+        swap.blake_funding_txid,
+        swap.blake_funding_vout,
+        swap.secret_hash,
+    )
+
+    if actual != "claim":
+        raise RuntimeError(
+            "SECURITY FAILURE: signed BLAKE claim "
+            f"classified as {actual}"
+        )
+
     swap.blake_claim_txid = txid
     swap.blake_claim_blockhash = None
+    swap.blake_claim_hex = claim_hex
 
     save_swap(
         swap,
         role="bob",
     )
+
+    broadcast_txid = blake_cli(
+        "sendrawtransaction",
+        claim_hex,
+    )
+
+    if broadcast_txid != txid:
+        raise RuntimeError(
+            "SECURITY FAILURE: BLAKE claim broadcast "
+            "returned a different txid"
+        )
 
     _test_crash_after_broadcast("blake-claim-after-broadcast")
 

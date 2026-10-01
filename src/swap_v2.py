@@ -518,6 +518,12 @@ class Swap:
     blake_claim_txid: str | None = None
     blake_claim_blockhash: str | None = None
 
+    # Exact prior BLAKE claim remembered across a reorg rollback.
+    # This is not authoritative settlement state. It exists so a
+    # wallet-rebroadcast of the previously confirmed claim can be
+    # recognized rather than mistaken for an unknown mempool spender.
+    blake_reorg_claim_txid: str | None = None
+
     btc_refund_txid: str | None = None
     blake_refund_txid: str | None = None
     btc_refund_blockhash: str | None = None
@@ -7971,6 +7977,73 @@ def command_claim_blake(args):
         swap
     )
 
+    #
+    # A final claim may have been rolled out of the active chain, removed
+    # from the mempool, and then later resurrected by the signing wallet.
+    # The reorg rollback deliberately remembers that exact txid without
+    # treating it as authoritative settlement.
+    #
+    if swap.blake_reorg_claim_txid:
+        prior_txid = swap.blake_reorg_claim_txid
+
+        entry = transaction_in_mempool(
+            blake_cli,
+            prior_txid,
+        )
+
+        if entry is not None:
+            prior_tx = blake_cli(
+                "getrawtransaction",
+                prior_txid,
+                True,
+            )
+
+            branch = classify_htlc_spend(
+                prior_tx,
+                swap.blake_funding_txid,
+                swap.blake_funding_vout,
+                swap.secret_hash,
+            )
+
+            if branch != "claim":
+                raise RuntimeError(
+                    "SECURITY FAILURE: reorged BLAKE claim txid "
+                    "reappeared in mempool using the wrong branch"
+                )
+
+            swap.blake_claim_txid = prior_txid
+            swap.blake_claim_blockhash = None
+            swap.blake_reorg_claim_txid = None
+
+            save_swap(
+                swap,
+                role="bob",
+            )
+
+            print()
+            print("BLAKE CLAIM PENDING AFTER REORG")
+            print("===============================")
+            print("txid:  ", prior_txid)
+            print("block:  pending")
+            print("state: ", swap.state)
+            print()
+            print(
+                "PASS: exact reorged BLAKE claim "
+                "was recognized after wallet rebroadcast"
+            )
+            return
+
+        #
+        # The prior transaction is no longer live. Forget the recovery
+        # hint and permit construction of a replacement claim.
+        #
+        swap.blake_reorg_claim_txid = None
+
+        save_swap(
+            swap,
+            role="bob",
+        )
+
     recovered = require_recovered_branch(
         swap,
         "blake",
@@ -9815,6 +9888,11 @@ def recover_final_blake_claim_reorg(swap):
     # Do not use transition(); reorg recovery is deliberately
     # separate from the normal forward-only protocol graph.
     #
+    # Preserve the exact old claim identity as a recovery hint before
+    # clearing canonical settlement state. A wallet may rebroadcast this
+    # same transaction after restart.
+    swap.blake_reorg_claim_txid = swap.blake_claim_txid
+
     swap.blake_claim_txid = None
     swap.blake_claim_blockhash = None
 

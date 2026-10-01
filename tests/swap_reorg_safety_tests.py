@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import json
 import sys
 import time
 
@@ -597,6 +598,128 @@ def test_final_blake_claim_pending_reorg():
         )
 
 
+
+def test_final_blake_claim_reappears_after_rollback():
+    banner(
+        "REORG: FINAL BLAKE CLAIM "
+        "REAPPEARS AFTER DURABLE ROLLBACK"
+    )
+
+    swap_id = settle_happy_through_blake_claim()
+    print("swap:", swap_id)
+
+    bob = h.load_state(
+        swap_id,
+        "bob",
+    )
+
+    txid = bob["blake_claim_txid"]
+    blockhash = bob["blake_claim_blockhash"]
+
+    h.blake_cli(
+        "invalidateblock",
+        blockhash,
+    )
+
+    try:
+        #
+        # The disconnected transaction normally returns to mempool.
+        # Remove it temporarily by restarting semantics in the harness
+        # are awkward, so model the exact durable state produced by the
+        # recovery path after the claim has vanished.
+        #
+        state = h.load_state(
+            swap_id,
+            "bob",
+        )
+
+        state["blake_reorg_claim_txid"] = txid
+        state["blake_claim_txid"] = None
+        state["blake_claim_blockhash"] = None
+        state["state"] = "BTC_CLAIMED"
+
+        state_path = (
+            h.BOB_DIR
+            / f"{swap_id}.json"
+        )
+
+        state_path.write_text(
+            json.dumps(
+                state,
+                indent=2,
+            )
+            + "\n"
+        )
+
+        #
+        # The old exact claim is already present in mempool after the
+        # invalidateblock above. claim-blake must recognize it rather
+        # than attempting a competing spend.
+        #
+        proc = h.swap_cmd(
+            "claim-blake",
+            swap_id,
+            role="bob",
+        )
+
+        text = output_of(proc)
+
+        h.require(
+            "BLAKE CLAIM PENDING AFTER REORG"
+            in text,
+            (
+                "reappeared claim was not recognized:\n"
+                + text[-1600:]
+            ),
+        )
+
+        h.require(
+            "exact reorged BLAKE claim"
+            in text,
+            (
+                "reappeared claim did not report "
+                "exact-transaction recovery:\n"
+                + text[-1600:]
+            ),
+        )
+
+        after = h.load_state(
+            swap_id,
+            "bob",
+        )
+
+        h.require(
+            after["state"] == "BTC_CLAIMED",
+            "pending reorged claim advanced durable state",
+        )
+
+        h.require(
+            after["blake_claim_txid"] == txid,
+            "pending reorged claim txid was not restored",
+        )
+
+        h.require(
+            after["blake_claim_blockhash"] is None,
+            "pending reorged claim incorrectly has a blockhash",
+        )
+
+        h.require(
+            after.get("blake_reorg_claim_txid") is None,
+            "temporary reorg claim hint was not consumed",
+        )
+
+        ok(
+            "wallet-rebroadcast final BLAKE claim "
+            "is recognized without competing spend"
+        )
+
+    finally:
+        h.blake_cli(
+            "reconsiderblock",
+            blockhash,
+        )
+
+
 def test_final_blake_refund_pending_reorg():
     banner(
         "REORG: FINAL BLAKE REFUND "
@@ -773,6 +896,10 @@ def main():
         (
             "FINAL BLAKE CLAIM REORG",
             test_final_blake_claim_pending_reorg,
+        ),
+        (
+            "FINAL BLAKE CLAIM REAPPEARS",
+            test_final_blake_claim_reappears_after_rollback,
         ),
         (
             "FINAL BLAKE REFUND REORG",

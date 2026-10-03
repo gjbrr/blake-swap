@@ -636,6 +636,35 @@ class Swap:
                     "Stored secret does not match secret_hash"
                 )
 
+        # Bob may permanently retain a secret learned from a
+        # Bitcoin claim even if that claim is later reorged out.
+        # Knowledge is not settlement authority, but durable knowledge
+        # must still be structurally valid and bound to this swap's
+        # original hashlock.
+        if self.revealed_secret_hex is not None:
+            try:
+                revealed_secret = bytes.fromhex(
+                    self.revealed_secret_hex
+                )
+            except (TypeError, ValueError):
+                raise ValueError(
+                    "revealed_secret_hex must be valid hex"
+                )
+
+            if len(revealed_secret) != 32:
+                raise ValueError(
+                    "revealed_secret_hex must be 32 bytes"
+                )
+
+            revealed_hash = hashlib.sha256(
+                revealed_secret
+            ).hexdigest()
+
+            if revealed_hash != self.secret_hash:
+                raise ValueError(
+                    "revealed_secret_hex does not match secret_hash"
+                )
+
         if self.blake_amount_base_units is None:
             raise ValueError(
                 "BLAKE amount is missing; a stored record must carry "

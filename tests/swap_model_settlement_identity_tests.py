@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 
+import hashlib
+
 from swap_v2 import Swap, State
 
 
@@ -151,6 +153,45 @@ def test_signed_hex_must_be_valid_hex():
     )
 
 
+def test_revealed_secret_must_match_hash():
+    good_secret = "11" * 32
+
+    swap = make_swap(
+        secret_hash=hashlib.sha256(
+            bytes.fromhex(good_secret)
+        ).hexdigest(),
+        revealed_secret_hex=good_secret,
+    )
+
+    swap.validate()
+
+    swap.revealed_secret_hex = "22" * 32
+
+    require_rejected(
+        swap,
+        "revealed_secret_hex does not match secret_hash",
+    )
+
+    print(
+        "PASS: mismatched revealed secret is rejected"
+    )
+
+
+def test_revealed_secret_must_be_32_bytes():
+    swap = make_swap(
+        revealed_secret_hex="11",
+    )
+
+    require_rejected(
+        swap,
+        "revealed_secret_hex must be 32 bytes",
+    )
+
+    print(
+        "PASS: malformed revealed secret length is rejected"
+    )
+
+
 def main():
     test_old_record_without_signed_hex_is_valid()
     test_signed_btc_claim_requires_identity_anchor()
@@ -161,6 +202,8 @@ def main():
     test_signed_hex_must_be_valid_hex()
     test_settlement_txid_must_be_32_byte_hex()
     test_funding_txid_must_be_32_byte_hex()
+    test_revealed_secret_must_match_hash()
+    test_revealed_secret_must_be_32_bytes()
 
     print()
     print(

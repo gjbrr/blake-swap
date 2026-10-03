@@ -1358,6 +1358,60 @@ def test_refund() -> None:
     assert_state(swap_id, "alice", "BTC_REFUNDED")
     ok("duplicate BTC refund receive")
 
+    # A later authenticated message for the same settlement type must
+    # not be allowed to replace the already-recorded refund identity.
+    refund_msg = message_file(
+        swap_id,
+        "btc-refunded",
+    )
+
+    original = mutate_message(
+        refund_msg,
+        lambda d: d.__setitem__(
+            "btc_refund_txid",
+            "ab" * 32,
+        ),
+    )
+
+    try:
+        proc = swap_cmd(
+            "receive-btc-refunded",
+            swap_id,
+            role="alice",
+            expect_ok=False,
+        )
+
+        expect_failure(
+            "conflicting BTC refund replay",
+            proc,
+            "conflicting BTC refund",
+        )
+
+        assert_state(
+            swap_id,
+            "alice",
+            "BTC_REFUNDED",
+        )
+
+        after_conflict = load_state(
+            swap_id,
+            "alice",
+        )
+
+        require(
+            after_conflict.get("btc_refund_txid")
+            != "ab" * 32,
+            "conflicting BTC refund replay replaced durable txid",
+        )
+
+    finally:
+        restore_message(
+            refund_msg,
+            original,
+        )
+
+    ok("conflicting BTC refund replay rejected")
+
     alice = load_state(swap_id, "alice")
     current_blake = int(blake_cli("getblockcount"))
     to_blake_timeout = int(alice["blake_timeout"]) - current_blake

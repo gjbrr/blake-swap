@@ -2594,6 +2594,7 @@ def require_recovered_branch(
     swap,
     chain,
     expected_branch,
+    recorded_txid_override=None,
 ):
     fields = chain_dispatch(chain)
 
@@ -2605,10 +2606,13 @@ def require_recovered_branch(
             f"{expected_branch}"
         )
 
-    recorded_txid = getattr(
-        swap,
-        f"{chain}_{expected_branch}_txid",
-    )
+    if recorded_txid_override is not None:
+        recorded_txid = recorded_txid_override
+    else:
+        recorded_txid = getattr(
+            swap,
+            f"{chain}_{expected_branch}_txid",
+        )
 
     funding_txid = getattr(swap, fields["tx_field"])
     funding_vout = getattr(swap, fields["vout_field"])
@@ -8187,8 +8191,56 @@ def command_claim_blake(args):
             return
 
         #
-        # The prior transaction is no longer live. Forget the recovery
-        # hint and permit construction of a replacement claim.
+        # The prior transaction is no longer visible in mempool.
+        # If durable signed claim material still exists, bind recovery
+        # to the exact reorged txid and rebroadcast that transaction
+        # rather than constructing a replacement.
+        #
+        recovered_reorg = require_recovered_branch(
+            swap,
+            "blake",
+            "claim",
+            recorded_txid_override=prior_txid,
+        )
+
+        if recovered_reorg == "pending":
+            swap.blake_claim_txid = prior_txid
+            swap.blake_claim_blockhash = None
+            swap.blake_reorg_claim_txid = None
+
+            save_swap(
+                swap,
+                role="bob",
+            )
+
+            print()
+            print("BLAKE CLAIM PENDING AFTER REORG")
+            print("===============================")
+            print("txid:  ", prior_txid)
+            print("block:  pending")
+            print("state: ", swap.state)
+            print()
+            print(
+                "PASS: exact reorged BLAKE claim "
+                "was rebroadcast from durable state"
+            )
+            return
+
+        if recovered_reorg is not None:
+            swap.blake_claim_txid = recovered_reorg["txid"]
+            swap.blake_claim_blockhash = recovered_reorg["blockhash"]
+            swap.blake_reorg_claim_txid = None
+
+            save_swap(
+                swap,
+                role="bob",
+            )
+
+            return
+
+        #
+        # No durable exact transaction can be recovered. Only now drop
+        # the hint and permit normal replacement-claim construction.
         #
         swap.blake_reorg_claim_txid = None
 
@@ -8651,8 +8703,56 @@ def command_refund_blake(args):
             return
 
         #
-        # The old refund is no longer live. Drop the recovery hint and
-        # permit normal replacement-refund construction.
+        # The prior refund is no longer visible in mempool.
+        # If durable signed refund material still exists, bind recovery
+        # to the exact reorged txid and rebroadcast that transaction
+        # rather than constructing a replacement.
+        #
+        recovered_reorg = require_recovered_branch(
+            swap,
+            "blake",
+            "refund",
+            recorded_txid_override=prior_txid,
+        )
+
+        if recovered_reorg == "pending":
+            swap.blake_refund_txid = prior_txid
+            swap.blake_refund_blockhash = None
+            swap.blake_reorg_refund_txid = None
+
+            save_swap(
+                swap,
+                role="alice",
+            )
+
+            print()
+            print("BLAKE REFUND PENDING AFTER REORG")
+            print("================================")
+            print("txid:  ", prior_txid)
+            print("block:  pending")
+            print("state: ", swap.state)
+            print()
+            print(
+                "PASS: exact reorged BLAKE refund "
+                "was rebroadcast from durable state"
+            )
+            return
+
+        if recovered_reorg is not None:
+            swap.blake_refund_txid = recovered_reorg["txid"]
+            swap.blake_refund_blockhash = recovered_reorg["blockhash"]
+            swap.blake_reorg_refund_txid = None
+
+            save_swap(
+                swap,
+                role="alice",
+            )
+
+            return
+
+        #
+        # No durable exact transaction can be recovered. Only now drop
+        # the hint and permit normal replacement-refund construction.
         #
         swap.blake_reorg_refund_txid = None
 

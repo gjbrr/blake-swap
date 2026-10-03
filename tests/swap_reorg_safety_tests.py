@@ -3,6 +3,7 @@
 import json
 import sys
 import time
+from pathlib import Path
 
 import swap_protocol_tests as h
 
@@ -36,6 +37,98 @@ def output_of(proc):
         (proc.stdout or "")
         + "\n"
         + (proc.stderr or "")
+    )
+
+
+
+def restart_local_blake_without_mempool():
+    """
+    Restart the local BLAKE regtest daemon with mempool persistence
+    disabled, leaving wallets unloaded.
+    """
+
+    if h.BLAKE_DATADIR is None:
+        h.skip(
+            "BLAKE reorg durable-rebroadcast test needs a local BLAKE datadir"
+        )
+
+    if h.BLAKE_RPC_ARGS:
+        h.skip(
+            "BLAKE reorg durable-rebroadcast test does not restart remote/custom-RPC nodes"
+        )
+
+    bitcoind = h.BLAKE_CLI.parent / "bitcoind"
+
+    if not bitcoind.exists():
+        h.skip(
+            "BLAKE bitcoind executable not found next to bitcoin-cli",
+            details=[f"expected: {bitcoind}"],
+        )
+
+    h.blake_cli("stop")
+
+    deadline = time.time() + 20
+
+    while time.time() < deadline:
+        still_running = False
+        datadir_arg = f"-datadir={h.BLAKE_DATADIR}"
+
+        for proc in Path("/proc").iterdir():
+            if not proc.name.isdigit():
+                continue
+
+            try:
+                cmdline = (
+                    proc / "cmdline"
+                ).read_bytes().replace(
+                    b"\x00",
+                    b" ",
+                ).decode(
+                    "utf-8",
+                    errors="replace",
+                )
+            except (OSError, PermissionError):
+                continue
+
+            if (
+                "bitcoind" in cmdline
+                and datadir_arg in cmdline
+            ):
+                still_running = True
+                break
+
+        if not still_running:
+            break
+
+        time.sleep(0.2)
+    else:
+        raise h.TestFailure(
+            "BLAKE daemon still holds the test datadir after stop"
+        )
+
+    h.run([
+        bitcoind,
+        "-regtest",
+        f"-datadir={h.BLAKE_DATADIR}",
+        "-server=1",
+        "-fallbackfee=0.0001",
+        "-txindex=0",
+        "-persistmempool=0",
+        "-blake2b_headline=",
+        "-daemon",
+    ])
+
+    deadline = time.time() + 20
+
+    while time.time() < deadline:
+        try:
+            h.blake_cli("getblockcount")
+            return
+        except Exception:
+            time.sleep(0.2)
+
+    raise h.TestFailure(
+        "BLAKE daemon did not restart"
     )
 
 
@@ -720,6 +813,241 @@ def test_final_blake_claim_reappears_after_rollback():
         )
 
 
+
+def test_final_blake_claim_durable_rebroadcast_after_reorg_mempool_loss():
+    banner(
+        "REORG: FINAL BLAKE CLAIM DURABLE REBROADCAST "
+        "AFTER MEMPOOL LOSS"
+    )
+
+    swap_id = settle_happy_through_blake_claim()
+    print("swap:", swap_id)
+
+    bob = h.load_state(
+        swap_id,
+        "bob",
+    )
+
+    txid = bob["blake_claim_txid"]
+    blockhash = bob["blake_claim_blockhash"]
+    signed_hex = bob.get("blake_claim_hex")
+
+    h.require(
+        signed_hex,
+        "final BLAKE claim has no durable signed transaction hex",
+    )
+
+    h.blake_cli(
+        "invalidateblock",
+        blockhash,
+    )
+
+    try:
+        #
+        # Model the durable rollback produced by reconciliation:
+        # Bitcoin claim remains authoritative, while the final
+        # BLAKE claim becomes only a recovery hint.
+        #
+        state = h.load_state(
+            swap_id,
+            "bob",
+        )
+
+        state["blake_reorg_claim_txid"] = txid
+        state["blake_claim_txid"] = None
+        state["blake_claim_blockhash"] = None
+        state["state"] = "BTC_CLAIMED"
+
+        state_path = (
+            h.BOB_DIR
+            / f"{swap_id}.json"
+        )
+
+        state_path.write_text(
+            json.dumps(
+                state,
+                indent=2,
+            )
+            + "\n"
+        )
+
+        #
+        # Destroy the mempool copy created by invalidateblock and leave
+        # Bob's signing wallet unloaded.
+        #
+        restart_local_blake_without_mempool()
+
+        try:
+            h.blake_cli(
+                "getmempoolentry",
+                txid,
+            )
+        except Exception:
+            pass
+        else:
+            raise h.TestFailure(
+                "reorged BLAKE claim unexpectedly survived mempool-loss restart"
+            )
+
+        loaded = h.blake_cli(
+            "listwallets"
+        )
+
+        h.require(
+            h.BOB_WALLET not in loaded,
+            "Bob BLAKE wallet unexpectedly loaded after restart",
+        )
+
+        proc = h.swap_cmd(
+            "claim-blake",
+            swap_id,
+            role="bob",
+        )
+
+        output = output_of(proc)
+
+        h.require(
+            "BLAKE CLAIM REBROADCAST FROM DURABLE STATE"
+            in output,
+            (
+                "reorged claim did not use durable exact-tx recovery:\n"
+                + output[-1600:]
+            ),
+        )
+
+        h.require(
+            "exact reorged BLAKE claim "
+            "was rebroadcast from durable state"
+            in output,
+            (
+                "reorged claim did not report durable reorg recovery:\n"
+                + output[-1600:]
+            ),
+        )
+
+        after = h.load_state(
+            swap_id,
+            "bob",
+        )
+
+        h.require(
+            after["state"] == "BTC_CLAIMED",
+            "durable reorg claim advanced final state before confirmation",
+        )
+
+        h.require(
+            after["blake_claim_txid"] == txid,
+            "durable reorg claim did not restore exact txid",
+        )
+
+        h.require(
+            after["blake_claim_blockhash"] is None,
+            "durable reorg claim incorrectly has a blockhash",
+        )
+
+        h.require(
+            after.get("blake_claim_hex") == signed_hex,
+            "durable reorg claim changed signed transaction hex",
+        )
+
+        h.require(
+            after.get("blake_reorg_claim_txid") is None,
+            "durable reorg claim hint was not consumed",
+        )
+
+        h.require(
+            bool(
+                h.blake_cli(
+                    "getmempoolentry",
+                    txid,
+                )
+            ),
+            "exact reorged BLAKE claim was not restored to mempool",
+        )
+
+        ok(
+            "final BLAKE claim survives reorg plus mempool loss "
+            "without signing wallet"
+        )
+
+    finally:
+        h.blake_cli(
+            "reconsiderblock",
+            blockhash,
+        )
+
+        h.ensure_test_wallets()
+
+
+
+def settle_happy_through_blake_refund():
+    swap_id = h.make_fresh_swap()
+
+    h.handshake(swap_id)
+    h.fund_blake_and_sync(swap_id)
+    h.fund_btc_and_sync(swap_id)
+
+    bob = h.load_state(
+        swap_id,
+        "bob",
+    )
+
+    blocks = (
+        int(bob["btc_timeout"])
+        - int(
+            h.btc_cli(
+                "getblockcount"
+            )
+        )
+    )
+
+    if blocks > 0:
+        h.mine_btc(blocks)
+
+    h.swap_cmd(
+        "refund-btc",
+        swap_id,
+        role="bob",
+    )
+
+    h.swap_cmd(
+        "publish-btc-refunded",
+        swap_id,
+        role="bob",
+    )
+
+    h.swap_cmd(
+        "receive-btc-refunded",
+        swap_id,
+        role="alice",
+    )
+
+    alice = h.load_state(
+        swap_id,
+        "alice",
+    )
+
+    blocks = (
+        int(alice["blake_timeout"])
+        - int(
+            h.blake_cli(
+                "getblockcount"
+            )
+        )
+    )
+
+    if blocks > 0:
+        h.mine_blake(blocks)
+
+    h.swap_cmd(
+        "refund-blake",
+        swap_id,
+        role="alice",
+    )
+
+    return swap_id
+
+
 def test_final_blake_refund_pending_reorg():
     banner(
         "REORG: FINAL BLAKE REFUND "
@@ -1037,6 +1365,172 @@ def test_final_blake_refund_reappears_after_rollback():
         )
 
 
+
+def test_final_blake_refund_durable_rebroadcast_after_reorg_mempool_loss():
+    banner(
+        "REORG: FINAL BLAKE REFUND DURABLE REBROADCAST "
+        "AFTER MEMPOOL LOSS"
+    )
+
+    swap_id = settle_happy_through_blake_refund()
+    print("swap:", swap_id)
+
+    alice = h.load_state(
+        swap_id,
+        "alice",
+    )
+
+    txid = alice["blake_refund_txid"]
+    blockhash = alice["blake_refund_blockhash"]
+    signed_hex = alice.get("blake_refund_hex")
+
+    h.require(
+        signed_hex,
+        "final BLAKE refund has no durable signed transaction hex",
+    )
+
+    h.blake_cli(
+        "invalidateblock",
+        blockhash,
+    )
+
+    try:
+        #
+        # Model the durable rollback produced by reconciliation:
+        # Bitcoin refund remains authoritative, while the final
+        # BLAKE refund becomes only a recovery hint.
+        #
+        state = h.load_state(
+            swap_id,
+            "alice",
+        )
+
+        state["blake_reorg_refund_txid"] = txid
+        state["blake_refund_txid"] = None
+        state["blake_refund_blockhash"] = None
+        state["state"] = "BTC_REFUNDED"
+
+        state_path = (
+            h.ALICE_DIR
+            / f"{swap_id}.json"
+        )
+
+        state_path.write_text(
+            json.dumps(
+                state,
+                indent=2,
+            )
+            + "\n"
+        )
+
+        #
+        # Destroy the mempool copy created by invalidateblock and leave
+        # Alice's signing wallet unloaded.
+        #
+        restart_local_blake_without_mempool()
+
+        try:
+            h.blake_cli(
+                "getmempoolentry",
+                txid,
+            )
+        except Exception:
+            pass
+        else:
+            raise h.TestFailure(
+                "reorged BLAKE refund unexpectedly survived mempool-loss restart"
+            )
+
+        loaded = h.blake_cli(
+            "listwallets"
+        )
+
+        h.require(
+            h.ALICE_WALLET not in loaded,
+            "Alice BLAKE wallet unexpectedly loaded after restart",
+        )
+
+        proc = h.swap_cmd(
+            "refund-blake",
+            swap_id,
+            role="alice",
+        )
+
+        output = output_of(proc)
+
+        h.require(
+            "BLAKE REFUND REBROADCAST FROM DURABLE STATE"
+            in output,
+            (
+                "reorged refund did not use durable exact-tx recovery:\n"
+                + output[-1600:]
+            ),
+        )
+
+        h.require(
+            "exact reorged BLAKE refund "
+            "was rebroadcast from durable state"
+            in output,
+            (
+                "reorged refund did not report durable reorg recovery:\n"
+                + output[-1600:]
+            ),
+        )
+
+        after = h.load_state(
+            swap_id,
+            "alice",
+        )
+
+        h.require(
+            after["state"] == "BTC_REFUNDED",
+            "durable reorg refund advanced final state before confirmation",
+        )
+
+        h.require(
+            after["blake_refund_txid"] == txid,
+            "durable reorg refund did not restore exact txid",
+        )
+
+        h.require(
+            after["blake_refund_blockhash"] is None,
+            "durable reorg refund incorrectly has a blockhash",
+        )
+
+        h.require(
+            after.get("blake_refund_hex") == signed_hex,
+            "durable reorg refund changed signed transaction hex",
+        )
+
+        h.require(
+            after.get("blake_reorg_refund_txid") is None,
+            "durable reorg refund hint was not consumed",
+        )
+
+        h.require(
+            bool(
+                h.blake_cli(
+                    "getmempoolentry",
+                    txid,
+                )
+            ),
+            "exact reorged BLAKE refund was not restored to mempool",
+        )
+
+        ok(
+            "final BLAKE refund survives reorg plus mempool loss "
+            "without signing wallet"
+        )
+
+    finally:
+        h.blake_cli(
+            "reconsiderblock",
+            blockhash,
+        )
+
+        h.ensure_test_wallets()
+
+
 def main():
     global FAIL
 
@@ -1071,12 +1565,20 @@ def main():
             test_final_blake_claim_reappears_after_rollback,
         ),
         (
+            "FINAL BLAKE CLAIM DURABLE REBROADCAST",
+            test_final_blake_claim_durable_rebroadcast_after_reorg_mempool_loss,
+        ),
+        (
             "FINAL BLAKE REFUND REORG",
             test_final_blake_refund_pending_reorg,
         ),
         (
             "FINAL BLAKE REFUND REAPPEARS",
             test_final_blake_refund_reappears_after_rollback,
+        ),
+        (
+            "FINAL BLAKE REFUND DURABLE REBROADCAST",
+            test_final_blake_refund_durable_rebroadcast_after_reorg_mempool_loss,
         ),
     ]
 

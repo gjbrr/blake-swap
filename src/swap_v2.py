@@ -2284,6 +2284,108 @@ def classify_htlc_spend(
     return "unknown"
 
 
+def verify_announced_settlement(
+    swap,
+    chain,
+    txid,
+    blockhash,
+    expected_branch,
+):
+    """
+    Independently verify an untrusted settlement announcement
+    before allowing it to advance durable protocol state.
+
+    The announced transaction must:
+
+      * exist in the announced block,
+      * remain confirmed on the active chain,
+      * spend this swap's exact HTLC outpoint, and
+      * use the announced claim/refund branch.
+
+    Nothing from the peer announcement is persisted by this helper.
+    """
+    fields = chain_dispatch(chain)
+
+    cli = fields["cli"]
+    chain_name = fields["name"]
+
+    funding_txid = getattr(
+        swap,
+        fields["tx_field"],
+    )
+    funding_vout = getattr(
+        swap,
+        fields["vout_field"],
+    )
+
+    if not funding_txid:
+        raise RuntimeError(
+            f"SECURITY FAILURE: swap has no "
+            f"{chain_name} funding txid"
+        )
+
+    if funding_vout is None:
+        raise RuntimeError(
+            f"SECURITY FAILURE: swap has no "
+            f"{chain_name} funding vout"
+        )
+
+    tx = cli(
+        "getrawtransaction",
+        txid,
+        True,
+        blockhash,
+    )
+
+    if tx.get("in_active_chain") is False:
+        raise RuntimeError(
+            "SECURITY FAILURE: announced "
+            f"{chain_name} {expected_branch} transaction "
+            "is not on the active chain"
+        )
+
+    confirmations = int(
+        tx.get("confirmations", 0) or 0
+    )
+
+    if confirmations < 1:
+        raise RuntimeError(
+            "SECURITY FAILURE: announced "
+            f"{chain_name} {expected_branch} transaction "
+            "is not confirmed on the active chain"
+        )
+
+    spends_htlc = any(
+        vin.get("txid") == funding_txid
+        and int(vin.get("vout", -1)) == int(funding_vout)
+        for vin in tx.get("vin", [])
+    )
+
+    if not spends_htlc:
+        raise RuntimeError(
+            "SECURITY FAILURE: announced "
+            f"{chain_name} {expected_branch} transaction "
+            "does not spend this swap's HTLC"
+        )
+
+    actual_branch = classify_htlc_spend(
+        tx,
+        funding_txid,
+        funding_vout,
+        swap.secret_hash,
+    )
+
+    if actual_branch != expected_branch:
+        raise RuntimeError(
+            "SECURITY FAILURE: announced "
+            f"{chain_name} settlement branch mismatch: "
+            f"expected {expected_branch}, "
+            f"observed {actual_branch}"
+        )
+
+    return tx
+
+
 def find_confirmed_htlc_spend(
     swap,
     chain,
@@ -7825,30 +7927,13 @@ def command_receive_blake_claimed(args):
                 "message for an already-recorded claim"
             )
 
-    # Alice independently asks her BLAKE node for the exact
-    # transaction Bob announced.
-    tx = blake_cli(
-        "getrawtransaction",
+    verify_announced_settlement(
+        swap,
+        "blake",
         incoming_txid,
-        True,
         incoming_blockhash,
+        "claim",
     )
-
-    spends_htlc = False
-
-    for vin in tx.get("vin", []):
-        if (
-            vin.get("txid") == swap.blake_funding_txid
-            and vin.get("vout") == swap.blake_funding_vout
-        ):
-            spends_htlc = True
-            break
-
-    if not spends_htlc:
-        raise RuntimeError(
-            "BLAKE claim transaction does not "
-            "spend expected HTLC"
-        )
 
     if duplicate_claim:
         print()
@@ -9256,28 +9341,13 @@ def command_receive_btc_refunded(args):
                 "message for an already-recorded refund"
             )
 
-    tx = btc_cli(
-        "getrawtransaction",
+    verify_announced_settlement(
+        swap,
+        "btc",
         txid,
-        True,
         blockhash,
+        "refund",
     )
-
-    spends_htlc = False
-
-    for vin in tx.get("vin", []):
-        if (
-            vin.get("txid") == swap.btc_funding_txid
-            and vin.get("vout") == swap.btc_funding_vout
-        ):
-            spends_htlc = True
-            break
-
-    if not spends_htlc:
-        raise RuntimeError(
-            "BTC refund transaction does not "
-            "spend expected HTLC"
-        )
 
     if duplicate_refund:
         print()
@@ -9480,30 +9550,13 @@ def command_receive_btc_claimed(args):
                 "message for an already-recorded claim"
             )
 
-    # Independently inspect Bitcoin before accepting Alice's
-    # announcement as protocol state.
-    tx = btc_cli(
-        "getrawtransaction",
+    verify_announced_settlement(
+        swap,
+        "btc",
         incoming_txid,
-        True,
         incoming_blockhash,
+        "claim",
     )
-
-    spends_htlc = False
-
-    for vin in tx.get("vin", []):
-        if (
-            vin.get("txid") == swap.btc_funding_txid
-            and vin.get("vout") == swap.btc_funding_vout
-        ):
-            spends_htlc = True
-            break
-
-    if not spends_htlc:
-        raise RuntimeError(
-            "BTC claim transaction does not "
-            "spend expected HTLC"
-        )
 
     if duplicate_claim:
         print()

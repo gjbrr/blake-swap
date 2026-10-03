@@ -283,6 +283,227 @@ def test_btc_funding_reorg():
         )
 
 
+def test_receive_btc_refund_rejects_claim_branch():
+    banner(
+        "SETTLEMENT: BTC REFUND ANNOUNCEMENT "
+        "REJECTS CLAIM BRANCH"
+    )
+
+    swap_id = h.make_fresh_swap()
+    print("swap:", swap_id)
+
+    h.handshake(swap_id)
+    h.fund_blake_and_sync(swap_id)
+    h.fund_btc_and_sync(swap_id)
+
+    h.swap_cmd(
+        "claim-btc",
+        swap_id,
+        role="alice",
+    )
+
+    h.swap_cmd(
+        "publish-btc-claimed",
+        swap_id,
+        role="alice",
+    )
+
+    alice = h.load_state(
+        swap_id,
+        "alice",
+    )
+
+    claim_txid = alice[
+        "btc_claim_txid"
+    ]
+    claim_blockhash = alice[
+        "btc_claim_blockhash"
+    ]
+
+    source = h.message_file(
+        swap_id,
+        "btc-claimed",
+    )
+    target = h.message_file(
+        swap_id,
+        "btc-refunded",
+    )
+
+    target.write_text(
+        source.read_text()
+    )
+
+    def turn_claim_into_fake_refund(payload):
+        payload["type"] = "btc-refunded"
+        payload["btc_refund_txid"] = claim_txid
+        payload["btc_refund_blockhash"] = claim_blockhash
+        payload.pop("btc_claim_txid", None)
+        payload.pop("btc_claim_blockhash", None)
+
+    h.mutate_message(
+        target,
+        turn_claim_into_fake_refund,
+    )
+
+    before = h.load_state(
+        swap_id,
+        "alice",
+    )
+
+    proc = h.swap_cmd(
+        "receive-btc-refunded",
+        swap_id,
+        role="alice",
+        expect_ok=False,
+    )
+
+    output = output_of(proc)
+
+    h.require(
+        proc.returncode != 0,
+        "Alice accepted a BTC claim transaction "
+        "as a refund announcement",
+    )
+
+    h.require(
+        (
+            "settlement branch mismatch" in output
+            and "expected refund" in output
+            and "observed claim" in output
+        ),
+        (
+            "receive-btc-refunded failed for "
+            "unexpected reason:\n"
+            + output[-1600:]
+        ),
+    )
+
+    after = h.load_state(
+        swap_id,
+        "alice",
+    )
+
+    h.require(
+        after["state"] == before["state"],
+        "wrong-branch announcement changed durable state",
+    )
+
+    h.require(
+        after.get("btc_refund_txid") is None,
+        "wrong-branch announcement persisted refund txid",
+    )
+
+    h.require(
+        after.get("btc_refund_blockhash") is None,
+        "wrong-branch announcement persisted refund blockhash",
+    )
+
+    ok(
+        "BTC refund announcement rejects an "
+        "actual claim spend before durable state changes"
+    )
+
+
+def test_receive_btc_claim_rejects_reorged_announcement():
+    banner(
+        "REORG: STALE BTC CLAIM ANNOUNCEMENT "
+        "IS REJECTED"
+    )
+
+    swap_id = h.make_fresh_swap()
+    print("swap:", swap_id)
+
+    h.handshake(swap_id)
+    h.fund_blake_and_sync(swap_id)
+    h.fund_btc_and_sync(swap_id)
+
+    h.swap_cmd(
+        "claim-btc",
+        swap_id,
+        role="alice",
+    )
+
+    alice = h.load_state(
+        swap_id,
+        "alice",
+    )
+
+    blockhash = alice[
+        "btc_claim_blockhash"
+    ]
+
+    h.swap_cmd(
+        "publish-btc-claimed",
+        swap_id,
+        role="alice",
+    )
+
+    h.btc_cli(
+        "invalidateblock",
+        blockhash,
+    )
+
+    try:
+        proc = h.swap_cmd(
+            "receive-btc-claimed",
+            swap_id,
+            role="bob",
+            expect_ok=False,
+        )
+
+        text = output_of(proc)
+
+        h.require(
+            proc.returncode != 0,
+            "Bob accepted a BTC claim announcement "
+            "from a reorg-disconnected block",
+        )
+
+        h.require(
+            (
+                "not on the active chain" in text
+                or "not confirmed on the active chain" in text
+            ),
+            (
+                "receive-btc-claimed failed for "
+                "unexpected reason:\n"
+                + text[-1600:]
+            ),
+        )
+
+        bob = h.load_state(
+            swap_id,
+            "bob",
+        )
+
+        h.require(
+            bob["state"] == "BTC_FUNDED",
+            "Bob advanced durable state after rejecting "
+            "a stale BTC claim announcement",
+        )
+
+        h.require(
+            bob.get("btc_claim_txid") is None,
+            "Bob persisted stale BTC claim txid",
+        )
+
+        h.require(
+            bob.get("btc_claim_blockhash") is None,
+            "Bob persisted stale BTC claim blockhash",
+        )
+
+        ok(
+            "Bob rejects reorged BTC claim announcement "
+            "before durable state advances"
+        )
+
+    finally:
+        h.btc_cli(
+            "reconsiderblock",
+            blockhash,
+        )
+
+
 def test_btc_claim_reorg():
     banner(
         "REORG: BTC CLAIM ROLLBACK "
@@ -593,6 +814,130 @@ def settle_happy_through_blake_claim():
     )
 
     return swap_id
+
+
+def test_receive_blake_claim_rejects_reorged_announcement():
+    banner(
+        "REORG: STALE BLAKE CLAIM ANNOUNCEMENT "
+        "IS REJECTED"
+    )
+
+    swap_id = h.make_fresh_swap()
+    print("swap:", swap_id)
+
+    h.handshake(swap_id)
+    h.fund_blake_and_sync(swap_id)
+    h.fund_btc_and_sync(swap_id)
+
+    h.swap_cmd(
+        "claim-btc",
+        swap_id,
+        role="alice",
+    )
+
+    h.swap_cmd(
+        "publish-btc-claimed",
+        swap_id,
+        role="alice",
+    )
+
+    h.swap_cmd(
+        "receive-btc-claimed",
+        swap_id,
+        role="bob",
+    )
+
+    h.swap_cmd(
+        "extract-secret",
+        swap_id,
+        role="bob",
+    )
+
+    h.swap_cmd(
+        "claim-blake",
+        swap_id,
+        role="bob",
+    )
+
+    bob = h.load_state(
+        swap_id,
+        "bob",
+    )
+
+    blockhash = bob[
+        "blake_claim_blockhash"
+    ]
+
+    h.swap_cmd(
+        "publish-blake-claimed",
+        swap_id,
+        role="bob",
+    )
+
+    h.blake_cli(
+        "invalidateblock",
+        blockhash,
+    )
+
+    try:
+        proc = h.swap_cmd(
+            "receive-blake-claimed",
+            swap_id,
+            role="alice",
+            expect_ok=False,
+        )
+
+        output = output_of(proc)
+
+        h.require(
+            proc.returncode != 0,
+            "Alice accepted a BLAKE claim announcement "
+            "from a reorg-disconnected block",
+        )
+
+        h.require(
+            (
+                "not on the active chain" in output
+                or "not confirmed on the active chain" in output
+            ),
+            (
+                "receive-blake-claimed failed for "
+                "unexpected reason:\n"
+                + output[-1600:]
+            ),
+        )
+
+        alice = h.load_state(
+            swap_id,
+            "alice",
+        )
+
+        h.require(
+            alice["state"] == "BTC_CLAIMED",
+            "Alice advanced durable state after rejecting "
+            "a stale BLAKE claim announcement",
+        )
+
+        h.require(
+            alice.get("blake_claim_txid") is None,
+            "Alice persisted stale BLAKE claim txid",
+        )
+
+        h.require(
+            alice.get("blake_claim_blockhash") is None,
+            "Alice persisted stale BLAKE claim blockhash",
+        )
+
+        ok(
+            "Alice rejects reorged BLAKE claim announcement "
+            "before durable state advances"
+        )
+
+    finally:
+        h.blake_cli(
+            "reconsiderblock",
+            blockhash,
+        )
 
 
 def test_final_blake_claim_pending_reorg():
@@ -1549,12 +1894,24 @@ def main():
             test_btc_funding_reorg,
         ),
         (
+            "WRONG-BRANCH BTC REFUND ANNOUNCEMENT",
+            test_receive_btc_refund_rejects_claim_branch,
+        ),
+        (
+            "STALE BTC CLAIM ANNOUNCEMENT",
+            test_receive_btc_claim_rejects_reorged_announcement,
+        ),
+        (
             "BTC CLAIM REORG",
             test_btc_claim_reorg,
         ),
         (
             "BTC REFUND REORG",
             test_btc_refund_reorg,
+        ),
+        (
+            "STALE BLAKE CLAIM ANNOUNCEMENT",
+            test_receive_blake_claim_rejects_reorged_announcement,
         ),
         (
             "FINAL BLAKE CLAIM REORG",

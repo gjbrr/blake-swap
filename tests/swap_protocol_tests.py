@@ -1003,6 +1003,66 @@ def test_happy() -> None:
     ok("Alice claims BTC")
 
     swap_cmd("publish-btc-claimed", swap_id, role="alice")
+
+    # S is learned from the Bitcoin witness only. A settlement
+    # announcement that tries to transport secret_hex must be rejected
+    # before durable state advances or Bob learns the secret.
+    claim_msg = message_file(
+        swap_id,
+        "btc-claimed",
+    )
+
+    original = mutate_message(
+        claim_msg,
+        lambda d: d.__setitem__(
+            "secret_hex",
+            "00" * 32,
+        ),
+    )
+
+    try:
+        proc = swap_cmd(
+            "receive-btc-claimed",
+            swap_id,
+            role="bob",
+            expect_ok=False,
+        )
+
+        expect_failure(
+            "BTC claim secret injection",
+            proc,
+            "secret_hex",
+        )
+
+        assert_state(
+            swap_id,
+            "bob",
+            "BTC_FUNDED",
+        )
+
+        rejected = load_state(
+            swap_id,
+            "bob",
+        )
+
+        require(
+            rejected.get("revealed_secret_hex") is None,
+            "rejected BTC claim transport leaked S into Bob state",
+        )
+
+        require(
+            rejected.get("btc_claim_txid") is None,
+            "rejected BTC claim transport persisted claim txid",
+        )
+
+    finally:
+        restore_message(
+            claim_msg,
+            original,
+        )
+
+    ok("BTC claim secret_hex injection rejected")
+
     swap_cmd("receive-btc-claimed", swap_id, role="bob")
     assert_state(swap_id, "bob", "BTC_CLAIMED")
     ok("Bob independently imports BTC claim")

@@ -1248,6 +1248,108 @@ def test_happy() -> None:
     ok("Bob claims BLAKE with recovered S")
 
     swap_cmd("publish-blake-claimed", swap_id, role="bob")
+
+    blake_claim_msg = message_file(
+        swap_id,
+        "blake-claimed",
+    )
+
+    # BLAKE settlement announcements must remain bound to this swap's
+    # negotiated hashlock.
+    original = mutate_message(
+        blake_claim_msg,
+        lambda d: d.__setitem__(
+            "secret_hash",
+            "22" * 32,
+        ),
+    )
+
+    try:
+        proc = swap_cmd(
+            "receive-blake-claimed",
+            swap_id,
+            role="alice",
+            expect_ok=False,
+        )
+
+        expect_failure(
+            "BLAKE claim hashlock mismatch",
+            proc,
+            "secret_hash",
+        )
+
+        assert_state(
+            swap_id,
+            "alice",
+            "BTC_CLAIMED",
+        )
+
+        rejected = load_state(
+            swap_id,
+            "alice",
+        )
+
+        require(
+            rejected.get("blake_claim_txid") is None,
+            "wrong-hash BLAKE claim persisted claim txid",
+        )
+
+    finally:
+        restore_message(
+            blake_claim_msg,
+            original,
+        )
+
+    ok("BLAKE claim secret_hash mismatch rejected")
+
+    # The same announcement must also remain bound to the exact
+    # public swap identifier.
+    original = mutate_message(
+        blake_claim_msg,
+        lambda d: d.__setitem__(
+            "swap_id",
+            "feedfacecafe",
+        ),
+    )
+
+    try:
+        proc = swap_cmd(
+            "receive-blake-claimed",
+            swap_id,
+            role="alice",
+            expect_ok=False,
+        )
+
+        expect_failure(
+            "BLAKE claim swap_id mismatch",
+            proc,
+            "swap_id",
+        )
+
+        assert_state(
+            swap_id,
+            "alice",
+            "BTC_CLAIMED",
+        )
+
+        rejected = load_state(
+            swap_id,
+            "alice",
+        )
+
+        require(
+            rejected.get("blake_claim_txid") is None,
+            "wrong-swap BLAKE claim persisted claim txid",
+        )
+
+    finally:
+        restore_message(
+            blake_claim_msg,
+            original,
+        )
+
+    ok("BLAKE claim swap_id mismatch rejected")
+
     swap_cmd("receive-blake-claimed", swap_id, role="alice")
     assert_state(swap_id, "alice", "BLAKE_CLAIMED")
     ok("Alice independently imports BLAKE claim")

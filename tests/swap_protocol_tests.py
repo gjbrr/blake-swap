@@ -1090,6 +1090,60 @@ def test_happy() -> None:
     assert_state(swap_id, "alice", "BLAKE_CLAIMED")
     ok("duplicate BLAKE claim receive")
 
+    # A later authenticated message for the same settlement type must
+    # not replace the already-recorded BLAKE claim identity.
+    blake_claim_msg = message_file(
+        swap_id,
+        "blake-claimed",
+    )
+
+    original = mutate_message(
+        blake_claim_msg,
+        lambda d: d.__setitem__(
+            "blake_claim_txid",
+            "ef" * 32,
+        ),
+    )
+
+    try:
+        proc = swap_cmd(
+            "receive-blake-claimed",
+            swap_id,
+            role="alice",
+            expect_ok=False,
+        )
+
+        expect_failure(
+            "conflicting BLAKE claim replay",
+            proc,
+            "conflicting BLAKE claim",
+        )
+
+        assert_state(
+            swap_id,
+            "alice",
+            "BLAKE_CLAIMED",
+        )
+
+        after_conflict = load_state(
+            swap_id,
+            "alice",
+        )
+
+        require(
+            after_conflict.get("blake_claim_txid")
+            != "ef" * 32,
+            "conflicting BLAKE claim replay replaced durable txid",
+        )
+
+    finally:
+        restore_message(
+            blake_claim_msg,
+            original,
+        )
+
+    ok("conflicting BLAKE claim replay rejected")
+
     swap_cmd(
         "complete",
         swap_id,

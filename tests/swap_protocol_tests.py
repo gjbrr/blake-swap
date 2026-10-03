@@ -1063,6 +1063,60 @@ def test_happy() -> None:
 
     ok("BTC claim secret_hex injection rejected")
 
+    # A settlement announcement must remain bound to this swap's
+    # negotiated hashlock. A different secret_hash must be rejected
+    # before any settlement identity or durable state is accepted.
+    original = mutate_message(
+        claim_msg,
+        lambda d: d.__setitem__(
+            "secret_hash",
+            "11" * 32,
+        ),
+    )
+
+    try:
+        proc = swap_cmd(
+            "receive-btc-claimed",
+            swap_id,
+            role="bob",
+            expect_ok=False,
+        )
+
+        expect_failure(
+            "BTC claim hashlock mismatch",
+            proc,
+            "secret_hash mismatch",
+        )
+
+        assert_state(
+            swap_id,
+            "bob",
+            "BTC_FUNDED",
+        )
+
+        rejected = load_state(
+            swap_id,
+            "bob",
+        )
+
+        require(
+            rejected.get("btc_claim_txid") is None,
+            "wrong-hash BTC claim persisted claim txid",
+        )
+
+        require(
+            rejected.get("revealed_secret_hex") is None,
+            "wrong-hash BTC claim changed Bob's secret knowledge",
+        )
+
+    finally:
+        restore_message(
+            claim_msg,
+            original,
+        )
+
+    ok("BTC claim secret_hash mismatch rejected")
+
     swap_cmd("receive-btc-claimed", swap_id, role="bob")
     assert_state(swap_id, "bob", "BTC_CLAIMED")
     ok("Bob independently imports BTC claim")

@@ -1012,6 +1012,60 @@ def test_happy() -> None:
     assert_state(swap_id, "bob", "BTC_CLAIMED")
     ok("duplicate BTC claim receive")
 
+    # A later authenticated message for the same settlement type must
+    # not be allowed to replace the already-recorded claim identity.
+    claim_msg = message_file(
+        swap_id,
+        "btc-claimed",
+    )
+
+    original = mutate_message(
+        claim_msg,
+        lambda d: d.__setitem__(
+            "btc_claim_txid",
+            "cd" * 32,
+        ),
+    )
+
+    try:
+        proc = swap_cmd(
+            "receive-btc-claimed",
+            swap_id,
+            role="bob",
+            expect_ok=False,
+        )
+
+        expect_failure(
+            "conflicting BTC claim replay",
+            proc,
+            "conflicting BTC claim",
+        )
+
+        assert_state(
+            swap_id,
+            "bob",
+            "BTC_CLAIMED",
+        )
+
+        after_conflict = load_state(
+            swap_id,
+            "bob",
+        )
+
+        require(
+            after_conflict.get("btc_claim_txid")
+            != "cd" * 32,
+            "conflicting BTC claim replay replaced durable txid",
+        )
+
+    finally:
+        restore_message(
+            claim_msg,
+            original,
+        )
+
+    ok("conflicting BTC claim replay rejected")
+
     before = load_state(swap_id, "bob")
     require(before.get("revealed_secret_hex") is None, "Bob knew S before extraction")
 

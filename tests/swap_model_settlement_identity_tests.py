@@ -202,6 +202,8 @@ def main():
     test_signed_hex_must_be_valid_hex()
     test_settlement_txid_must_be_32_byte_hex()
     test_funding_txid_must_be_32_byte_hex()
+    test_settlement_blockhash_must_be_32_byte_hex()
+    test_funding_blockhash_must_be_32_byte_hex()
     test_revealed_secret_must_match_hash()
     test_revealed_secret_must_be_32_bytes()
 
@@ -240,6 +242,37 @@ def test_funding_txid_must_be_32_byte_hex():
     print(
         "PASS: malformed funding txid is rejected"
     )
+
+
+def test_settlement_blockhash_must_be_32_byte_hex():
+    swap = make_swap(
+        btc_claim_blockhash="banana",
+    )
+
+    require_rejected(
+        swap,
+        "btc_claim_blockhash must be 32-byte hex",
+    )
+
+    print(
+        "PASS: malformed settlement blockhash is rejected"
+    )
+
+
+def test_funding_blockhash_must_be_32_byte_hex():
+    swap = make_swap(
+        btc_funding_blockhash="1234",
+    )
+
+    require_rejected(
+        swap,
+        "btc_funding_blockhash must be 32-byte hex",
+    )
+
+    print(
+        "PASS: malformed funding blockhash is rejected"
+    )
+
 
 if __name__ == "__main__":
     main()

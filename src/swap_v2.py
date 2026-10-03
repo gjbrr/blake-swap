@@ -714,6 +714,15 @@ class Swap:
             ("blake_refund_txid", self.blake_refund_txid),
             ("blake_reorg_claim_txid", self.blake_reorg_claim_txid),
             ("blake_reorg_refund_txid", self.blake_reorg_refund_txid),
+
+            # Block hashes are authoritative chain anchors too.
+            # Never persist or trust a structurally malformed anchor.
+            ("blake_funding_blockhash", self.blake_funding_blockhash),
+            ("btc_funding_blockhash", self.btc_funding_blockhash),
+            ("btc_claim_blockhash", self.btc_claim_blockhash),
+            ("blake_claim_blockhash", self.blake_claim_blockhash),
+            ("btc_refund_blockhash", self.btc_refund_blockhash),
+            ("blake_refund_blockhash", self.blake_refund_blockhash),
         ):
             require_32_byte_hex(
                 field_name,

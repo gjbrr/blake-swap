@@ -226,6 +226,162 @@ def test_pending_btc_claim():
     print("PASS: production BTC claim waits for confirmation")
 
 
+
+def test_btc_claim_durable_rebroadcast_after_mempool_loss():
+    banner(
+        "PRODUCTION BTC CLAIM: DURABLE REBROADCAST AFTER MEMPOOL LOSS"
+    )
+
+    swap_id = h.make_fresh_swap()
+    print("swap:", swap_id)
+
+    h.handshake(swap_id)
+    h.fund_blake_and_sync(swap_id)
+    h.fund_btc_and_sync(swap_id)
+
+    #
+    # Broadcast Alice's Bitcoin claim but deliberately leave it
+    # unconfirmed.
+    #
+    first = prod_cmd(
+        "claim-btc",
+        swap_id,
+        role="alice",
+    )
+
+    h.require(
+        "awaiting active-chain confirmation"
+        in (first.stdout + first.stderr).lower(),
+        "initial BTC claim did not remain pending",
+    )
+
+    pending = h.load_state(
+        swap_id,
+        "alice",
+    )
+
+    first_txid = require_pending(
+        state=pending,
+        expected_state="BTC_FUNDED",
+        tx_field="btc_claim_txid",
+        block_field="btc_claim_blockhash",
+        label="BTC claim",
+    )
+
+    signed_hex = pending.get(
+        "btc_claim_hex"
+    )
+
+    h.require(
+        signed_hex,
+        "pending BTC claim did not persist signed transaction hex",
+    )
+
+    decoded = h.btc_cli(
+        "decoderawtransaction",
+        signed_hex,
+    )
+
+    h.require(
+        decoded.get("txid") == first_txid,
+        "persisted BTC claim hex does not match persisted txid",
+    )
+
+    h.require(
+        h.btc_cli(
+            "getmempoolentry",
+            first_txid,
+        ),
+        "initial BTC claim is not in the mempool",
+    )
+
+    #
+    # Destroy Bitcoin mempool state. Wallets are deliberately NOT
+    # reloaded after restart.
+    #
+    restart_local_btc_without_mempool()
+
+    try:
+        h.btc_cli(
+            "getmempoolentry",
+            first_txid,
+        )
+    except Exception:
+        pass
+    else:
+        raise h.TestFailure(
+            "BTC claim unexpectedly survived mempool-loss restart"
+        )
+
+    loaded = h.btc_cli(
+        "listwallets"
+    )
+
+    h.require(
+        h.ALICE_WALLET not in loaded,
+        "Alice Bitcoin wallet unexpectedly loaded after restart",
+    )
+
+    #
+    # This is the property under test: recover solely from durable
+    # signed transaction material and rebroadcast that exact tx.
+    #
+    retry = prod_cmd(
+        "claim-btc",
+        swap_id,
+        role="alice",
+    )
+
+    output = retry.stdout + retry.stderr
+
+    h.require(
+        "Bitcoin CLAIM REBROADCAST FROM DURABLE STATE"
+        in output,
+        "claim-btc did not use durable signed-transaction recovery",
+    )
+
+    h.require(
+        "PASS: exact stored signed transaction was rebroadcast"
+        in output,
+        "claim-btc did not report exact durable rebroadcast",
+    )
+
+    after = h.load_state(
+        swap_id,
+        "alice",
+    )
+
+    require_same_pending(
+        state=after,
+        expected_state="BTC_FUNDED",
+        tx_field="btc_claim_txid",
+        block_field="btc_claim_blockhash",
+        txid=first_txid,
+        label="BTC claim durable rebroadcast",
+    )
+
+    h.require(
+        after.get("btc_claim_hex") == signed_hex,
+        "durable rebroadcast changed signed BTC claim hex",
+    )
+
+    mempool = h.btc_cli(
+        "getmempoolentry",
+        first_txid,
+    )
+
+    h.require(
+        bool(mempool),
+        "exact durable BTC claim was not restored to mempool",
+    )
+
+    h.ensure_test_wallets()
+
+    print(
+        "PASS: BTC claim survived mempool loss without signing wallet"
+    )
+
+
 def test_pending_blake_claim():
     banner("PRODUCTION BLAKE CLAIM: PENDING CONFIRMATION")
 
@@ -423,6 +579,273 @@ def test_pending_btc_refund():
 
     print("PASS: production BTC refund waits for confirmation")
 
+
+
+
+
+def test_btc_refund_durable_rebroadcast_after_mempool_loss():
+    banner(
+        "PRODUCTION BTC REFUND: DURABLE REBROADCAST AFTER MEMPOOL LOSS"
+    )
+
+    swap_id = h.make_fresh_swap()
+    print("swap:", swap_id)
+
+    h.handshake(swap_id)
+    h.fund_blake_and_sync(swap_id)
+    h.fund_btc_and_sync(swap_id)
+
+    bob = h.load_state(
+        swap_id,
+        "bob",
+    )
+
+    current = int(
+        h.btc_cli("getblockcount")
+    )
+
+    remaining = (
+        int(bob["btc_timeout"])
+        - current
+    )
+
+    if remaining > 0:
+        h.mine_btc(remaining)
+
+    #
+    # Broadcast Bob's Bitcoin refund but deliberately leave it
+    # unconfirmed.
+    #
+    first = prod_cmd(
+        "refund-btc",
+        swap_id,
+        role="bob",
+    )
+
+    h.require(
+        "awaiting active-chain confirmation"
+        in (first.stdout + first.stderr).lower(),
+        "initial BTC refund did not remain pending",
+    )
+
+    pending = h.load_state(
+        swap_id,
+        "bob",
+    )
+
+    first_txid = require_pending(
+        state=pending,
+        expected_state="BTC_FUNDED",
+        tx_field="btc_refund_txid",
+        block_field="btc_refund_blockhash",
+        label="BTC refund",
+    )
+
+    signed_hex = pending.get(
+        "btc_refund_hex"
+    )
+
+    h.require(
+        signed_hex,
+        "pending BTC refund did not persist signed transaction hex",
+    )
+
+    decoded = h.btc_cli(
+        "decoderawtransaction",
+        signed_hex,
+    )
+
+    h.require(
+        decoded.get("txid") == first_txid,
+        "persisted BTC refund hex does not match persisted txid",
+    )
+
+    h.require(
+        h.btc_cli(
+            "getmempoolentry",
+            first_txid,
+        ),
+        "initial BTC refund is not in the mempool",
+    )
+
+    #
+    # Destroy Bitcoin mempool state. Bob's signing wallet is
+    # deliberately NOT reloaded after restart.
+    #
+    restart_local_btc_without_mempool()
+
+    try:
+        h.btc_cli(
+            "getmempoolentry",
+            first_txid,
+        )
+    except Exception:
+        pass
+    else:
+        raise h.TestFailure(
+            "BTC refund unexpectedly survived mempool-loss restart"
+        )
+
+    loaded = h.btc_cli(
+        "listwallets"
+    )
+
+    h.require(
+        h.BOB_WALLET not in loaded,
+        "Bob Bitcoin wallet unexpectedly loaded after restart",
+    )
+
+    #
+    # Recover solely from durable signed transaction material and
+    # rebroadcast that exact refund.
+    #
+    retry = prod_cmd(
+        "refund-btc",
+        swap_id,
+        role="bob",
+    )
+
+    output = retry.stdout + retry.stderr
+
+    h.require(
+        "Bitcoin REFUND REBROADCAST FROM DURABLE STATE"
+        in output,
+        "refund-btc did not use durable signed-transaction recovery",
+    )
+
+    h.require(
+        "PASS: exact stored signed transaction was rebroadcast"
+        in output,
+        "refund-btc did not report exact durable rebroadcast",
+    )
+
+    after = h.load_state(
+        swap_id,
+        "bob",
+    )
+
+    require_same_pending(
+        state=after,
+        expected_state="BTC_FUNDED",
+        tx_field="btc_refund_txid",
+        block_field="btc_refund_blockhash",
+        txid=first_txid,
+        label="BTC refund durable rebroadcast",
+    )
+
+    h.require(
+        after.get("btc_refund_hex") == signed_hex,
+        "durable rebroadcast changed signed BTC refund hex",
+    )
+
+    mempool = h.btc_cli(
+        "getmempoolentry",
+        first_txid,
+    )
+
+    h.require(
+        bool(mempool),
+        "exact durable BTC refund was not restored to mempool",
+    )
+
+    h.ensure_test_wallets()
+
+    print(
+        "PASS: BTC refund survived mempool loss without signing wallet"
+    )
+
+
+def restart_local_btc_without_mempool():
+    """
+    Restart the local Bitcoin regtest daemon with mempool persistence
+    disabled.
+
+    The swap state survives, but the node forgets its pending
+    transaction and all wallets start unloaded.
+    """
+
+    if h.BTC_DATADIR is None:
+        h.skip(
+            "durable BTC settlement rebroadcast test needs a local Bitcoin datadir"
+        )
+
+    if h.BTC_RPC_ARGS:
+        h.skip(
+            "durable BTC settlement rebroadcast test does not restart remote/custom-RPC Bitcoin nodes"
+        )
+
+    bitcoind = h.BTC_CLI.parent / "bitcoind"
+
+    if not bitcoind.exists():
+        h.skip(
+            "Bitcoin bitcoind executable not found next to bitcoin-cli",
+            details=[f"expected: {bitcoind}"],
+        )
+
+    h.btc_cli("stop")
+
+    deadline = time.time() + 20
+
+    while time.time() < deadline:
+        still_running = False
+        datadir_arg = f"-datadir={h.BTC_DATADIR}"
+
+        for proc in Path("/proc").iterdir():
+            if not proc.name.isdigit():
+                continue
+
+            try:
+                cmdline = (
+                    proc / "cmdline"
+                ).read_bytes().replace(
+                    b"\x00",
+                    b" ",
+                ).decode(
+                    "utf-8",
+                    errors="replace",
+                )
+            except (OSError, PermissionError):
+                continue
+
+            if (
+                "bitcoind" in cmdline
+                and datadir_arg in cmdline
+            ):
+                still_running = True
+                break
+
+        if not still_running:
+            break
+
+        time.sleep(0.2)
+    else:
+        raise h.TestFailure(
+            "Bitcoin daemon still holds the test datadir after stop"
+        )
+
+    h.run([
+        bitcoind,
+        "-regtest",
+        f"-datadir={h.BTC_DATADIR}",
+        "-server=1",
+        "-fallbackfee=0.0001",
+        "-txindex=0",
+        "-persistmempool=0",
+        "-daemon",
+    ])
+
+    deadline = time.time() + 20
+
+    while time.time() < deadline:
+        try:
+            h.btc_cli("getblockcount")
+            return
+        except Exception:
+            time.sleep(0.2)
+
+    raise h.TestFailure(
+        "Bitcoin daemon did not restart"
+    )
 
 
 def restart_local_blake_without_mempool():
@@ -1066,8 +1489,10 @@ def main():
     h.ok("preflight")
 
     test_pending_btc_claim()
+    test_btc_claim_durable_rebroadcast_after_mempool_loss()
     test_pending_blake_claim()
     test_pending_btc_refund()
+    test_btc_refund_durable_rebroadcast_after_mempool_loss()
     test_pending_blake_refund()
     test_blake_claim_durable_rebroadcast_after_mempool_loss()
     test_blake_refund_durable_rebroadcast_after_mempool_loss()

@@ -515,6 +515,15 @@ class Swap:
 
     btc_claim_txid: str | None = None
     btc_claim_blockhash: str | None = None
+
+    # Exact signed Bitcoin claim transaction prepared by Alice.
+    #
+    # This is durable recovery material. If the node loses its
+    # mempool and Alice's wallet is unavailable, the engine can
+    # independently verify and rebroadcast this exact transaction
+    # rather than constructing a competing spend.
+    btc_claim_hex: str | None = None
+
     blake_claim_txid: str | None = None
     blake_claim_blockhash: str | None = None
 
@@ -536,6 +545,14 @@ class Swap:
     blake_refund_txid: str | None = None
     btc_refund_blockhash: str | None = None
     blake_refund_blockhash: str | None = None
+
+    # Exact signed Bitcoin refund transaction prepared by Bob.
+    #
+    # This is durable recovery material. If the node loses its
+    # mempool and Bob's wallet is unavailable, the engine can
+    # independently verify and rebroadcast this exact transaction
+    # rather than constructing a competing spend.
+    btc_refund_hex: str | None = None
 
     # Exact signed BLAKE refund transaction prepared by Alice.
     #
@@ -9518,21 +9535,56 @@ def command_claim_btc(args):
     print("fee source:  ", fee_plan["source"])
     print()
 
-    txid = btc_cli(
-        "sendrawtransaction",
+    #
+    # Derive and persist the exact transaction identity BEFORE
+    # broadcast. Broadcasting exposes S in the Bitcoin mempool,
+    # but durable protocol state remains BTC_FUNDED until the
+    # exact transaction is confirmed on the active chain.
+    #
+    decoded_claim = btc_cli(
+        "decoderawtransaction",
         claim_hex,
     )
 
-    # Broadcasting exposes S in the Bitcoin mempool, but that
-    # is not yet confirmed settlement truth. Persist only the
-    # exact transaction identity; keep durable state BTC_FUNDED.
+    txid = decoded_claim.get("txid")
+
+    if not txid:
+        raise RuntimeError(
+            "Signed Bitcoin claim has no decodable txid"
+        )
+
+    actual = classify_htlc_spend(
+        decoded_claim,
+        swap.btc_funding_txid,
+        swap.btc_funding_vout,
+        swap.secret_hash,
+    )
+
+    if actual != "claim":
+        raise RuntimeError(
+            "SECURITY FAILURE: signed Bitcoin claim "
+            f"classified as {actual}"
+        )
+
     swap.btc_claim_txid = txid
     swap.btc_claim_blockhash = None
+    swap.btc_claim_hex = claim_hex
 
     save_swap(
         swap,
         role="alice",
     )
+
+    broadcast_txid = btc_cli(
+        "sendrawtransaction",
+        claim_hex,
+    )
+
+    if broadcast_txid != txid:
+        raise RuntimeError(
+            "SECURITY FAILURE: Bitcoin claim broadcast "
+            "returned a different txid"
+        )
 
     _test_crash_after_broadcast("btc-claim-after-broadcast")
 
@@ -9834,21 +9886,55 @@ def command_refund_btc(args):
             "Bitcoin refund was unexpectedly accepted early"
         )
 
-    txid = btc_cli(
-        "sendrawtransaction",
+    #
+    # Derive and persist the exact transaction identity BEFORE
+    # broadcast. Durable protocol state remains BTC_FUNDED until
+    # the exact refund is confirmed on the active Bitcoin chain.
+    #
+    decoded_refund = btc_cli(
+        "decoderawtransaction",
         refund_hex,
     )
 
-    # Persist exact broadcast identity before any crash point.
-    # Durable protocol state remains BTC_FUNDED until the
-    # exact refund is confirmed on the active Bitcoin chain.
+    txid = decoded_refund.get("txid")
+
+    if not txid:
+        raise RuntimeError(
+            "Signed Bitcoin refund has no decodable txid"
+        )
+
+    actual = classify_htlc_spend(
+        decoded_refund,
+        swap.btc_funding_txid,
+        swap.btc_funding_vout,
+        swap.secret_hash,
+    )
+
+    if actual != "refund":
+        raise RuntimeError(
+            "SECURITY FAILURE: signed Bitcoin refund "
+            f"classified as {actual}"
+        )
+
     swap.btc_refund_txid = txid
     swap.btc_refund_blockhash = None
+    swap.btc_refund_hex = refund_hex
 
     save_swap(
         swap,
         role="bob",
     )
+
+    broadcast_txid = btc_cli(
+        "sendrawtransaction",
+        refund_hex,
+    )
+
+    if broadcast_txid != txid:
+        raise RuntimeError(
+            "SECURITY FAILURE: Bitcoin refund broadcast "
+            "returned a different txid"
+        )
 
     _test_crash_after_broadcast("btc-refund-after-broadcast")
 

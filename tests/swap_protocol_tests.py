@@ -1117,6 +1117,59 @@ def test_happy() -> None:
 
     ok("BTC claim secret_hash mismatch rejected")
 
+    # Settlement announcements are also bound to the exact public swap
+    # identifier. A message for another swap must not be imported here.
+    original = mutate_message(
+        claim_msg,
+        lambda d: d.__setitem__(
+            "swap_id",
+            "deadbeefcafe",
+        ),
+    )
+
+    try:
+        proc = swap_cmd(
+            "receive-btc-claimed",
+            swap_id,
+            role="bob",
+            expect_ok=False,
+        )
+
+        expect_failure(
+            "BTC claim swap_id mismatch",
+            proc,
+            "swap_id",
+        )
+
+        assert_state(
+            swap_id,
+            "bob",
+            "BTC_FUNDED",
+        )
+
+        rejected = load_state(
+            swap_id,
+            "bob",
+        )
+
+        require(
+            rejected.get("btc_claim_txid") is None,
+            "wrong-swap BTC claim persisted claim txid",
+        )
+
+        require(
+            rejected.get("revealed_secret_hex") is None,
+            "wrong-swap BTC claim changed Bob's secret knowledge",
+        )
+
+    finally:
+        restore_message(
+            claim_msg,
+            original,
+        )
+
+    ok("BTC claim swap_id mismatch rejected")
+
     swap_cmd("receive-btc-claimed", swap_id, role="bob")
     assert_state(swap_id, "bob", "BTC_CLAIMED")
     ok("Bob independently imports BTC claim")

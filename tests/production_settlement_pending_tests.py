@@ -2,6 +2,7 @@
 
 import sys
 import time
+from pathlib import Path
 
 import swap_protocol_tests as h
 
@@ -457,17 +458,43 @@ def restart_local_blake_without_mempool():
 
     h.blake_cli("stop")
 
-    deadline = time.time() + 15
+    deadline = time.time() + 20
 
     while time.time() < deadline:
-        try:
-            h.blake_cli("getblockcount")
-        except Exception:
+        still_running = False
+        datadir_arg = f"-datadir={h.BLAKE_DATADIR}"
+
+        for proc in Path("/proc").iterdir():
+            if not proc.name.isdigit():
+                continue
+
+            try:
+                cmdline = (
+                    proc / "cmdline"
+                ).read_bytes().replace(
+                    b"\x00",
+                    b" ",
+                ).decode(
+                    "utf-8",
+                    errors="replace",
+                )
+            except (OSError, PermissionError):
+                continue
+
+            if (
+                "bitcoind" in cmdline
+                and datadir_arg in cmdline
+            ):
+                still_running = True
+                break
+
+        if not still_running:
             break
+
         time.sleep(0.2)
     else:
         raise h.TestFailure(
-            "BLAKE daemon did not stop"
+            "BLAKE daemon still holds the test datadir after stop"
         )
 
     h.run([
@@ -675,8 +702,228 @@ def test_blake_claim_durable_rebroadcast_after_mempool_loss():
         "exact durable BLAKE claim was not restored to mempool",
     )
 
+    h.ensure_test_wallets()
+
     print(
         "PASS: BLAKE claim survived mempool loss without signing wallet"
+    )
+
+
+
+def test_blake_refund_durable_rebroadcast_after_mempool_loss():
+    banner(
+        "PRODUCTION BLAKE REFUND: DURABLE REBROADCAST AFTER MEMPOOL LOSS"
+    )
+
+    swap_id = h.make_fresh_swap()
+    print("swap:", swap_id)
+
+    h.handshake(swap_id)
+    h.fund_blake_and_sync(swap_id)
+    h.fund_btc_and_sync(swap_id)
+
+    #
+    # Reach Alice's BTC_REFUNDED state through Bob's normal
+    # confirmed Bitcoin refund.
+    #
+    bob = h.load_state(
+        swap_id,
+        "bob",
+    )
+
+    current_btc = int(
+        h.btc_cli("getblockcount")
+    )
+
+    remaining_btc = (
+        int(bob["btc_timeout"])
+        - current_btc
+    )
+
+    if remaining_btc > 0:
+        h.mine_btc(remaining_btc)
+
+    h.swap_cmd(
+        "refund-btc",
+        swap_id,
+        role="bob",
+    )
+    h.swap_cmd(
+        "publish-btc-refunded",
+        swap_id,
+        role="bob",
+    )
+    h.swap_cmd(
+        "receive-btc-refunded",
+        swap_id,
+        role="alice",
+    )
+
+    h.assert_state(
+        swap_id,
+        "alice",
+        "BTC_REFUNDED",
+    )
+
+    #
+    # Mature Alice's BLAKE refund timelock.
+    #
+    alice = h.load_state(
+        swap_id,
+        "alice",
+    )
+
+    current_blake = int(
+        h.blake_cli("getblockcount")
+    )
+
+    remaining_blake = (
+        int(alice["blake_timeout"])
+        - current_blake
+    )
+
+    if remaining_blake > 0:
+        h.mine_blake(remaining_blake)
+
+    #
+    # Broadcast the refund but deliberately leave it unconfirmed.
+    #
+    first = prod_cmd(
+        "refund-blake",
+        swap_id,
+        role="alice",
+    )
+
+    h.require(
+        "awaiting active-chain confirmation"
+        in (first.stdout + first.stderr).lower(),
+        "initial BLAKE refund did not remain pending",
+    )
+
+    pending = h.load_state(
+        swap_id,
+        "alice",
+    )
+
+    first_txid = require_pending(
+        state=pending,
+        expected_state="BTC_REFUNDED",
+        tx_field="blake_refund_txid",
+        block_field="blake_refund_blockhash",
+        label="BLAKE refund",
+    )
+
+    signed_hex = pending.get(
+        "blake_refund_hex"
+    )
+
+    h.require(
+        signed_hex,
+        "pending BLAKE refund did not persist signed transaction hex",
+    )
+
+    decoded = h.blake_cli(
+        "decoderawtransaction",
+        signed_hex,
+    )
+
+    h.require(
+        decoded.get("txid") == first_txid,
+        "persisted BLAKE refund hex does not match persisted txid",
+    )
+
+    h.require(
+        h.blake_cli(
+            "getmempoolentry",
+            first_txid,
+        ),
+        "initial BLAKE refund is not in the mempool",
+    )
+
+    #
+    # Destroy node mempool state. Wallets are deliberately NOT
+    # reloaded after restart.
+    #
+    restart_local_blake_without_mempool()
+
+    try:
+        h.blake_cli(
+            "getmempoolentry",
+            first_txid,
+        )
+    except Exception:
+        pass
+    else:
+        raise h.TestFailure(
+            "BLAKE refund unexpectedly survived mempool-loss restart"
+        )
+
+    loaded = h.blake_cli(
+        "listwallets"
+    )
+
+    h.require(
+        h.ALICE_WALLET not in loaded,
+        "Alice BLAKE wallet unexpectedly loaded after restart",
+    )
+
+    #
+    # The engine must verify the durable signed refund and rebroadcast
+    # that exact transaction without Alice's signing wallet.
+    #
+    retry = prod_cmd(
+        "refund-blake",
+        swap_id,
+        role="alice",
+    )
+
+    output = retry.stdout + retry.stderr
+
+    h.require(
+        "BLAKE REFUND REBROADCAST FROM DURABLE STATE"
+        in output,
+        "refund-blake did not use durable signed-transaction recovery",
+    )
+
+    h.require(
+        "PASS: exact stored signed transaction was rebroadcast"
+        in output,
+        "refund-blake did not report exact durable rebroadcast",
+    )
+
+    after = h.load_state(
+        swap_id,
+        "alice",
+    )
+
+    require_same_pending(
+        state=after,
+        expected_state="BTC_REFUNDED",
+        tx_field="blake_refund_txid",
+        block_field="blake_refund_blockhash",
+        txid=first_txid,
+        label="BLAKE refund durable rebroadcast",
+    )
+
+    h.require(
+        after.get("blake_refund_hex") == signed_hex,
+        "durable rebroadcast changed signed BLAKE refund hex",
+    )
+
+    mempool = h.blake_cli(
+        "getmempoolentry",
+        first_txid,
+    )
+
+    h.require(
+        bool(mempool),
+        "exact durable BLAKE refund was not restored to mempool",
+    )
+
+    h.ensure_test_wallets()
+
+    print(
+        "PASS: BLAKE refund survived mempool loss without signing wallet"
     )
 
 
@@ -823,6 +1070,7 @@ def main():
     test_pending_btc_refund()
     test_pending_blake_refund()
     test_blake_claim_durable_rebroadcast_after_mempool_loss()
+    test_blake_refund_durable_rebroadcast_after_mempool_loss()
 
     print()
     print("=" * 72)

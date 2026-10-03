@@ -537,6 +537,14 @@ class Swap:
     btc_refund_blockhash: str | None = None
     blake_refund_blockhash: str | None = None
 
+    # Exact signed BLAKE refund transaction prepared by Alice.
+    #
+    # This is durable recovery material. If the node loses its
+    # mempool and Alice's wallet is unavailable, the engine can
+    # independently verify and rebroadcast this exact transaction
+    # rather than constructing a competing spend.
+    blake_refund_hex: str | None = None
+
     # Exact prior BLAKE refund remembered across a reorg rollback.
     # This is a recovery hint, not authoritative settlement state.
     blake_reorg_refund_txid: str | None = None
@@ -2633,9 +2641,9 @@ def require_recovered_branch(
         # state also contains the exact signed transaction, verify that
         # transaction independently before rebroadcasting it.
         #
-        # For now only BLAKE claim stores this recovery material.  The
-        # getattr keeps older swap records and the other settlement
-        # branches backward-compatible.
+        # Settlement branches may store this recovery material.
+        # getattr keeps older swap records and branches without durable
+        # signed hex backward-compatible.
         #
         recorded_hex = getattr(
             swap,
@@ -8892,21 +8900,56 @@ def command_refund_blake(args):
         print("Refund is correctly timelocked.")
         return
 
-    txid = blake_cli(
-        "sendrawtransaction",
+    #
+    # Derive and persist the exact transaction identity BEFORE
+    # broadcast. This closes the crash window between signing and
+    # durable recording: every retry is now bound to this exact
+    # refund even if sendrawtransaction or the node dies.
+    #
+    decoded_refund = blake_cli(
+        "decoderawtransaction",
         refund_hex,
     )
 
-    # Persist exact broadcast identity before any crash point.
-    # Durable protocol state remains unchanged until the
-    # exact refund is confirmed on the active BLAKE chain.
+    txid = decoded_refund.get("txid")
+
+    if not txid:
+        raise RuntimeError(
+            "Signed BLAKE refund has no decodable txid"
+        )
+
+    actual = classify_htlc_spend(
+        decoded_refund,
+        swap.blake_funding_txid,
+        swap.blake_funding_vout,
+        swap.secret_hash,
+    )
+
+    if actual != "refund":
+        raise RuntimeError(
+            "SECURITY FAILURE: signed BLAKE refund "
+            f"classified as {actual}"
+        )
+
     swap.blake_refund_txid = txid
     swap.blake_refund_blockhash = None
+    swap.blake_refund_hex = refund_hex
 
     save_swap(
         swap,
         role="alice",
     )
+
+    broadcast_txid = blake_cli(
+        "sendrawtransaction",
+        refund_hex,
+    )
+
+    if broadcast_txid != txid:
+        raise RuntimeError(
+            "SECURITY FAILURE: BLAKE refund broadcast "
+            "returned a different txid"
+        )
 
     _test_crash_after_broadcast("blake-refund-after-broadcast")
 

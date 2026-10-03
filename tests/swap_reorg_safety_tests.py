@@ -5,6 +5,9 @@ import sys
 import time
 from pathlib import Path
 
+SRC_DIR = Path(__file__).resolve().parents[1] / "src"
+sys.path.insert(0, str(SRC_DIR))
+
 import swap_protocol_tests as h
 
 
@@ -1876,6 +1879,70 @@ def test_final_blake_refund_durable_rebroadcast_after_reorg_mempool_loss():
         h.ensure_test_wallets()
 
 
+
+def test_funding_anchor_rejects_disconnected_block():
+    banner(
+        "REORG: FUNDING ANCHOR REJECTS "
+        "DISCONNECTED BLOCK"
+    )
+
+    import swap_v2
+
+    original_dispatch = swap_v2.chain_dispatch
+
+    def fake_cli(*args):
+        h.require(
+            args[0] == "getrawtransaction",
+            "funding anchor verifier made unexpected RPC call",
+        )
+
+        return {
+            "txid": "11" * 32,
+            "in_active_chain": False,
+            "confirmations": 1,
+        }
+
+    def fake_dispatch(chain):
+        h.require(
+            chain == "blake",
+            "funding anchor test used unexpected chain",
+        )
+
+        return {
+            "cli": fake_cli,
+        }
+
+    swap_v2.chain_dispatch = fake_dispatch
+
+    try:
+        try:
+            swap_v2.verify_confirmed_funding_anchor(
+                object(),
+                "blake",
+                "11" * 32,
+                0,
+                "22" * 32,
+            )
+        except RuntimeError as e:
+            h.require(
+                "not on the active chain" in str(e),
+                "disconnected funding anchor failed "
+                "for unexpected reason",
+            )
+        else:
+            raise h.TestFailure(
+                "disconnected funding block was accepted"
+            )
+
+        ok(
+            "funding anchor rejects disconnected "
+            "block before state advancement"
+        )
+
+    finally:
+        swap_v2.chain_dispatch = original_dispatch
+
+
 def main():
     global FAIL
 
@@ -1885,6 +1952,10 @@ def main():
     ok("preflight")
 
     tests = [
+        (
+            "DISCONNECTED FUNDING ANCHOR",
+            test_funding_anchor_rejects_disconnected_block,
+        ),
         (
             "BLAKE FUNDING REORG",
             test_blake_funding_reorg,

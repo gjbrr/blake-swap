@@ -3582,6 +3582,83 @@ def find_wallet_payment(
     return None
 
 
+def verify_confirmed_funding_anchor(
+    swap,
+    chain,
+    txid,
+    vout,
+    blockhash,
+):
+    """
+    Prove that an exact funding outpoint is confirmed in a block which
+    remains on the active chain before durable protocol state advances.
+
+    A wallet-reported blockhash is only a recovery hint. The chain is
+    authoritative.
+    """
+    if not txid:
+        raise RuntimeError(
+            f"SECURITY FAILURE: {chain.upper()} funding has no txid"
+        )
+
+    if vout is None:
+        raise RuntimeError(
+            f"SECURITY FAILURE: {chain.upper()} funding has no vout"
+        )
+
+    if not blockhash:
+        raise RuntimeError(
+            f"SECURITY FAILURE: {chain.upper()} funding has no "
+            "confirmed block anchor"
+        )
+
+    fields = chain_dispatch(chain)
+    cli = fields["cli"]
+
+    tx = cli(
+        "getrawtransaction",
+        txid,
+        True,
+        blockhash,
+    )
+
+    if tx.get("in_active_chain") is False:
+        raise RuntimeError(
+            "SECURITY FAILURE: "
+            f"{chain.upper()} funding transaction is not "
+            "on the active chain"
+        )
+
+    confirmations = int(
+        tx.get("confirmations", 0) or 0
+    )
+
+    if confirmations < 1:
+        raise RuntimeError(
+            "SECURITY FAILURE: "
+            f"{chain.upper()} funding transaction is not "
+            "confirmed on the active chain"
+        )
+
+    output = _decoded_output(
+        tx,
+        int(vout),
+    )
+
+    _require_funding_output_matches(
+        swap,
+        chain,
+        output,
+    )
+
+    return {
+        "txid": txid,
+        "vout": int(vout),
+        "blockhash": blockhash,
+        "confirmations": confirmations,
+    }
+
+
 def recover_blake_funding(swap, address):
     found = find_wallet_payment(
         blake_cli,
@@ -4016,6 +4093,14 @@ def command_fund_blake(args):
             "active-chain confirmation."
         )
         return
+
+    verify_confirmed_funding_anchor(
+        swap,
+        "blake",
+        txid,
+        contract_vout,
+        blockhash,
+    )
 
     swap.blake_funding_txid = txid
     swap.blake_funding_vout = contract_vout
@@ -7451,6 +7536,14 @@ def command_fund_btc(args):
             swap.btc_sats,
         )
 
+        funding_target = funding_fee_target_blocks("btc")
+
+        print(
+            "Bitcoin funding confirmation target:",
+            funding_target,
+            "block(s)",
+        )
+
         funding_rate, funding_rate_source = funding_fee_rate(
             btc_cli,
             "btc",
@@ -7550,6 +7643,14 @@ def command_fund_btc(args):
             "active-chain confirmation."
         )
         return
+
+    verify_confirmed_funding_anchor(
+        swap,
+        "btc",
+        txid,
+        contract_vout,
+        blockhash,
+    )
 
     swap.btc_funding_txid = txid
     swap.btc_funding_vout = contract_vout

@@ -655,6 +655,92 @@ class Swap:
         if self.btc_sats <= 0:
             raise ValueError("BTC amount must be positive")
 
+        def require_32_byte_hex(field_name, value):
+            if value is None:
+                return
+
+            if not isinstance(value, str):
+                raise ValueError(
+                    f"{field_name} must be 32-byte hex"
+                )
+
+            try:
+                raw = bytes.fromhex(value)
+            except ValueError:
+                raise ValueError(
+                    f"{field_name} must be 32-byte hex"
+                ) from None
+
+            if len(raw) != 32:
+                raise ValueError(
+                    f"{field_name} must be 32-byte hex"
+                )
+
+        for field_name, value in (
+            ("blake_funding_txid", self.blake_funding_txid),
+            ("btc_funding_txid", self.btc_funding_txid),
+            ("btc_claim_txid", self.btc_claim_txid),
+            ("blake_claim_txid", self.blake_claim_txid),
+            ("btc_refund_txid", self.btc_refund_txid),
+            ("blake_refund_txid", self.blake_refund_txid),
+            ("blake_reorg_claim_txid", self.blake_reorg_claim_txid),
+            ("blake_reorg_refund_txid", self.blake_reorg_refund_txid),
+        ):
+            require_32_byte_hex(
+                field_name,
+                value,
+            )
+
+        settlement_hex_fields = (
+            (
+                "btc_claim_hex",
+                self.btc_claim_hex,
+                self.btc_claim_txid,
+            ),
+            (
+                "btc_refund_hex",
+                self.btc_refund_hex,
+                self.btc_refund_txid,
+            ),
+            (
+                "blake_claim_hex",
+                self.blake_claim_hex,
+                (
+                    self.blake_claim_txid
+                    or self.blake_reorg_claim_txid
+                ),
+            ),
+            (
+                "blake_refund_hex",
+                self.blake_refund_hex,
+                (
+                    self.blake_refund_txid
+                    or self.blake_reorg_refund_txid
+                ),
+            ),
+        )
+
+        for field_name, tx_hex, identity_anchor in settlement_hex_fields:
+            if tx_hex is None:
+                continue
+
+            if not identity_anchor:
+                raise ValueError(
+                    f"{field_name} requires a settlement txid identity anchor"
+                )
+
+            if not isinstance(tx_hex, str) or not tx_hex:
+                raise ValueError(
+                    f"{field_name} must be valid hex"
+                )
+
+            try:
+                bytes.fromhex(tx_hex)
+            except ValueError:
+                raise ValueError(
+                    f"{field_name} must be valid hex"
+                ) from None
+
     def transition(self, new_state):
         current = State(self.state)
         target = State(new_state)

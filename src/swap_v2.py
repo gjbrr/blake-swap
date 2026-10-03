@@ -4606,6 +4606,11 @@ def command_show(args):
 
 
 def command_advance(args):
+    if os.environ.get("BLAKE_SWAP_TEST_MODE") != "1":
+        raise RuntimeError(
+            "advance is available only in BLAKE_SWAP_TEST_MODE=1"
+        )
+
     swap = load_swap(
         args.swap_id,
         role=args.role,
@@ -22699,27 +22704,31 @@ def main():
     p.add_argument("swap_id")
     p.set_defaults(func=command_show)
 
-    # advance
-    p = sub.add_parser(
-        "advance",
-        help="Advance swap state"
-    )
+    # Test-only state transition probe.
+    #
+    # This intentionally bypasses chain-evidence checks and therefore
+    # must never be exposed as a production command.
+    if os.environ.get("BLAKE_SWAP_TEST_MODE") == "1":
+        p = sub.add_parser(
+            "advance",
+            help="TEST ONLY: advance swap state"
+        )
 
-    p.add_argument("swap_id")
+        p.add_argument("swap_id")
 
-    p.add_argument(
-        "state",
-        choices=[x.value for x in State],
-    )
+        p.add_argument(
+            "state",
+            choices=[x.value for x in State],
+        )
 
-    p.add_argument(
-        "--role",
-        choices=["alice", "bob"],
-        required=True,
-        help="Protocol role whose local state is advanced",
-    )
+        p.add_argument(
+            "--role",
+            choices=["alice", "bob"],
+            required=True,
+            help="Protocol role whose local state is advanced",
+        )
 
-    p.set_defaults(func=command_advance)
+        p.set_defaults(func=command_advance)
 
     # list
     p = sub.add_parser(

@@ -270,6 +270,10 @@ def swap_cmd(
     # operator's configured public Nostr relays.
     env["BLAKE_SWAP_NOSTR_RELAYS"] = "ws://127.0.0.1:1"
 
+    # Test-only CLI surfaces such as `advance` must never be exposed
+    # in normal production execution.
+    env["BLAKE_SWAP_TEST_MODE"] = "1"
+
     env["BLAKE_SWAP_MESSAGE_DIR"] = str(
         MESSAGE_DIR
     )

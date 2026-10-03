@@ -1123,6 +1123,200 @@ def test_unknown_btc_spender_without_funding_blockhash():
 
 
 
+
+def test_unknown_btc_spender_with_invalid_branch():
+    """
+    A confirmed transaction spends the exact Bitcoin HTLC outpoint, but
+    its witness does not match either valid protocol branch.
+
+    Reconciliation must fail closed instead of treating an unknown witness
+    as a claim or refund.
+    """
+
+    h.banner(
+        "ADVERSARIAL RECOVERY: UNKNOWN BTC SPENDER "
+        "WITH INVALID BRANCH"
+    )
+
+    spec = importlib.util.spec_from_file_location(
+        "swap_v2_unknown_btc_invalid_branch",
+        str(h.SWAP_V2),
+    )
+
+    h.require(
+        spec is not None and spec.loader is not None,
+        "could not create import spec for swap_v2.py",
+    )
+
+    engine = importlib.util.module_from_spec(spec)
+
+    src_dir = str(h.SWAP_V2.parent)
+    inserted_src = False
+
+    if src_dir not in sys.path:
+        sys.path.insert(0, src_dir)
+        inserted_src = True
+
+    sys.modules[spec.name] = engine
+
+    try:
+        spec.loader.exec_module(engine)
+
+        funding_txid = "91" * 32
+        funding_vout = 0
+        spend_txid = "92" * 32
+        spend_blockhash = "93" * 32
+
+        secret = bytes.fromhex("94" * 32)
+        secret_hash = hashlib.sha256(secret).hexdigest()
+
+        swap = SimpleNamespace(
+            swap_id="adversarial-unknown-btc-branch",
+
+            btc_funding_txid=funding_txid,
+            btc_funding_vout=funding_vout,
+            btc_funding_blockhash=None,
+
+            btc_claim_txid=None,
+            btc_claim_blockhash=None,
+            btc_refund_txid=None,
+            btc_refund_blockhash=None,
+
+            btc_scan_start_height=100,
+
+            secret_hash=secret_hash,
+            btc_sats=3000,
+            blake_amount=0.0001,
+        )
+
+        def fake_btc_cli(*args, wallet=None):
+            h.require(
+                bool(args),
+                "mock Bitcoin RPC called without method",
+            )
+
+            method = args[0]
+
+            if method == "gettxout":
+                return None
+
+            if method == "getrawtransaction":
+                raise RuntimeError(
+                    "No such mempool or blockchain transaction. "
+                    "Use -txindex or provide a block hash."
+                )
+
+            if method == "getblockcount":
+                return 101
+
+            if method == "getblockhash":
+                height = int(args[1])
+
+                if height == 100:
+                    return "95" * 32
+
+                if height == 101:
+                    return spend_blockhash
+
+                raise h.TestFailure(
+                    f"unexpected Bitcoin block height: {height}"
+                )
+
+            if method == "getblock":
+                blockhash = args[1]
+
+                if blockhash == "95" * 32:
+                    return {
+                        "height": 100,
+                        "tx": [],
+                    }
+
+                if blockhash == spend_blockhash:
+                    return {
+                        "height": 101,
+                        "tx": [
+                            {
+                                "txid": spend_txid,
+                                "vin": [
+                                    {
+                                        "txid": funding_txid,
+                                        "vout": funding_vout,
+                                        # Invalid selector. This spends the
+                                        # expected outpoint but matches
+                                        # neither claim nor refund shape.
+                                        "txinwitness": [
+                                            "30" * 71,
+                                            "02",
+                                            "51",
+                                        ],
+                                    }
+                                ],
+                            }
+                        ],
+                    }
+
+                raise h.TestFailure(
+                    f"unexpected Bitcoin blockhash: {blockhash}"
+                )
+
+            raise h.TestFailure(
+                f"unexpected mock Bitcoin RPC method: {method}"
+            )
+
+        original_btc_cli = engine.btc_cli
+
+        try:
+            engine.btc_cli = fake_btc_cli
+
+            try:
+                observed = engine._reconcile_observe_htlc(
+                    swap,
+                    "btc",
+                )
+            except RuntimeError as e:
+                text = str(e).lower()
+
+                h.require(
+                    "unknown" in text
+                    or "branch" in text
+                    or "security failure" in text,
+                    (
+                        "invalid HTLC branch failed for "
+                        f"unexpected reason: {e}"
+                    ),
+                )
+            else:
+                h.require(
+                    observed.get("status") != "spent"
+                    or observed.get("branch") not in {
+                        "claim",
+                        "refund",
+                    },
+                    (
+                        "invalid confirmed spender was accepted "
+                        f"as protocol settlement: {observed}"
+                    ),
+                )
+
+        finally:
+            engine.btc_cli = original_btc_cli
+
+        h.ok(
+            "unknown confirmed BTC spender with invalid witness "
+            "is not accepted as claim or refund"
+        )
+
+    finally:
+        sys.modules.pop(spec.name, None)
+
+        if inserted_src:
+            try:
+                sys.path.remove(src_dir)
+            except ValueError:
+                pass
+
+
+
 def main():
     h.PASS_COUNT = 0
     h.FAIL_COUNT = 0
@@ -1141,6 +1335,10 @@ def main():
         (
             "UNKNOWN BTC SPENDER WITHOUT FUNDING BLOCKHASH",
             test_unknown_btc_spender_without_funding_blockhash,
+        ),
+        (
+            "UNKNOWN BTC SPENDER INVALID BRANCH",
+            test_unknown_btc_spender_with_invalid_branch,
         ),
     ]
 

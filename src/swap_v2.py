@@ -18322,6 +18322,22 @@ def command_sync_funding(args):
                 )
                 break
 
+            verify_confirmed_funding_anchor(
+                swap,
+                "blake",
+                recovered["txid"],
+                recovered["vout"],
+                recovered["blockhash"],
+            )
+
+            verify_confirmed_funding_anchor(
+                swap,
+                "blake",
+                recovered["txid"],
+                recovered["vout"],
+                recovered["blockhash"],
+            )
+
             swap.blake_funding_txid = recovered[
                 "txid"
             ]
@@ -18426,6 +18442,22 @@ def command_sync_funding(args):
                     "No confirmed Bitcoin funding output found."
                 )
                 break
+
+            verify_confirmed_funding_anchor(
+                swap,
+                "btc",
+                recovered["txid"],
+                recovered["vout"],
+                recovered["blockhash"],
+            )
+
+            verify_confirmed_funding_anchor(
+                swap,
+                "btc",
+                recovered["txid"],
+                recovered["vout"],
+                recovered["blockhash"],
+            )
 
             swap.btc_funding_txid = recovered[
                 "txid"

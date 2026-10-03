@@ -7062,6 +7062,14 @@ def command_receive_blake_funded(args):
             "the announced funding transaction"
         )
 
+    verify_confirmed_funding_anchor(
+        swap,
+        "blake",
+        swap.blake_funding_txid,
+        swap.blake_funding_vout,
+        funding_blockhash,
+    )
+
     swap.blake_funding_blockhash = (
         funding_blockhash
     )
@@ -7896,6 +7904,14 @@ def command_receive_btc_funded(args):
             "Bitcoin funding block does not contain "
             "the announced funding transaction"
         )
+
+    verify_confirmed_funding_anchor(
+        swap,
+        "btc",
+        swap.btc_funding_txid,
+        swap.btc_funding_vout,
+        funding_blockhash,
+    )
 
     swap.btc_funding_blockhash = (
         funding_blockhash

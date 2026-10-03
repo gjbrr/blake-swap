@@ -622,6 +622,125 @@ def test_btc_claim_reorg():
         )
 
 
+
+def test_receive_btc_refund_rejects_reorged_announcement():
+    banner(
+        "REORG: STALE BTC REFUND ANNOUNCEMENT "
+        "IS REJECTED"
+    )
+
+    swap_id = h.make_fresh_swap()
+    print("swap:", swap_id)
+
+    h.handshake(swap_id)
+    h.fund_blake_and_sync(swap_id)
+    h.fund_btc_and_sync(swap_id)
+
+    bob = h.load_state(
+        swap_id,
+        "bob",
+    )
+
+    blocks = (
+        int(bob["btc_timeout"])
+        - int(
+            h.btc_cli(
+                "getblockcount"
+            )
+        )
+    )
+
+    if blocks > 0:
+        h.mine_btc(blocks)
+
+    h.swap_cmd(
+        "refund-btc",
+        swap_id,
+        role="bob",
+    )
+
+    bob = h.load_state(
+        swap_id,
+        "bob",
+    )
+
+    blockhash = bob[
+        "btc_refund_blockhash"
+    ]
+
+    h.swap_cmd(
+        "publish-btc-refunded",
+        swap_id,
+        role="bob",
+    )
+
+    h.btc_cli(
+        "invalidateblock",
+        blockhash,
+    )
+
+    try:
+        proc = h.swap_cmd(
+            "receive-btc-refunded",
+            swap_id,
+            role="alice",
+            expect_ok=False,
+        )
+
+        output = output_of(proc)
+
+        h.require(
+            proc.returncode != 0,
+            "Alice accepted a BTC refund announcement "
+            "from a reorg-disconnected block",
+        )
+
+        h.require(
+            (
+                "not on the active chain" in output
+                or "not confirmed on the active chain" in output
+            ),
+            (
+                "receive-btc-refunded failed for "
+                "unexpected reason:\n"
+                + output[-1600:]
+            ),
+        )
+
+        alice = h.load_state(
+            swap_id,
+            "alice",
+        )
+
+        h.require(
+            alice["state"] == "BTC_FUNDED",
+            "Alice advanced durable state after rejecting "
+            "a stale BTC refund announcement",
+        )
+
+        h.require(
+            alice.get("btc_refund_txid") is None,
+            "Alice persisted stale BTC refund txid",
+        )
+
+        h.require(
+            alice.get("btc_refund_blockhash") is None,
+            "Alice persisted stale BTC refund blockhash",
+        )
+
+        ok(
+            "Alice rejects reorged BTC refund announcement "
+            "before durable state advances"
+        )
+
+    finally:
+        h.btc_cli(
+            "reconsiderblock",
+            blockhash,
+        )
+
+
+
 def test_btc_refund_reorg():
     banner(
         "REORG: BTC REFUND ROLLBACK "
@@ -1971,6 +2090,10 @@ def main():
         (
             "STALE BTC CLAIM ANNOUNCEMENT",
             test_receive_btc_claim_rejects_reorged_announcement,
+        ),
+        (
+            "STALE BTC REFUND ANNOUNCEMENT",
+            test_receive_btc_refund_rejects_reorged_announcement,
         ),
         (
             "BTC CLAIM REORG",

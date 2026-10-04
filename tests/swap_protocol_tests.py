@@ -1596,6 +1596,159 @@ def test_cross_swap_btc_claim_replay() -> None:
         "genuine BTC claim from another swap rejected by exact HTLC binding"
     )
 
+    #
+    # Now advance A legitimately far enough for Bob to claim its BLAKE
+    # HTLC.  Bob learns A's secret only from A's confirmed Bitcoin claim.
+    #
+    swap_cmd(
+        "receive-btc-claimed",
+        swap_a,
+        role="bob",
+    )
+
+    swap_cmd(
+        "extract-secret",
+        swap_a,
+        role="bob",
+    )
+
+    swap_cmd(
+        "claim-blake",
+        swap_a,
+        role="bob",
+    )
+
+    swap_cmd(
+        "publish-blake-claimed",
+        swap_a,
+        role="bob",
+    )
+
+    #
+    # Alice must independently reach BTC_CLAIMED on B before a BLAKE
+    # settlement announcement could legitimately advance her state.
+    #
+    swap_cmd(
+        "claim-btc",
+        swap_b,
+        role="alice",
+    )
+
+    assert_state(
+        swap_b,
+        "alice",
+        "BTC_CLAIMED",
+    )
+
+    source_path = message_file(
+        swap_a,
+        "blake-claimed",
+    )
+
+    require(
+        source_path.exists(),
+        "swap A BLAKE claim announcement missing",
+    )
+
+    source_envelope = json.loads(
+        source_path.read_text()
+    )
+
+    #
+    # Present A's genuine confirmed BLAKE settlement as though it
+    # belonged to B.  Keep B's public swap metadata valid so the
+    # decisive rejection must come from exact on-chain HTLC binding.
+    #
+    replay = json.loads(
+        json.dumps(source_envelope)
+    )
+
+    if (
+        isinstance(replay, dict)
+        and replay.get("_file_transport_version") == 2
+        and isinstance(replay.get("message"), dict)
+    ):
+        payload = replay["message"]
+    else:
+        payload = replay
+
+    b_alice = load_state(
+        swap_b,
+        "alice",
+    )
+
+    payload["swap_id"] = swap_b
+    payload["secret_hash"] = b_alice["secret_hash"]
+
+    destination_path = message_file(
+        swap_b,
+        "blake-claimed",
+    )
+
+    original_destination = (
+        destination_path.read_text()
+        if destination_path.exists()
+        else None
+    )
+
+    try:
+        destination_path.write_text(
+            json.dumps(
+                replay,
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n"
+        )
+
+        proc = swap_cmd(
+            "receive-blake-claimed",
+            swap_b,
+            role="alice",
+            expect_ok=False,
+        )
+
+        expect_failure(
+            "cross-swap BLAKE claim replay",
+            proc,
+            "does not spend this swap's HTLC",
+        )
+
+        assert_state(
+            swap_b,
+            "alice",
+            "BTC_CLAIMED",
+        )
+
+        rejected = load_state(
+            swap_b,
+            "alice",
+        )
+
+        require(
+            rejected.get("blake_claim_txid") is None,
+            "cross-swap BLAKE claim replay persisted claim txid",
+        )
+
+        require(
+            rejected.get("blake_claim_blockhash") is None,
+            "cross-swap BLAKE claim replay persisted claim blockhash",
+        )
+
+    finally:
+        if original_destination is None:
+            destination_path.unlink(
+                missing_ok=True
+            )
+        else:
+            destination_path.write_text(
+                original_destination
+            )
+
+    ok(
+        "genuine BLAKE claim from another swap rejected by exact HTLC binding"
+    )
+
 
 def test_reorg_btc_claim() -> None:
     banner("REORG SAFETY: BTC CLAIM ROLLBACK")

@@ -1438,6 +1438,165 @@ def test_happy() -> None:
     print("happy swap:", swap_id)
 
 
+def test_cross_swap_btc_claim_replay() -> None:
+    banner("CROSS-SWAP BTC CLAIM REPLAY")
+
+    swap_a = make_fresh_swap()
+    print("swap A:", swap_a)
+
+    #
+    # Announce/accept A before creating B. `new` deliberately archives
+    # superseded unannounced placeholders, so creating both first would
+    # retire A before this adversarial test could use it.
+    #
+    handshake(swap_a)
+
+    swap_b = make_fresh_swap()
+    print("swap B:", swap_b)
+    handshake(swap_b)
+
+    #
+    # Establish two independently valid swaps through BTC_FUNDED.
+    #
+    for swap_id in (swap_a, swap_b):
+        fund_blake_and_sync(swap_id)
+        fund_btc_and_sync(swap_id)
+
+    assert_state(swap_a, "bob", "BTC_FUNDED")
+    assert_state(swap_b, "bob", "BTC_FUNDED")
+
+    #
+    # Alice legitimately claims swap A's Bitcoin HTLC and publishes
+    # the resulting confirmed settlement announcement.
+    #
+    swap_cmd(
+        "claim-btc",
+        swap_a,
+        role="alice",
+    )
+
+    swap_cmd(
+        "publish-btc-claimed",
+        swap_a,
+        role="alice",
+    )
+
+    source_path = message_file(
+        swap_a,
+        "btc-claimed",
+    )
+
+    require(
+        source_path.exists(),
+        "swap A BTC claim announcement missing",
+    )
+
+    source_envelope = json.loads(
+        source_path.read_text()
+    )
+
+    #
+    # Reframe A's genuine authenticated chain settlement as an
+    # announcement for swap B.  B's public metadata remains internally
+    # consistent, so rejection must come from independent chain proof:
+    # A's claim does not spend B's exact Bitcoin HTLC outpoint.
+    #
+    replay = json.loads(
+        json.dumps(source_envelope)
+    )
+
+    if (
+        isinstance(replay, dict)
+        and replay.get("_file_transport_version") == 2
+        and isinstance(replay.get("message"), dict)
+    ):
+        payload = replay["message"]
+    else:
+        payload = replay
+
+    b_state = load_state(
+        swap_b,
+        "bob",
+    )
+
+    payload["swap_id"] = swap_b
+    payload["secret_hash"] = b_state["secret_hash"]
+
+    destination_path = message_file(
+        swap_b,
+        "btc-claimed",
+    )
+
+    original_destination = (
+        destination_path.read_text()
+        if destination_path.exists()
+        else None
+    )
+
+    try:
+        destination_path.write_text(
+            json.dumps(
+                replay,
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n"
+        )
+
+        proc = swap_cmd(
+            "receive-btc-claimed",
+            swap_b,
+            role="bob",
+            expect_ok=False,
+        )
+
+        expect_failure(
+            "cross-swap BTC claim replay",
+            proc,
+            "does not spend this swap's HTLC",
+        )
+
+        assert_state(
+            swap_b,
+            "bob",
+            "BTC_FUNDED",
+        )
+
+        rejected = load_state(
+            swap_b,
+            "bob",
+        )
+
+        require(
+            rejected.get("btc_claim_txid") is None,
+            "cross-swap BTC claim replay persisted claim txid",
+        )
+
+        require(
+            rejected.get("btc_claim_blockhash") is None,
+            "cross-swap BTC claim replay persisted claim blockhash",
+        )
+
+        require(
+            rejected.get("revealed_secret_hex") is None,
+            "cross-swap BTC claim replay changed Bob's secret knowledge",
+        )
+
+    finally:
+        if original_destination is None:
+            destination_path.unlink(
+                missing_ok=True
+            )
+        else:
+            destination_path.write_text(
+                original_destination
+            )
+
+    ok(
+        "genuine BTC claim from another swap rejected by exact HTLC binding"
+    )
+
+
 def test_reorg_btc_claim() -> None:
     banner("REORG SAFETY: BTC CLAIM ROLLBACK")
 
@@ -2980,6 +3139,7 @@ def main() -> int:
             "pending-blake-refund",
             "reorg-btc-claim",
             "reorg-btc-refund",
+            "cross-swap-claim",
             "all",
         ],
         nargs="?",
@@ -3007,6 +3167,17 @@ def main() -> int:
                 test_happy()
             except Exception as e:
                 fail("HAPPY PATH", str(e))
+                if args.suite != "all":
+                    raise
+
+        if args.suite in ("cross-swap-claim", "all"):
+            try:
+                test_cross_swap_btc_claim_replay()
+            except Exception as e:
+                fail(
+                    "CROSS-SWAP BTC CLAIM REPLAY",
+                    str(e),
+                )
                 if args.suite != "all":
                     raise
 

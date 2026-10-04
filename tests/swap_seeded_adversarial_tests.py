@@ -18,6 +18,14 @@ import time
 
 import swap_protocol_tests as h
 
+from swap_impl_adapter import (
+    make_python_json_subprocess_pair,
+    make_python_reference_pair,
+)
+
+
+impl = None
+
 
 DEFAULT_SEEDS = (
     4,
@@ -45,12 +53,12 @@ def raw_snapshot(swap_id):
     Concrete txids/vouts are retained here for debugging, but they are
     deliberately NOT part of the portable differential fingerprint.
     """
-    alice = h.load_state(
+    alice = impl.state(
         swap_id,
         "alice",
     )
 
-    bob = h.load_state(
+    bob = impl.state(
         swap_id,
         "bob",
     )
@@ -223,17 +231,17 @@ def run_claim_seed(seed):
     rng = random.Random(seed)
     trace = []
 
-    swap_id = h.make_fresh_swap()
+    swap_id = impl.make_fresh_swap()
     trace.append("create")
 
-    h.handshake(swap_id)
+    impl.handshake(swap_id)
     trace.append("handshake")
 
     #
     # Bob must never be able to perform Alice's BLAKE funding action.
     #
     def wrong_role_blake():
-        p = h.swap_cmd(
+        p = impl.command(
             "fund-blake",
             swap_id,
             role="bob",
@@ -256,18 +264,18 @@ def run_claim_seed(seed):
         )
     )
 
-    h.fund_blake_and_sync(swap_id)
+    impl.fund_blake_and_sync(swap_id)
     trace.append("fund-and-confirm:blake")
 
     def duplicate_blake_receive():
-        h.swap_cmd(
+        impl.command(
             "receive-blake-funded",
             swap_id,
             role="bob",
         )
 
     def wrong_role_btc():
-        p = h.swap_cmd(
+        p = impl.command(
             "fund-btc",
             swap_id,
             role="alice",
@@ -294,11 +302,11 @@ def run_claim_seed(seed):
         )
     )
 
-    h.fund_btc_and_sync(swap_id)
+    impl.fund_btc_and_sync(swap_id)
     trace.append("fund-and-confirm:btc")
 
     def duplicate_btc_receive():
-        h.swap_cmd(
+        impl.command(
             "receive-btc-funded",
             swap_id,
             role="alice",
@@ -316,24 +324,24 @@ def run_claim_seed(seed):
         )
     )
 
-    h.assert_secret_separation(swap_id)
+    impl.assert_secret_separation(swap_id)
     trace.append("assert:no-transported-secret")
 
-    h.swap_cmd(
+    impl.command(
         "claim-btc",
         swap_id,
         role="alice",
     )
     trace.append("claim:btc")
 
-    h.swap_cmd(
+    impl.command(
         "publish-btc-claimed",
         swap_id,
         role="alice",
     )
     trace.append("publish:btc-claimed")
 
-    h.swap_cmd(
+    impl.command(
         "receive-btc-claimed",
         swap_id,
         role="bob",
@@ -341,7 +349,7 @@ def run_claim_seed(seed):
     trace.append("receive:btc-claimed")
 
     def duplicate_claim_receive():
-        h.swap_cmd(
+        impl.command(
             "receive-btc-claimed",
             swap_id,
             role="bob",
@@ -359,7 +367,7 @@ def run_claim_seed(seed):
         )
     )
 
-    before = h.load_state(
+    before = impl.state(
         swap_id,
         "bob",
     )
@@ -369,28 +377,28 @@ def run_claim_seed(seed):
         "Bob learned S before explicit witness extraction",
     )
 
-    h.swap_cmd(
+    impl.command(
         "extract-secret",
         swap_id,
         role="bob",
     )
     trace.append("extract-secret:bitcoin-witness")
 
-    h.swap_cmd(
+    impl.command(
         "claim-blake",
         swap_id,
         role="bob",
     )
     trace.append("claim:blake")
 
-    h.swap_cmd(
+    impl.command(
         "publish-blake-claimed",
         swap_id,
         role="bob",
     )
     trace.append("publish:blake-claimed")
 
-    h.swap_cmd(
+    impl.command(
         "receive-blake-claimed",
         swap_id,
         role="alice",
@@ -398,7 +406,7 @@ def run_claim_seed(seed):
     trace.append("receive:blake-claimed")
 
     def duplicate_blake_claim_receive():
-        h.swap_cmd(
+        impl.command(
             "receive-blake-claimed",
             swap_id,
             role="alice",
@@ -416,7 +424,7 @@ def run_claim_seed(seed):
         )
     )
 
-    h.swap_cmd(
+    impl.command(
         "complete",
         "--role",
         "alice",
@@ -424,7 +432,7 @@ def run_claim_seed(seed):
         role="alice",
     )
 
-    h.swap_cmd(
+    impl.command(
         "complete",
         "--role",
         "bob",
@@ -434,13 +442,13 @@ def run_claim_seed(seed):
 
     trace.append("complete")
 
-    h.assert_state(
+    impl.assert_state(
         swap_id,
         "alice",
         "COMPLETE",
     )
 
-    h.assert_state(
+    impl.assert_state(
         swap_id,
         "bob",
         "COMPLETE",
@@ -453,30 +461,30 @@ def run_refund_seed(seed):
     rng = random.Random(seed)
     trace = []
 
-    swap_id = h.make_fresh_swap()
+    swap_id = impl.make_fresh_swap()
     trace.append("create")
 
-    h.handshake(swap_id)
+    impl.handshake(swap_id)
     trace.append("handshake")
 
-    h.fund_blake_and_sync(swap_id)
+    impl.fund_blake_and_sync(swap_id)
     trace.append("fund-and-confirm:blake")
 
-    h.fund_btc_and_sync(swap_id)
+    impl.fund_btc_and_sync(swap_id)
     trace.append("fund-and-confirm:btc")
 
     #
     # Replay funding messages in seed-selected order before timeout.
     #
     def replay_blake():
-        h.swap_cmd(
+        impl.command(
             "receive-blake-funded",
             swap_id,
             role="bob",
         )
 
     def replay_btc():
-        h.swap_cmd(
+        impl.command(
             "receive-btc-funded",
             swap_id,
             role="alice",
@@ -492,13 +500,13 @@ def run_refund_seed(seed):
         )
     )
 
-    bob = h.load_state(
+    bob = impl.state(
         swap_id,
         "bob",
     )
 
     current = int(
-        h.btc_cli("getblockcount")
+        impl.btc_height()
     )
 
     remaining = int(
@@ -510,7 +518,7 @@ def run_refund_seed(seed):
         # The engine treats the explicit early-refund probe as a safe
         # non-settling result rather than an economic success.
         #
-        early = h.swap_cmd(
+        early = impl.command(
             "refund-btc",
             swap_id,
             role="bob",
@@ -522,7 +530,7 @@ def run_refund_seed(seed):
             "premature BTC refund was not rejected",
         )
 
-        h.assert_state(
+        impl.assert_state(
             swap_id,
             "bob",
             "BTC_FUNDED",
@@ -530,24 +538,24 @@ def run_refund_seed(seed):
 
         trace.append("reject:premature-btc-refund")
 
-        h.mine_btc(remaining)
+        impl.mine_btc(remaining)
         trace.append("advance:btc-timeout")
 
-    h.swap_cmd(
+    impl.command(
         "refund-btc",
         swap_id,
         role="bob",
     )
     trace.append("refund:btc")
 
-    h.swap_cmd(
+    impl.command(
         "publish-btc-refunded",
         swap_id,
         role="bob",
     )
     trace.append("publish:btc-refunded")
 
-    h.swap_cmd(
+    impl.command(
         "receive-btc-refunded",
         swap_id,
         role="alice",
@@ -555,7 +563,7 @@ def run_refund_seed(seed):
     trace.append("receive:btc-refunded")
 
     def duplicate_refund_receive():
-        h.swap_cmd(
+        impl.command(
             "receive-btc-refunded",
             swap_id,
             role="alice",
@@ -573,13 +581,13 @@ def run_refund_seed(seed):
         )
     )
 
-    alice = h.load_state(
+    alice = impl.state(
         swap_id,
         "alice",
     )
 
     current = int(
-        h.blake_cli("getblockcount")
+        impl.blake_height()
     )
 
     remaining = int(
@@ -587,7 +595,7 @@ def run_refund_seed(seed):
     ) - current
 
     if remaining > 0:
-        early = h.swap_cmd(
+        early = impl.command(
             "refund-blake",
             swap_id,
             role="alice",
@@ -599,7 +607,7 @@ def run_refund_seed(seed):
             "premature BLAKE refund was not timelocked",
         )
 
-        h.assert_state(
+        impl.assert_state(
             swap_id,
             "alice",
             "BTC_REFUNDED",
@@ -607,23 +615,23 @@ def run_refund_seed(seed):
 
         trace.append("reject:premature-blake-refund")
 
-        h.mine_blake(remaining)
+        impl.mine_blake(remaining)
         trace.append("advance:blake-timeout")
 
-    h.swap_cmd(
+    impl.command(
         "refund-blake",
         swap_id,
         role="alice",
     )
     trace.append("refund:blake")
 
-    h.assert_state(
+    impl.assert_state(
         swap_id,
         "alice",
         "BLAKE_REFUNDED",
     )
 
-    bob = h.load_state(
+    bob = impl.state(
         swap_id,
         "bob",
     )
@@ -685,6 +693,15 @@ def main():
     parser = argparse.ArgumentParser()
 
     parser.add_argument(
+        "--adapter",
+        choices=(
+            "direct",
+            "json-subprocess",
+        ),
+        default="direct",
+    )
+
+    parser.add_argument(
         "seeds",
         nargs="*",
         type=int,
@@ -693,11 +710,24 @@ def main():
 
     args = parser.parse_args()
 
+    global impl
+
+    if args.adapter == "direct":
+        impl = make_python_reference_pair(
+            h
+        )
+    else:
+        impl = (
+            make_python_json_subprocess_pair(
+                h
+            )
+        )
+
     started = time.time()
     results = []
 
     try:
-        h.preflight()
+        impl.preflight()
         h.ok("preflight")
 
         for seed in args.seeds:

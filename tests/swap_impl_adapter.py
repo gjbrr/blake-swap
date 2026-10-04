@@ -1584,3 +1584,407 @@ def make_python_json_subprocess_pair(h):
             h.SWAP_V2,
         ),
     )
+
+
+class ExternalJsonParticipantAdapter:
+    """
+    Participant implemented by an arbitrary external executable.
+
+    The executable receives exactly one JSON request on stdin and must
+    emit exactly one JSON response on stdout.
+
+    No Python bridge is involved.
+
+    This is the integration boundary intended for Moxie.
+    """
+
+    def __init__(
+        self,
+        h,
+        role,
+        executable,
+        *,
+        extra_env=None,
+    ):
+        if role not in {
+            "alice",
+            "bob",
+        }:
+            raise ValueError(
+                f"unknown protocol role: {role}"
+            )
+
+        self.h = h
+        self.role = role
+        self.executable = str(
+            executable
+        )
+        self.extra_env = dict(
+            extra_env or {}
+        )
+
+    @property
+    def name(self):
+        return (
+            f"external-json-{self.role}"
+        )
+
+    def _environment(self):
+        env = os.environ.copy()
+
+        for key in (
+            "BLAKE_SWAP_STATE_DIR",
+            "BLAKE_SWAP_MESSAGE_DIR",
+            "BLAKE_SWAP_ROLE",
+            "BLAKE_SWAP_CHAIN_WALLET",
+            "BLAKE_SWAP_BLAKE_WALLET",
+            "BLAKE_SWAP_BTC_WALLET",
+            "BLAKE_SWAP_PARTICIPANT_KEY_FILE",
+            "BLAKE_SWAP_NOSTR_KEY_FILE",
+            "BLAKE_SWAP_NOSTR_KEY_DIR",
+        ):
+            env.pop(
+                key,
+                None,
+            )
+
+        for key, value in (
+            self.h.node_env()
+        ).items():
+            env.setdefault(
+                key,
+                value,
+            )
+
+        env[
+            "BLAKE_SWAP_TRANSPORT"
+        ] = "file"
+
+        env[
+            "BLAKE_SWAP_TEST_MODE"
+        ] = "1"
+
+        env[
+            "BLAKE_SWAP_NOSTR_RELAYS"
+        ] = "ws://127.0.0.1:1"
+
+        env[
+            "BLAKE_SWAP_MESSAGE_DIR"
+        ] = str(
+            self.h.MESSAGE_DIR
+        )
+
+        env[
+            "BLAKE_SWAP_ROLE"
+        ] = self.role
+
+        if self.role == "alice":
+            base = self.h.ALICE_BASE
+            wallet = self.h.ALICE_WALLET
+            keyfile = (
+                self.h.ALICE_PARTICIPANT_KEY
+            )
+        else:
+            base = self.h.BOB_BASE
+            wallet = self.h.BOB_WALLET
+            keyfile = (
+                self.h.BOB_PARTICIPANT_KEY
+            )
+
+        #
+        # These are laboratory resources, not requirements on Moxie's
+        # internal storage architecture. Moxie may use the supplied
+        # directory or place its own files beneath it.
+        #
+        env[
+            "BLAKE_SWAP_STATE_DIR"
+        ] = str(base)
+
+        env[
+            "BLAKE_SWAP_CHAIN_WALLET"
+        ] = wallet
+
+        env[
+            "BLAKE_SWAP_BLAKE_WALLET"
+        ] = wallet
+
+        env[
+            "BLAKE_SWAP_BTC_WALLET"
+        ] = wallet
+
+        env[
+            "BLAKE_SWAP_PARTICIPANT_KEY_FILE"
+        ] = str(keyfile)
+
+        env.update(
+            self.extra_env
+        )
+
+        return env
+
+    def _request(
+        self,
+        request,
+        *,
+        extra_env=None,
+    ):
+        env = self._environment()
+
+        if extra_env:
+            env.update(
+                extra_env
+            )
+
+        p = subprocess.run(
+            [
+                self.executable,
+            ],
+            input=(
+                json.dumps(
+                    request,
+                    sort_keys=True,
+                )
+                + "\n"
+            ),
+            text=True,
+            capture_output=True,
+            env=env,
+        )
+
+        if p.returncode != 0:
+            raise self.h.TestFailure(
+                (
+                    "external adapter process "
+                    f"failed ({p.returncode})\n"
+                    f"stdout:\n{p.stdout}\n"
+                    f"stderr:\n{p.stderr}"
+                )
+            )
+
+        try:
+            response = json.loads(
+                p.stdout
+            )
+        except json.JSONDecodeError as e:
+            raise self.h.TestFailure(
+                (
+                    "external adapter returned "
+                    "non-JSON output:\n"
+                    + p.stdout
+                )
+            ) from e
+
+        return response
+
+    def capabilities(self):
+        return self._request({
+            "op": "capabilities",
+        })
+
+    def command(
+        self,
+        *args,
+        expect_ok=True,
+        echo=False,
+        extra_env=None,
+    ):
+        response = self._request(
+            {
+                "op": "command",
+                "role": self.role,
+                "args": [
+                    str(x)
+                    for x in args
+                ],
+            },
+            extra_env=extra_env,
+        )
+
+        rc = int(
+            response.get(
+                "returncode",
+                1,
+            )
+        )
+
+        stdout = (
+            response.get(
+                "stdout"
+            )
+            or ""
+        )
+
+        stderr = (
+            response.get(
+                "stderr"
+            )
+            or ""
+        )
+
+        result = SimpleNamespace(
+            returncode=rc,
+            stdout=stdout,
+            stderr=stderr,
+        )
+
+        if echo or (
+            expect_ok
+            and rc != 0
+        ):
+            if stdout:
+                print(
+                    stdout,
+                    end=(
+                        ""
+                        if stdout.endswith("\n")
+                        else "\n"
+                    ),
+                )
+
+            if stderr:
+                print(
+                    stderr,
+                    end=(
+                        ""
+                        if stderr.endswith("\n")
+                        else "\n"
+                    ),
+                    file=sys.stderr,
+                )
+
+        if (
+            expect_ok
+            and rc != 0
+        ):
+            raise self.h.TestFailure(
+                (
+                    f"external adapter command failed "
+                    f"({rc}): "
+                    + " ".join(
+                        str(x)
+                        for x in args
+                    )
+                    + "\n"
+                    + (
+                        stderr.strip()
+                        or stdout.strip()
+                    )
+                )
+            )
+
+        return result
+
+    def state(
+        self,
+        swap_id,
+    ):
+        response = self._request({
+            "op": "state",
+            "role": self.role,
+            "swap_id": swap_id,
+        })
+
+        if not response.get(
+            "ok"
+        ):
+            raise self.h.TestFailure(
+                response.get(
+                    "error",
+                    "external adapter state read failed",
+                )
+            )
+
+        state = response.get(
+            "state"
+        )
+
+        if not isinstance(
+            state,
+            dict,
+        ):
+            raise self.h.TestFailure(
+                "external adapter returned non-object state"
+            )
+
+        return state
+
+    def assert_state(
+        self,
+        swap_id,
+        expected,
+    ):
+        actual = self.state(
+            swap_id
+        ).get(
+            "state"
+        )
+
+        self.h.require(
+            actual == expected,
+            (
+                f"{self.role} state "
+                f"{actual!r}, "
+                f"expected {expected!r}"
+            ),
+        )
+
+
+def make_python_alice_external_bob_pair(
+    h,
+    bob_executable,
+):
+    """
+    First cross-language milestone:
+
+        Python Alice / external Bob
+    """
+    return SwapImplementationPair(
+        h,
+        alice=PythonParticipantAdapter(
+            h,
+            "alice",
+        ),
+        bob=ExternalJsonParticipantAdapter(
+            h,
+            "bob",
+            bob_executable,
+        ),
+    )
+
+
+def make_external_alice_python_bob_pair(
+    h,
+    alice_executable,
+):
+    return SwapImplementationPair(
+        h,
+        alice=ExternalJsonParticipantAdapter(
+            h,
+            "alice",
+            alice_executable,
+        ),
+        bob=PythonParticipantAdapter(
+            h,
+            "bob",
+        ),
+    )
+
+
+def make_external_pair(
+    h,
+    alice_executable,
+    bob_executable,
+):
+    return SwapImplementationPair(
+        h,
+        alice=ExternalJsonParticipantAdapter(
+            h,
+            "alice",
+            alice_executable,
+        ),
+        bob=ExternalJsonParticipantAdapter(
+            h,
+            "bob",
+            bob_executable,
+        ),
+    )

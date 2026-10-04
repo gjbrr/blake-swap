@@ -19,6 +19,9 @@ import time
 import swap_protocol_tests as h
 
 from swap_impl_adapter import (
+    ExternalJsonParticipantAdapter,
+    PythonParticipantAdapter,
+    SwapImplementationPair,
     make_python_json_subprocess_pair,
     make_python_reference_pair,
 )
@@ -699,6 +702,28 @@ def main():
             "json-subprocess",
         ),
         default="direct",
+        help=(
+            "Python/Python transport when no external "
+            "participant executable is supplied."
+        ),
+    )
+
+    parser.add_argument(
+        "--alice-executable",
+        default=None,
+        help=(
+            "External blake-swap-adapter-v1 executable "
+            "for protocol Alice."
+        ),
+    )
+
+    parser.add_argument(
+        "--bob-executable",
+        default=None,
+        help=(
+            "External blake-swap-adapter-v1 executable "
+            "for protocol Bob."
+        ),
     )
 
     parser.add_argument(
@@ -712,16 +737,129 @@ def main():
 
     global impl
 
-    if args.adapter == "direct":
+    def validate_external(
+        participant,
+    ):
+        response = participant.capabilities()
+
+        h.require(
+            response.get("ok") is True,
+            (
+                f"{participant.role} external adapter "
+                "refused capabilities request"
+            ),
+        )
+
+        h.require(
+            response.get("protocol")
+            == "blake-swap-adapter-v1",
+            (
+                f"{participant.role} external adapter "
+                "protocol mismatch: "
+                f"{response.get('protocol')!r}"
+            ),
+        )
+
+        operations = set(
+            response.get(
+                "operations",
+                [],
+            )
+        )
+
+        for operation in (
+            "capabilities",
+            "command",
+            "state",
+        ):
+            h.require(
+                operation in operations,
+                (
+                    f"{participant.role} external adapter "
+                    f"missing operation {operation}"
+                ),
+            )
+
+        roles = set(
+            response.get(
+                "roles",
+                [],
+            )
+        )
+
+        h.require(
+            participant.role in roles,
+            (
+                f"external adapter does not advertise "
+                f"role {participant.role}"
+            ),
+        )
+
+    if (
+        args.alice_executable
+        or args.bob_executable
+    ):
+        if args.alice_executable:
+            alice = ExternalJsonParticipantAdapter(
+                h,
+                "alice",
+                args.alice_executable,
+            )
+
+            validate_external(
+                alice
+            )
+        else:
+            alice = PythonParticipantAdapter(
+                h,
+                "alice",
+            )
+
+        if args.bob_executable:
+            bob = ExternalJsonParticipantAdapter(
+                h,
+                "bob",
+                args.bob_executable,
+            )
+
+            validate_external(
+                bob
+            )
+        else:
+            bob = PythonParticipantAdapter(
+                h,
+                "bob",
+            )
+
+        impl = SwapImplementationPair(
+            h,
+            alice=alice,
+            bob=bob,
+        )
+
+    elif args.adapter == "direct":
         impl = make_python_reference_pair(
             h
         )
+
     else:
         impl = (
             make_python_json_subprocess_pair(
                 h
             )
         )
+
+    print()
+    print("IMPLEMENTATION PAIR")
+    print("===================")
+    print(
+        "Alice:",
+        impl.alice.name,
+    )
+    print(
+        "Bob:  ",
+        impl.bob.name,
+    )
 
     started = time.time()
     results = []

@@ -1,0 +1,83 @@
+{
+  "protocol": "blake-swap-adapter-v1",
+  "transport": "stdin-stdout-json-one-request-per-process",
+  "required_operations": [
+    "capabilities",
+    "command",
+    "state"
+  ],
+  "required_roles": [
+    "alice",
+    "bob"
+  ],
+  "capabilities_request": {
+    "op": "capabilities"
+  },
+  "capabilities_response": {
+    "ok": true,
+    "protocol": "blake-swap-adapter-v1",
+    "operations": [
+      "capabilities",
+      "command",
+      "state"
+    ],
+    "roles": [
+      "alice",
+      "bob"
+    ]
+  },
+  "command_request_example": {
+    "op": "command",
+    "role": "bob",
+    "args": [
+      "accept-offer",
+      "abcdef123456"
+    ]
+  },
+  "command_success_response_example": {
+    "ok": true,
+    "returncode": 0,
+    "stdout": "",
+    "stderr": ""
+  },
+  "command_refusal_response_example": {
+    "ok": false,
+    "returncode": 1,
+    "stdout": "",
+    "stderr": "implementation-defined refusal text"
+  },
+  "state_request_example": {
+    "op": "state",
+    "role": "bob",
+    "swap_id": "abcdef123456"
+  },
+  "state_response_minimum_example": {
+    "ok": true,
+    "state": {
+      "swap_id": "abcdef123456",
+      "state": "OFFERED",
+      "secret_hex": null,
+      "revealed_secret_hex": null
+    }
+  },
+  "portable_state_fields_used_by_seeded_corpus": [
+    "state",
+    "secret_hex",
+    "revealed_secret_hex",
+    "blake_funding_txid",
+    "blake_funding_vout",
+    "btc_funding_txid",
+    "btc_funding_vout",
+    "btc_claim_txid",
+    "btc_refund_txid",
+    "blake_claim_txid",
+    "blake_refund_txid"
+  ],
+  "first_cross_language_target": {
+    "alice": "python-reference",
+    "bob": "moxie",
+    "seed": 4,
+    "expected_path": "claim",
+    "expected_portable_digest_prefix": "e22e03aa7289b52e"
+  }
+}

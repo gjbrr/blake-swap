@@ -29,6 +29,23 @@ def main():
         request = json.loads(sys.stdin.read())
         op = request.get("op")
 
+        if op == "capabilities":
+            respond({
+                "ok": True,
+                "protocol": "blake-swap-adapter-v1",
+                "operations": [
+                    "capabilities",
+                    "command",
+                    "state"
+                ],
+                "roles": [
+                    "alice",
+                    "bob"
+                ]
+            })
+
+            return 0
+
         if op == "command":
             executable = request["executable"]
             args = request.get("args", [])

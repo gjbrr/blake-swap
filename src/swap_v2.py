@@ -8773,6 +8773,10 @@ def command_claim_blake(args):
         role="bob",
     )
 
+    protocol_failpoint(
+        "after_blake_claim_candidate_save_before_broadcast"
+    )
+
     broadcast_txid = blake_cli(
         "sendrawtransaction",
         claim_hex,
@@ -8824,6 +8828,10 @@ def command_claim_blake(args):
 
     swap.transition(
         State.BLAKE_CLAIMED
+    )
+
+    protocol_failpoint(
+        "after_blake_claim_confirmation_before_state_save"
     )
 
     save_swap(
@@ -9388,6 +9396,10 @@ def command_refund_blake(args):
         role="alice",
     )
 
+    protocol_failpoint(
+        "after_blake_refund_candidate_save_before_broadcast"
+    )
+
     broadcast_txid = blake_cli(
         "sendrawtransaction",
         refund_hex,
@@ -9439,6 +9451,10 @@ def command_refund_blake(args):
 
     swap.transition(
         State.BLAKE_REFUNDED
+    )
+
+    protocol_failpoint(
+        "after_blake_refund_confirmation_before_state_save"
     )
 
     save_swap(
@@ -9974,6 +9990,10 @@ def command_claim_btc(args):
         role="alice",
     )
 
+    protocol_failpoint(
+        "after_btc_claim_candidate_save_before_broadcast"
+    )
+
     broadcast_txid = btc_cli(
         "sendrawtransaction",
         claim_hex,
@@ -10031,6 +10051,10 @@ def command_claim_btc(args):
 
     swap.transition(
         State.BTC_CLAIMED
+    )
+
+    protocol_failpoint(
+        "after_btc_claim_confirmation_before_state_save"
     )
 
     save_swap(
@@ -10324,6 +10348,10 @@ def command_refund_btc(args):
         role="bob",
     )
 
+    protocol_failpoint(
+        "after_btc_refund_candidate_save_before_broadcast"
+    )
+
     broadcast_txid = btc_cli(
         "sendrawtransaction",
         refund_hex,
@@ -10375,6 +10403,10 @@ def command_refund_btc(args):
 
     swap.transition(
          State.BTC_REFUNDED
+    )
+
+    protocol_failpoint(
+        "after_btc_refund_confirmation_before_state_save"
     )
 
     save_swap(

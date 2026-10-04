@@ -1438,6 +1438,343 @@ def test_happy() -> None:
     print("happy swap:", swap_id)
 
 
+def test_cross_swap_funding_replay() -> None:
+    banner("CROSS-SWAP FUNDING REPLAY")
+
+    #
+    # Create two independently negotiated swaps. A must be announced
+    # before B is created so `new` cannot retire A as an unannounced
+    # superseded placeholder.
+    #
+    swap_a = make_fresh_swap()
+    print("swap A:", swap_a)
+    handshake(swap_a)
+
+    swap_b = make_fresh_swap()
+    print("swap B:", swap_b)
+    handshake(swap_b)
+
+    #
+    # ---------------------------------------------------------------
+    # BLAKE FUNDING
+    # ---------------------------------------------------------------
+    #
+    # Alice genuinely funds swap A's BLAKE HTLC.
+    #
+    swap_cmd(
+        "fund-blake",
+        swap_a,
+        role="alice",
+    )
+
+    assert_state(
+        swap_a,
+        "alice",
+        "BLAKE_FUNDED",
+    )
+
+    swap_cmd(
+        "publish-blake-funded",
+        swap_a,
+        role="alice",
+    )
+
+    source_path = message_file(
+        swap_a,
+        "blake-funded",
+    )
+
+    require(
+        source_path.exists(),
+        "swap A BLAKE funding announcement missing",
+    )
+
+    source_envelope = json.loads(
+        source_path.read_text()
+    )
+
+    replay = json.loads(
+        json.dumps(source_envelope)
+    )
+
+    if (
+        isinstance(replay, dict)
+        and replay.get("_file_transport_version") == 2
+        and isinstance(replay.get("message"), dict)
+    ):
+        payload = replay["message"]
+    else:
+        payload = replay
+
+    b_bob = load_state(
+        swap_b,
+        "bob",
+    )
+
+    #
+    # Keep every public negotiation field valid for B while retaining
+    # A's genuine confirmed funding txid/vout.
+    #
+    payload["swap_id"] = swap_b
+    payload["secret_hash"] = b_bob["secret_hash"]
+
+    if b_bob.get("blake_amount_base_units") is not None:
+        units = int(
+            b_bob["blake_amount_base_units"]
+        )
+        payload["blake_amount"] = format(
+            (
+                Decimal(units)
+                / Decimal(100_000_000)
+            ).normalize(),
+            "f",
+        )
+    else:
+        payload["blake_amount"] = str(
+            b_bob["blake_amount"]
+        )
+
+    payload["blake_timeout"] = int(
+        b_bob["blake_timeout"]
+    )
+
+    destination_path = message_file(
+        swap_b,
+        "blake-funded",
+    )
+
+    original_destination = (
+        destination_path.read_text()
+        if destination_path.exists()
+        else None
+    )
+
+    try:
+        destination_path.write_text(
+            json.dumps(
+                replay,
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n"
+        )
+
+        proc = swap_cmd(
+            "receive-blake-funded",
+            swap_b,
+            role="bob",
+            expect_ok=False,
+        )
+
+        expect_failure(
+            "cross-swap BLAKE funding replay",
+            proc,
+        )
+
+        assert_state(
+            swap_b,
+            "bob",
+            "OFFERED",
+        )
+
+        rejected = load_state(
+            swap_b,
+            "bob",
+        )
+
+        require(
+            rejected.get("blake_funding_txid") is None,
+            "cross-swap BLAKE funding replay persisted funding txid",
+        )
+
+        require(
+            rejected.get("blake_funding_vout") is None,
+            "cross-swap BLAKE funding replay persisted funding vout",
+        )
+
+        require(
+            rejected.get("blake_funding_blockhash") is None,
+            "cross-swap BLAKE funding replay persisted funding blockhash",
+        )
+
+    finally:
+        if original_destination is None:
+            destination_path.unlink(
+                missing_ok=True
+            )
+        else:
+            destination_path.write_text(
+                original_destination
+            )
+
+    ok(
+        "genuine BLAKE funding from another swap rejected by contract binding"
+    )
+
+    #
+    # Let both swaps legitimately import/fund BLAKE so their Bob/Alice
+    # records are at the correct checkpoint for Bitcoin funding.
+    #
+    swap_cmd(
+        "receive-blake-funded",
+        swap_a,
+        role="bob",
+    )
+
+    assert_state(
+        swap_a,
+        "bob",
+        "BLAKE_FUNDED",
+    )
+
+    fund_blake_and_sync(
+        swap_b,
+    )
+
+    #
+    # ---------------------------------------------------------------
+    # BITCOIN FUNDING
+    # ---------------------------------------------------------------
+    #
+    # Bob genuinely funds swap A's Bitcoin HTLC.
+    #
+    swap_cmd(
+        "fund-btc",
+        swap_a,
+        role="bob",
+    )
+
+    assert_state(
+        swap_a,
+        "bob",
+        "BTC_FUNDED",
+    )
+
+    swap_cmd(
+        "publish-btc-funded",
+        swap_a,
+        role="bob",
+    )
+
+    source_path = message_file(
+        swap_a,
+        "btc-funded",
+    )
+
+    require(
+        source_path.exists(),
+        "swap A BTC funding announcement missing",
+    )
+
+    source_envelope = json.loads(
+        source_path.read_text()
+    )
+
+    replay = json.loads(
+        json.dumps(source_envelope)
+    )
+
+    if (
+        isinstance(replay, dict)
+        and replay.get("_file_transport_version") == 2
+        and isinstance(replay.get("message"), dict)
+    ):
+        payload = replay["message"]
+    else:
+        payload = replay
+
+    b_alice = load_state(
+        swap_b,
+        "alice",
+    )
+
+    #
+    # Again preserve B's valid public terms while pointing at A's real
+    # confirmed Bitcoin funding outpoint.
+    #
+    payload["swap_id"] = swap_b
+    payload["secret_hash"] = b_alice["secret_hash"]
+    payload["btc_sats"] = int(
+        b_alice["btc_sats"]
+    )
+    payload["btc_timeout"] = int(
+        b_alice["btc_timeout"]
+    )
+
+    destination_path = message_file(
+        swap_b,
+        "btc-funded",
+    )
+
+    original_destination = (
+        destination_path.read_text()
+        if destination_path.exists()
+        else None
+    )
+
+    try:
+        destination_path.write_text(
+            json.dumps(
+                replay,
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n"
+        )
+
+        proc = swap_cmd(
+            "receive-btc-funded",
+            swap_b,
+            role="alice",
+            expect_ok=False,
+        )
+
+        expect_failure(
+            "cross-swap BTC funding replay",
+            proc,
+        )
+
+        assert_state(
+            swap_b,
+            "alice",
+            "BLAKE_FUNDED",
+        )
+
+        rejected = load_state(
+            swap_b,
+            "alice",
+        )
+
+        require(
+            rejected.get("btc_funding_txid") is None,
+            "cross-swap BTC funding replay persisted funding txid",
+        )
+
+        require(
+            rejected.get("btc_funding_vout") is None,
+            "cross-swap BTC funding replay persisted funding vout",
+        )
+
+        require(
+            rejected.get("btc_funding_blockhash") is None,
+            "cross-swap BTC funding replay persisted funding blockhash",
+        )
+
+    finally:
+        if original_destination is None:
+            destination_path.unlink(
+                missing_ok=True
+            )
+        else:
+            destination_path.write_text(
+                original_destination
+            )
+
+    ok(
+        "genuine BTC funding from another swap rejected by contract binding"
+    )
+
+
 def test_cross_swap_btc_claim_replay() -> None:
     banner("CROSS-SWAP BTC CLAIM REPLAY")
 
@@ -3469,6 +3806,7 @@ def main() -> int:
             "pending-blake-refund",
             "reorg-btc-claim",
             "reorg-btc-refund",
+            "cross-swap-funding",
             "cross-swap-claim",
             "cross-swap-refund",
             "all",
@@ -3498,6 +3836,17 @@ def main() -> int:
                 test_happy()
             except Exception as e:
                 fail("HAPPY PATH", str(e))
+                if args.suite != "all":
+                    raise
+
+        if args.suite in ("cross-swap-funding", "all"):
+            try:
+                test_cross_swap_funding_replay()
+            except Exception as e:
+                fail(
+                    "CROSS-SWAP FUNDING REPLAY",
+                    str(e),
+                )
                 if args.suite != "all":
                     raise
 

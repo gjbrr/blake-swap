@@ -1,0 +1,712 @@
+{
+  "schema": "blake-swap-security-conformance-v1",
+  "source": "docs/MOXIE_SECURITY_CONFORMANCE.md",
+  "invariant_count": 47,
+  "implementation_policy": {
+    "python": "reference security oracle",
+    "moxie": "must match portable observable behavior",
+    "ignored_differences": [
+      "function names",
+      "error text",
+      "process model",
+      "locking mechanism",
+      "state file layout",
+      "internal concurrency mechanism"
+    ]
+  },
+  "invariants": [
+    {
+      "id": "C1",
+      "requirement": "Alice is the BLAKE funder and secret holder",
+      "proving_suites": [
+        "swap_protocol_tests.py",
+        "swap_participant_isolation_tests.py"
+      ],
+      "comparison_surface": [
+        "durable_state",
+        "durable_economic_identities",
+        "secret_knowledge",
+        "accepted_or_rejected",
+        "economic_transactions"
+      ]
+    },
+    {
+      "id": "C2",
+      "requirement": "Bob learns S only from the Bitcoin claim witness",
+      "proving_suites": [
+        "swap_protocol_tests.py",
+        "swap_chain_autonomy_tests.py"
+      ],
+      "comparison_surface": [
+        "durable_state",
+        "durable_economic_identities",
+        "secret_knowledge",
+        "accepted_or_rejected",
+        "economic_transactions"
+      ]
+    },
+    {
+      "id": "C3",
+      "requirement": "Learned secret is knowledge, not settlement authority",
+      "proving_suites": [
+        "swap_protocol_tests.py",
+        "swap_participant_isolation_tests.py"
+      ],
+      "comparison_surface": [
+        "durable_state",
+        "durable_economic_identities",
+        "secret_knowledge",
+        "accepted_or_rejected",
+        "economic_transactions"
+      ]
+    },
+    {
+      "id": "C4",
+      "requirement": "Only legal state transitions are permitted",
+      "proving_suites": [
+        "swap_protocol_tests.py",
+        "agent_policy_tests.py"
+      ],
+      "comparison_surface": [
+        "durable_state",
+        "durable_economic_identities",
+        "secret_knowledge",
+        "accepted_or_rejected",
+        "economic_transactions"
+      ]
+    },
+    {
+      "id": "C5",
+      "requirement": "Production peers cannot manually force state",
+      "proving_suites": [
+        "swap_protocol_tests.py",
+        "driver_policy_tests.py"
+      ],
+      "comparison_surface": [
+        "durable_state",
+        "durable_economic_identities",
+        "secret_knowledge",
+        "accepted_or_rejected",
+        "economic_transactions"
+      ]
+    },
+    {
+      "id": "C6",
+      "requirement": "Funding announcements are not authority",
+      "proving_suites": [
+        "swap_protocol_tests.py",
+        "production_funding_pending_tests.py"
+      ],
+      "comparison_surface": [
+        "durable_state",
+        "durable_economic_identities",
+        "secret_knowledge",
+        "accepted_or_rejected",
+        "economic_transactions"
+      ]
+    },
+    {
+      "id": "C7",
+      "requirement": "Funding anchors must be structurally valid",
+      "proving_suites": [
+        "swap_protocol_tests.py",
+        "production_funding_pending_tests.py"
+      ],
+      "comparison_surface": [
+        "durable_state",
+        "durable_economic_identities",
+        "secret_knowledge",
+        "accepted_or_rejected",
+        "economic_transactions"
+      ]
+    },
+    {
+      "id": "C8",
+      "requirement": "Wrong protocol role cannot perform funding actions",
+      "proving_suites": [
+        "swap_protocol_tests.py",
+        "driver_policy_tests.py"
+      ],
+      "comparison_surface": [
+        "durable_state",
+        "durable_economic_identities",
+        "secret_knowledge",
+        "accepted_or_rejected",
+        "economic_transactions"
+      ]
+    },
+    {
+      "id": "C9",
+      "requirement": "Every settlement must be independently verified",
+      "proving_suites": [
+        "swap_protocol_tests.py",
+        "swap_settlement_recovery_tests.py"
+      ],
+      "comparison_surface": [
+        "durable_state",
+        "durable_economic_identities",
+        "secret_knowledge",
+        "accepted_or_rejected",
+        "economic_transactions"
+      ]
+    },
+    {
+      "id": "C10",
+      "requirement": "Settlement txids and blockhashes must be structurally valid",
+      "proving_suites": [
+        "swap_protocol_tests.py",
+        "schema_equality_tests.py"
+      ],
+      "comparison_surface": [
+        "durable_state",
+        "durable_economic_identities",
+        "secret_knowledge",
+        "accepted_or_rejected",
+        "economic_transactions"
+      ]
+    },
+    {
+      "id": "C11",
+      "requirement": "Claim branch must prove the correct preimage",
+      "proving_suites": [
+        "swap_protocol_tests.py"
+      ],
+      "comparison_surface": [
+        "durable_state",
+        "durable_economic_identities",
+        "secret_knowledge",
+        "accepted_or_rejected",
+        "economic_transactions"
+      ]
+    },
+    {
+      "id": "C12",
+      "requirement": "Refund branch must prove the refund branch",
+      "proving_suites": [
+        "swap_protocol_tests.py"
+      ],
+      "comparison_surface": [
+        "durable_state",
+        "durable_economic_identities",
+        "secret_knowledge",
+        "accepted_or_rejected",
+        "economic_transactions"
+      ]
+    },
+    {
+      "id": "C13",
+      "requirement": "Unknown or malformed settlement branch fails closed",
+      "proving_suites": [
+        "swap_protocol_tests.py"
+      ],
+      "comparison_surface": [
+        "durable_state",
+        "durable_economic_identities",
+        "secret_knowledge",
+        "accepted_or_rejected",
+        "economic_transactions"
+      ]
+    },
+    {
+      "id": "C14",
+      "requirement": "Exact duplicate settlement announcement is idempotent",
+      "proving_suites": [
+        "swap_protocol_tests.py"
+      ],
+      "comparison_surface": [
+        "durable_state",
+        "durable_economic_identities",
+        "secret_knowledge",
+        "accepted_or_rejected",
+        "economic_transactions"
+      ]
+    },
+    {
+      "id": "C15",
+      "requirement": "Conflicting BTC claim replay is rejected",
+      "proving_suites": [
+        "swap_protocol_tests.py"
+      ],
+      "comparison_surface": [
+        "durable_state",
+        "durable_economic_identities",
+        "secret_knowledge",
+        "accepted_or_rejected",
+        "economic_transactions"
+      ]
+    },
+    {
+      "id": "C16",
+      "requirement": "Conflicting BLAKE claim replay is rejected",
+      "proving_suites": [
+        "swap_protocol_tests.py"
+      ],
+      "comparison_surface": [
+        "durable_state",
+        "durable_economic_identities",
+        "secret_knowledge",
+        "accepted_or_rejected",
+        "economic_transactions"
+      ]
+    },
+    {
+      "id": "C17",
+      "requirement": "Conflicting BTC refund replay is rejected",
+      "proving_suites": [
+        "swap_protocol_tests.py"
+      ],
+      "comparison_surface": [
+        "durable_state",
+        "durable_economic_identities",
+        "secret_knowledge",
+        "accepted_or_rejected",
+        "economic_transactions"
+      ]
+    },
+    {
+      "id": "C18",
+      "requirement": "Settlement message must match the exact swap ID",
+      "proving_suites": [
+        "swap_protocol_tests.py"
+      ],
+      "comparison_surface": [
+        "durable_state",
+        "durable_economic_identities",
+        "secret_knowledge",
+        "accepted_or_rejected",
+        "economic_transactions"
+      ]
+    },
+    {
+      "id": "C19",
+      "requirement": "Settlement message must match the negotiated hashlock",
+      "proving_suites": [
+        "swap_protocol_tests.py"
+      ],
+      "comparison_surface": [
+        "durable_state",
+        "durable_economic_identities",
+        "secret_knowledge",
+        "accepted_or_rejected",
+        "economic_transactions"
+      ]
+    },
+    {
+      "id": "C20",
+      "requirement": "Genuine BTC claim from another swap is not authority",
+      "proving_suites": [
+        "swap_protocol_tests.py"
+      ],
+      "comparison_surface": [
+        "durable_state",
+        "durable_economic_identities",
+        "secret_knowledge",
+        "accepted_or_rejected",
+        "economic_transactions"
+      ]
+    },
+    {
+      "id": "C21",
+      "requirement": "Genuine BLAKE claim from another swap is not authority",
+      "proving_suites": [
+        "swap_protocol_tests.py"
+      ],
+      "comparison_surface": [
+        "durable_state",
+        "durable_economic_identities",
+        "secret_knowledge",
+        "accepted_or_rejected",
+        "economic_transactions"
+      ]
+    },
+    {
+      "id": "C22",
+      "requirement": "Genuine BTC refund from another swap is not authority",
+      "proving_suites": [
+        "swap_protocol_tests.py"
+      ],
+      "comparison_surface": [
+        "durable_state",
+        "durable_economic_identities",
+        "secret_knowledge",
+        "accepted_or_rejected",
+        "economic_transactions"
+      ]
+    },
+    {
+      "id": "C23",
+      "requirement": "Secret material never travels over coordination transport",
+      "proving_suites": [
+        "swap_wire_tests.py",
+        "schema_equality_tests.py"
+      ],
+      "comparison_surface": [
+        "durable_state",
+        "durable_economic_identities",
+        "secret_knowledge",
+        "accepted_or_rejected",
+        "economic_transactions"
+      ]
+    },
+    {
+      "id": "C24",
+      "requirement": "Unknown settlement wire fields fail closed",
+      "proving_suites": [
+        "swap_wire_tests.py",
+        "schema_equality_tests.py"
+      ],
+      "comparison_surface": [
+        "durable_state",
+        "durable_economic_identities",
+        "secret_knowledge",
+        "accepted_or_rejected",
+        "economic_transactions"
+      ]
+    },
+    {
+      "id": "C25",
+      "requirement": "Engine-internal metadata is not wire protocol data",
+      "proving_suites": [
+        "schema_equality_tests.py"
+      ],
+      "comparison_surface": [
+        "durable_state",
+        "durable_economic_identities",
+        "secret_knowledge",
+        "accepted_or_rejected",
+        "economic_transactions"
+      ]
+    },
+    {
+      "id": "C26",
+      "requirement": "Counterparty identity is pinned",
+      "proving_suites": [
+        "swap_protocol_tests.py",
+        "swap_participant_isolation_tests.py"
+      ],
+      "comparison_surface": [
+        "durable_state",
+        "durable_economic_identities",
+        "secret_knowledge",
+        "accepted_or_rejected",
+        "economic_transactions"
+      ]
+    },
+    {
+      "id": "C27",
+      "requirement": "Wrong signer cannot advance economic state",
+      "proving_suites": [
+        "swap_protocol_tests.py",
+        "swap_encrypted_coordination_tests.py"
+      ],
+      "comparison_surface": [
+        "durable_state",
+        "durable_economic_identities",
+        "secret_knowledge",
+        "accepted_or_rejected",
+        "economic_transactions"
+      ]
+    },
+    {
+      "id": "C28",
+      "requirement": "Authentication does not replace blockchain verification",
+      "proving_suites": [
+        "swap_protocol_tests.py",
+        "swap_chain_autonomy_tests.py"
+      ],
+      "comparison_surface": [
+        "durable_state",
+        "durable_economic_identities",
+        "secret_knowledge",
+        "accepted_or_rejected",
+        "economic_transactions"
+      ]
+    },
+    {
+      "id": "C29",
+      "requirement": "Unconfirmed spend does not authorize settlement",
+      "proving_suites": [
+        "production_funding_pending_tests.py"
+      ],
+      "comparison_surface": [
+        "durable_state",
+        "durable_economic_identities",
+        "secret_knowledge",
+        "accepted_or_rejected",
+        "economic_transactions"
+      ]
+    },
+    {
+      "id": "C30",
+      "requirement": "Unconfirmed spender prevents unsafe rebroadcast",
+      "proving_suites": [
+        "production_settlement_pending_tests.py",
+        "swap_protocol_tests.py"
+      ],
+      "comparison_surface": [
+        "durable_state",
+        "durable_economic_identities",
+        "secret_knowledge",
+        "accepted_or_rejected",
+        "economic_transactions"
+      ]
+    },
+    {
+      "id": "C31",
+      "requirement": "Settlement becomes authoritative only after active-chain confirmation",
+      "proving_suites": [
+        "production_settlement_pending_tests.py",
+        "swap_protocol_tests.py"
+      ],
+      "comparison_surface": [
+        "durable_state",
+        "durable_economic_identities",
+        "secret_knowledge",
+        "accepted_or_rejected",
+        "economic_transactions"
+      ]
+    },
+    {
+      "id": "C32",
+      "requirement": "Stale BTC claim announcement is rejected",
+      "proving_suites": [
+        "swap_reorg_safety_tests.py",
+        "swap_protocol_tests.py"
+      ],
+      "comparison_surface": [
+        "durable_state",
+        "durable_economic_identities",
+        "secret_knowledge",
+        "accepted_or_rejected",
+        "economic_transactions"
+      ]
+    },
+    {
+      "id": "C33",
+      "requirement": "Stale BLAKE claim announcement is rejected",
+      "proving_suites": [
+        "swap_reorg_safety_tests.py"
+      ],
+      "comparison_surface": [
+        "durable_state",
+        "durable_economic_identities",
+        "secret_knowledge",
+        "accepted_or_rejected",
+        "economic_transactions"
+      ]
+    },
+    {
+      "id": "C34",
+      "requirement": "Stale BTC refund announcement is rejected",
+      "proving_suites": [
+        "swap_reorg_safety_tests.py"
+      ],
+      "comparison_surface": [
+        "durable_state",
+        "durable_economic_identities",
+        "secret_knowledge",
+        "accepted_or_rejected",
+        "economic_transactions"
+      ]
+    },
+    {
+      "id": "C35",
+      "requirement": "Reorged settlement can roll durable state back conservatively",
+      "proving_suites": [
+        "swap_reorg_safety_tests.py"
+      ],
+      "comparison_surface": [
+        "durable_state",
+        "durable_economic_identities",
+        "secret_knowledge",
+        "accepted_or_rejected",
+        "economic_transactions"
+      ]
+    },
+    {
+      "id": "C36",
+      "requirement": "Durable signed transaction may be reused after safe rollback",
+      "proving_suites": [
+        "swap_reorg_safety_tests.py"
+      ],
+      "comparison_surface": [
+        "durable_state",
+        "durable_economic_identities",
+        "secret_knowledge",
+        "accepted_or_rejected",
+        "economic_transactions"
+      ]
+    },
+    {
+      "id": "C37",
+      "requirement": "Signed settlement transaction survives crash",
+      "proving_suites": [
+        "swap_settlement_recovery_tests.py",
+        "production_funding_pending_tests.py"
+      ],
+      "comparison_surface": [
+        "durable_state",
+        "durable_economic_identities",
+        "secret_knowledge",
+        "accepted_or_rejected",
+        "economic_transactions"
+      ]
+    },
+    {
+      "id": "C38",
+      "requirement": "Retry is idempotent",
+      "proving_suites": [
+        "swap_settlement_recovery_tests.py",
+        "production_settlement_pending_tests.py",
+        "swap_settlement_race_tests.py"
+      ],
+      "comparison_surface": [
+        "durable_state",
+        "durable_economic_identities",
+        "secret_knowledge",
+        "accepted_or_rejected",
+        "economic_transactions"
+      ]
+    },
+    {
+      "id": "C39",
+      "requirement": "Mempool loss does not cause transaction mutation",
+      "proving_suites": [
+        "swap_settlement_recovery_tests.py",
+        "production_settlement_pending_tests.py",
+        "swap_settlement_crash_matrix_tests.py",
+        "swap_settlement_race_tests.py"
+      ],
+      "comparison_surface": [
+        "durable_state",
+        "durable_economic_identities",
+        "secret_knowledge",
+        "accepted_or_rejected",
+        "economic_transactions"
+      ]
+    },
+    {
+      "id": "C40",
+      "requirement": "Negotiated timeout policy is mandatory",
+      "proving_suites": [
+        "swap_timeout_policy_tests.py",
+        "swap_timeout_negotiation_tests.py"
+      ],
+      "comparison_surface": [
+        "durable_state",
+        "durable_economic_identities",
+        "secret_knowledge",
+        "accepted_or_rejected",
+        "economic_transactions"
+      ]
+    },
+    {
+      "id": "C41",
+      "requirement": "BTC timeout must leave sufficient BLAKE recovery window",
+      "proving_suites": [
+        "swap_timeout_policy_tests.py",
+        "swap_model_timeout_invariant_tests.py"
+      ],
+      "comparison_surface": [
+        "durable_state",
+        "durable_economic_identities",
+        "secret_knowledge",
+        "accepted_or_rejected",
+        "economic_transactions"
+      ]
+    },
+    {
+      "id": "C42",
+      "requirement": "Expired or internally dishonest timeout metadata is rejected",
+      "proving_suites": [
+        "swap_timeout_negotiation_tests.py",
+        "pre_btc_refund_tests.py"
+      ],
+      "comparison_surface": [
+        "durable_state",
+        "durable_economic_identities",
+        "secret_knowledge",
+        "accepted_or_rejected",
+        "economic_transactions"
+      ]
+    },
+    {
+      "id": "C43",
+      "requirement": "Early refund cannot bypass timelock",
+      "proving_suites": [
+        "swap_timeout_policy_tests.py",
+        "pre_btc_refund_tests.py"
+      ],
+      "comparison_surface": [
+        "durable_state",
+        "durable_economic_identities",
+        "secret_knowledge",
+        "accepted_or_rejected",
+        "economic_transactions"
+      ]
+    },
+    {
+      "id": "C44",
+      "requirement": "Chain truth repairs local state",
+      "proving_suites": [
+        "swap_peer_recovery_tests.py",
+        "swap_chain_autonomy_tests.py",
+        "swap_settlement_recovery_tests.py"
+      ],
+      "comparison_surface": [
+        "durable_state",
+        "durable_economic_identities",
+        "secret_knowledge",
+        "accepted_or_rejected",
+        "economic_transactions"
+      ]
+    },
+    {
+      "id": "C45",
+      "requirement": "Recovery cannot invent authority",
+      "proving_suites": [
+        "swap_peer_recovery_tests.py",
+        "swap_bounded_scan_tests.py",
+        "swap_settlement_recovery_tests.py"
+      ],
+      "comparison_surface": [
+        "durable_state",
+        "durable_economic_identities",
+        "secret_knowledge",
+        "accepted_or_rejected",
+        "economic_transactions"
+      ]
+    },
+    {
+      "id": "C46",
+      "requirement": "Missing settlement identity anchors fail closed",
+      "proving_suites": [
+        "swap_chain_autonomy_tests.py",
+        "swap_peer_recovery_tests.py",
+        "swap_settlement_recovery_tests.py"
+      ],
+      "comparison_surface": [
+        "durable_state",
+        "durable_economic_identities",
+        "secret_knowledge",
+        "accepted_or_rejected",
+        "economic_transactions"
+      ]
+    },
+    {
+      "id": "C47",
+      "requirement": "COMPLETE requires final BLAKE claim proof",
+      "proving_suites": [
+        "swap_reorg_safety_tests.py",
+        "swap_protocol_tests.py"
+      ],
+      "comparison_surface": [
+        "durable_state",
+        "durable_economic_identities",
+        "secret_knowledge",
+        "accepted_or_rejected",
+        "economic_transactions"
+      ]
+    }
+  ]
+}

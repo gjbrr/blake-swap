@@ -48,6 +48,7 @@ FAULT_PROFILES = (
     "settlement-race-v1",
     "refund-crash-v1",
     "refund-reorg-v1",
+    "refund-race-v1",
 )
 
 
@@ -1344,6 +1345,247 @@ def crash_recover_btc_refund(
     )
 
 
+def race_btc_refund(
+    swap_id,
+    trace,
+):
+    """
+    Race two concurrent BTC refund attempts through Bob's adapter after
+    the Bitcoin timeout has matured.
+
+    Portable requirements:
+      * at least one racer succeeds;
+      * Bob converges to BTC_REFUNDED;
+      * one canonical refund txid wins;
+      * that tx spends the exact BTC HTLC once;
+      * no competing spend remains in mempool.
+    """
+
+    before = impl.state(
+        swap_id,
+        "bob",
+    )
+
+    h.require(
+        before["state"] == "BTC_FUNDED",
+        (
+            "seeded BTC-refund race requires Bob BTC_FUNDED; "
+            f"observed {before['state']}"
+        ),
+    )
+
+    funding_txid = before.get(
+        "btc_funding_txid"
+    )
+    funding_vout = before.get(
+        "btc_funding_vout"
+    )
+
+    h.require(
+        bool(funding_txid),
+        "seeded BTC-refund race has no BTC funding txid",
+    )
+
+    h.require(
+        funding_vout is not None,
+        "seeded BTC-refund race has no BTC funding vout",
+    )
+
+    gate = threading.Barrier(3)
+    results = [None, None]
+    errors = [None, None]
+
+    def worker(index):
+        try:
+            gate.wait()
+
+            results[index] = impl.command(
+                "refund-btc",
+                swap_id,
+                role="bob",
+                expect_ok=False,
+            )
+        except BaseException as exc:
+            errors[index] = exc
+
+    threads = [
+        threading.Thread(
+            target=worker,
+            args=(0,),
+            daemon=True,
+        ),
+        threading.Thread(
+            target=worker,
+            args=(1,),
+            daemon=True,
+        ),
+    ]
+
+    for thread in threads:
+        thread.start()
+
+    gate.wait()
+
+    for thread in threads:
+        thread.join(timeout=90)
+
+    h.require(
+        not any(thread.is_alive() for thread in threads),
+        "seeded BTC-refund race did not terminate",
+    )
+
+    h.require(
+        not any(errors),
+        (
+            "seeded BTC-refund race raised adapter exception: "
+            f"{errors}"
+        ),
+    )
+
+    h.require(
+        all(result is not None for result in results),
+        "seeded BTC-refund race lost a participant result",
+    )
+
+    returncodes = [
+        result.returncode
+        for result in results
+    ]
+
+    h.require(
+        any(code == 0 for code in returncodes),
+        (
+            "both seeded BTC-refund racers failed; "
+            f"returncodes={returncodes}"
+        ),
+    )
+
+    trace.append(
+        "race:btc-refund:x2"
+    )
+
+    settled = impl.state(
+        swap_id,
+        "bob",
+    )
+
+    h.require(
+        settled["state"] == "BTC_REFUNDED",
+        (
+            "BTC-refund race did not converge to BTC_REFUNDED; "
+            f"observed {settled['state']}"
+        ),
+    )
+
+    canonical_txid = settled.get(
+        "btc_refund_txid"
+    )
+    canonical_blockhash = settled.get(
+        "btc_refund_blockhash"
+    )
+
+    h.require(
+        bool(canonical_txid),
+        "BTC-refund race has no canonical txid",
+    )
+
+    h.require(
+        bool(canonical_blockhash),
+        "BTC-refund race has no canonical blockhash",
+    )
+
+    tx = h.btc_cli(
+        "getrawtransaction",
+        canonical_txid,
+        True,
+        canonical_blockhash,
+    )
+
+    h.require(
+        int(tx.get("confirmations", 0)) >= 1,
+        "canonical raced BTC refund is not confirmed",
+    )
+
+    exact_inputs = [
+        vin
+        for vin in tx.get("vin", [])
+        if (
+            vin.get("txid") == funding_txid
+            and int(vin.get("vout", -1))
+            == int(funding_vout)
+        )
+    ]
+
+    h.require(
+        len(exact_inputs) == 1,
+        (
+            "canonical raced BTC refund does not spend "
+            "the exact HTLC exactly once"
+        ),
+    )
+
+    block = h.btc_cli(
+        "getblock",
+        canonical_blockhash,
+        2,
+    )
+
+    active_spenders = []
+
+    for block_tx in block.get("tx", []):
+        if not isinstance(block_tx, dict):
+            continue
+
+        for vin in block_tx.get("vin", []):
+            if (
+                vin.get("txid") == funding_txid
+                and int(vin.get("vout", -1))
+                == int(funding_vout)
+            ):
+                active_spenders.append(
+                    block_tx.get("txid")
+                )
+                break
+
+    h.require(
+        active_spenders == [canonical_txid],
+        (
+            "BTC-refund race produced unexpected active-chain "
+            f"HTLC spenders: {active_spenders}"
+        ),
+    )
+
+    competing = []
+
+    for txid in h.btc_cli("getrawmempool"):
+        memtx = h.btc_cli(
+            "getrawtransaction",
+            txid,
+            True,
+        )
+
+        for vin in memtx.get("vin", []):
+            if (
+                vin.get("txid") == funding_txid
+                and int(vin.get("vout", -1))
+                == int(funding_vout)
+            ):
+                competing.append(txid)
+                break
+
+    h.require(
+        not competing,
+        (
+            "BTC-refund race left competing HTLC spend "
+            f"in mempool: {competing}"
+        ),
+    )
+
+    trace.append(
+        "converge:btc-refund:one-canonical-settlement"
+    )
+
+
 def reorg_probe_btc_refund(
     swap_id,
     trace,
@@ -1640,6 +1882,11 @@ def run_refund_seed(seed, fault_profile="none"):
 
     if fault_profile == "refund-crash-v1":
         crash_recover_btc_refund(
+            swap_id,
+            trace,
+        )
+    elif fault_profile == "refund-race-v1":
+        race_btc_refund(
             swap_id,
             trace,
         )

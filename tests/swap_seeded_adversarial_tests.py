@@ -51,7 +51,162 @@ FAULT_PROFILES = (
     "refund-race-v1",
     "combined-fault-v1",
     "combined-refund-fault-v1",
+    "scheduled-v1",
 )
+
+
+SCHEDULE_VERSION = "scheduled-v1"
+
+FAULT_VOCABULARY = (
+    "primary:normal",
+    "primary:crash",
+    "primary:race",
+    "reorg:skip",
+    "reorg:probe",
+    "secondary:normal",
+    "secondary:race",
+)
+
+
+def deterministic_schedule_choice(
+    seed,
+    path,
+    stage,
+    options,
+):
+    """
+    Choose one scheduler action using only stable serialized inputs.
+
+    This deliberately does not use Python's PRNG. Another language can
+    reproduce the same schedule with SHA-256:
+
+        scheduled-v1:<seed>:<path>:<stage>
+
+    interpreted as an unsigned big-endian integer modulo len(options).
+    """
+
+    material = (
+        f"{SCHEDULE_VERSION}:{seed}:{path}:{stage}"
+    ).encode("utf-8")
+
+    digest = hashlib.sha256(
+        material
+    ).digest()
+
+    index = (
+        int.from_bytes(
+            digest,
+            "big",
+        )
+        % len(options)
+    )
+
+    return options[index]
+
+
+def build_fault_schedule(
+    seed,
+    path,
+):
+    """
+    Produce a deterministic legal fault plan.
+
+    The scheduler chooses only at protocol stages where the selected
+    event is meaningful:
+
+      primary_settlement:
+          BTC claim on claim path
+          BTC refund on refund path
+
+      reorg_probe:
+          confirmed BTC claim/refund after the peer has accepted it
+
+      secondary_settlement:
+          BLAKE claim on claim path
+          BLAKE refund on refund path
+
+    This avoids generating meaningless event sequences while still
+    composing independent failure classes.
+    """
+
+    primary = deterministic_schedule_choice(
+        seed,
+        path,
+        "primary-settlement",
+        (
+            "normal",
+            "crash",
+            "race",
+        ),
+    )
+
+    reorg_probe = deterministic_schedule_choice(
+        seed,
+        path,
+        "reorg-probe",
+        (
+            False,
+            True,
+        ),
+    )
+
+    secondary = deterministic_schedule_choice(
+        seed,
+        path,
+        "secondary-settlement",
+        (
+            "normal",
+            "race",
+        ),
+    )
+
+    #
+    # Do not allow scheduled-v1 to degenerate into the ordinary happy
+    # path. Every scheduler seed must inject at least one fault class.
+    #
+    if (
+        primary == "normal"
+        and not reorg_probe
+        and secondary == "normal"
+    ):
+        secondary = "race"
+
+    return {
+        "version": SCHEDULE_VERSION,
+        "path": path,
+        "primary_settlement": primary,
+        "reorg_probe": reorg_probe,
+        "secondary_settlement": secondary,
+    }
+
+
+def append_schedule_trace(
+    trace,
+    schedule,
+):
+    if schedule is None:
+        return
+
+    trace.extend(
+        (
+            (
+                "schedule:primary-settlement:"
+                + schedule["primary_settlement"]
+            ),
+            (
+                "schedule:reorg-probe:"
+                + (
+                    "yes"
+                    if schedule["reorg_probe"]
+                    else "no"
+                )
+            ),
+            (
+                "schedule:secondary-settlement:"
+                + schedule["secondary_settlement"]
+            ),
+        )
+    )
 
 
 def require_failure(name, proc):
@@ -1140,9 +1295,18 @@ def reorg_probe_btc_claim(
     )
 
 
-def run_claim_seed(seed, fault_profile="none"):
+def run_claim_seed(
+    seed,
+    fault_profile="none",
+    fault_schedule=None,
+):
     rng = random.Random(seed)
     trace = []
+
+    append_schedule_trace(
+        trace,
+        fault_schedule,
+    )
 
     swap_id = impl.make_fresh_swap()
     trace.append("create")
@@ -1240,15 +1404,33 @@ def run_claim_seed(seed, fault_profile="none"):
     impl.assert_secret_separation(swap_id)
     trace.append("assert:no-transported-secret")
 
-    if fault_profile in {
-        "settlement-crash-v1",
-        "combined-fault-v1",
-    }:
+    scheduled_primary = (
+        fault_schedule.get("primary_settlement")
+        if fault_schedule is not None
+        else None
+    )
+
+    if (
+        fault_profile in {
+            "settlement-crash-v1",
+            "combined-fault-v1",
+        }
+        or (
+            fault_profile == "scheduled-v1"
+            and scheduled_primary == "crash"
+        )
+    ):
         crash_recover_btc_claim(
             swap_id,
             trace,
         )
-    elif fault_profile == "settlement-race-v1":
+    elif (
+        fault_profile == "settlement-race-v1"
+        or (
+            fault_profile == "scheduled-v1"
+            and scheduled_primary == "race"
+        )
+    ):
         race_btc_claim(
             swap_id,
             trace,
@@ -1311,16 +1493,40 @@ def run_claim_seed(seed, fault_profile="none"):
     )
     trace.append("extract-secret:bitcoin-witness")
 
-    if fault_profile in {
-        "reorg-v1",
-        "combined-fault-v1",
-    }:
+    scheduled_reorg = (
+        bool(fault_schedule.get("reorg_probe"))
+        if fault_schedule is not None
+        else False
+    )
+
+    if (
+        fault_profile in {
+            "reorg-v1",
+            "combined-fault-v1",
+        }
+        or (
+            fault_profile == "scheduled-v1"
+            and scheduled_reorg
+        )
+    ):
         reorg_probe_btc_claim(
             swap_id,
             trace,
         )
 
-    if fault_profile == "combined-fault-v1":
+    scheduled_secondary = (
+        fault_schedule.get("secondary_settlement")
+        if fault_schedule is not None
+        else None
+    )
+
+    if (
+        fault_profile == "combined-fault-v1"
+        or (
+            fault_profile == "scheduled-v1"
+            and scheduled_secondary == "race"
+        )
+    ):
         race_blake_claim(
             swap_id,
             trace,
@@ -2300,9 +2506,18 @@ def reorg_probe_btc_refund(
     )
 
 
-def run_refund_seed(seed, fault_profile="none"):
+def run_refund_seed(
+    seed,
+    fault_profile="none",
+    fault_schedule=None,
+):
     rng = random.Random(seed)
     trace = []
+
+    append_schedule_trace(
+        trace,
+        fault_schedule,
+    )
 
     swap_id = impl.make_fresh_swap()
     trace.append("create")
@@ -2384,15 +2599,33 @@ def run_refund_seed(seed, fault_profile="none"):
         impl.mine_btc(remaining)
         trace.append("advance:btc-timeout")
 
-    if fault_profile in {
-        "refund-crash-v1",
-        "combined-refund-fault-v1",
-    }:
+    scheduled_primary = (
+        fault_schedule.get("primary_settlement")
+        if fault_schedule is not None
+        else None
+    )
+
+    if (
+        fault_profile in {
+            "refund-crash-v1",
+            "combined-refund-fault-v1",
+        }
+        or (
+            fault_profile == "scheduled-v1"
+            and scheduled_primary == "crash"
+        )
+    ):
         crash_recover_btc_refund(
             swap_id,
             trace,
         )
-    elif fault_profile == "refund-race-v1":
+    elif (
+        fault_profile == "refund-race-v1"
+        or (
+            fault_profile == "scheduled-v1"
+            and scheduled_primary == "race"
+        )
+    ):
         race_btc_refund(
             swap_id,
             trace,
@@ -2419,10 +2652,22 @@ def run_refund_seed(seed, fault_profile="none"):
     )
     trace.append("receive:btc-refunded")
 
-    if fault_profile in {
-        "refund-reorg-v1",
-        "combined-refund-fault-v1",
-    }:
+    scheduled_reorg = (
+        bool(fault_schedule.get("reorg_probe"))
+        if fault_schedule is not None
+        else False
+    )
+
+    if (
+        fault_profile in {
+            "refund-reorg-v1",
+            "combined-refund-fault-v1",
+        }
+        or (
+            fault_profile == "scheduled-v1"
+            and scheduled_reorg
+        )
+    ):
         reorg_probe_btc_refund(
             swap_id,
             trace,
@@ -2484,7 +2729,19 @@ def run_refund_seed(seed, fault_profile="none"):
         impl.mine_blake(remaining)
         trace.append("advance:blake-timeout")
 
-    if fault_profile == "combined-refund-fault-v1":
+    scheduled_secondary = (
+        fault_schedule.get("secondary_settlement")
+        if fault_schedule is not None
+        else None
+    )
+
+    if (
+        fault_profile == "combined-refund-fault-v1"
+        or (
+            fault_profile == "scheduled-v1"
+            and scheduled_secondary == "race"
+        )
+    ):
         race_blake_refund(
             swap_id,
             trace,
@@ -2526,15 +2783,25 @@ def run_seed(seed, fault_profile="none"):
         else "refund"
     )
 
+    fault_schedule = None
+
+    if fault_profile == "scheduled-v1":
+        fault_schedule = build_fault_schedule(
+            seed,
+            path,
+        )
+
     if path == "claim":
         swap_id, trace = run_claim_seed(
             seed,
             fault_profile=fault_profile,
+            fault_schedule=fault_schedule,
         )
     else:
         swap_id, trace = run_refund_seed(
             seed,
             fault_profile=fault_profile,
+            fault_schedule=fault_schedule,
         )
 
     raw_final = raw_snapshot(swap_id)
@@ -2544,6 +2811,7 @@ def run_seed(seed, fault_profile="none"):
         "seed": seed,
         "path": path,
         "fault_profile": fault_profile,
+        "fault_schedule": fault_schedule,
         "swap_id": swap_id,
         "trace": trace,
         "final": final,

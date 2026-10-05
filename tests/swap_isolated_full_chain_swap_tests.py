@@ -267,7 +267,7 @@ def main():
         p = run_swap(
             "new",
             "--blake",
-            "10",
+            "0.1",
             "--sats",
             "25000",
             role="alice",

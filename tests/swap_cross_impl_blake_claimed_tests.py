@@ -49,7 +49,7 @@ def main():
     p = h.swap_cmd(
         "new",
         "--blake",
-        "10",
+        "0.1",
         "--sats",
         "25000",
         role="alice",

@@ -462,64 +462,233 @@ def trusted_balance(cli, wallet: str) -> float:
     return 0.0
 
 
-def ensure_wallet_funds(cli, label: str, minimum: float = 10.0) -> None:
+def ensure_bitcoin_wallet_funds(
+    minimum: float = 10.0,
+) -> None:
     """
-    Give the alice and bob wallets mature, spendable coins on one chain.
+    Bootstrap the Bitcoin regtest wallets.
 
-    The suites use the same node for both participants and rely on
-    separate funded wallets, so both must be able to fund an HTLC.
-    Alice is funded by mining a maturity run to her own address
-    (regtest coinbase matures after 100 blocks); Bob receives a
-    transfer, which is trusted after one confirmation.
-
-    Once both wallets are funded this is a no-op, so repeated runs
-    against a persistent rig stay cheap.
+    Bitcoin regtest still provides fresh mining rewards, so ordinary
+    coinbase bootstrap is appropriate here. Bob is the protocol BTC
+    funder, but keeping both wallets funded is inexpensive and useful to
+    tests that exercise wallet surfaces directly.
     """
-    alice_ok = trusted_balance(cli, ALICE_WALLET) >= minimum
-    bob_ok = trusted_balance(cli, BOB_WALLET) >= minimum
+    alice_balance = trusted_balance(
+        btc_cli,
+        ALICE_WALLET,
+    )
 
-    if alice_ok and bob_ok:
+    bob_balance = trusted_balance(
+        btc_cli,
+        BOB_WALLET,
+    )
+
+    if alice_balance < minimum:
+        addr = btc_cli(
+            "getnewaddress",
+            "",
+            "bech32",
+            wallet=ALICE_WALLET,
+        )
+
+        btc_cli(
+            "generatetoaddress",
+            101,
+            addr,
+        )
+
+        alice_balance = trusted_balance(
+            btc_cli,
+            ALICE_WALLET,
+        )
+
+    if bob_balance < minimum:
+        shortfall = (
+            minimum
+            - bob_balance
+        )
+
+        bob_addr = btc_cli(
+            "getnewaddress",
+            "",
+            "bech32",
+            wallet=BOB_WALLET,
+        )
+
+        btc_cli(
+            "sendtoaddress",
+            bob_addr,
+            f"{shortfall:.8f}",
+            wallet=ALICE_WALLET,
+        )
+
+        addr = btc_cli(
+            "getnewaddress",
+            "",
+            "bech32",
+            wallet=ALICE_WALLET,
+        )
+
+        btc_cli(
+            "generatetoaddress",
+            1,
+            addr,
+        )
+
+    alice_balance = trusted_balance(
+        btc_cli,
+        ALICE_WALLET,
+    )
+
+    bob_balance = trusted_balance(
+        btc_cli,
+        BOB_WALLET,
+    )
+
+    require(
+        alice_balance >= minimum,
+        (
+            "Bitcoin Alice bootstrap failed: "
+            f"{alice_balance:.8f}"
+        ),
+    )
+
+    require(
+        bob_balance >= minimum,
+        (
+            "Bitcoin Bob bootstrap failed: "
+            f"{bob_balance:.8f}"
+        ),
+    )
+
+
+def ensure_blake_alice_reserve(
+    minimum: float = 1.0,
+) -> None:
+    """
+    Maintain the finite BLAKE regtest capital pool.
+
+    At the current chain height mining still produces blocks, but no
+    longer increases spendable BLAKE balance. Therefore the test harness
+    must recycle coins rather than attempt to mint replacements.
+
+    Protocol Alice is always the BLAKE funder. Bob does not require an
+    initial BLAKE reserve: successful swaps naturally transfer BLAKE to
+    Bob, and that accumulated spendable balance is swept back to Alice
+    when her reserve drops below `minimum`.
+    """
+    alice_balance = trusted_balance(
+        blake_cli,
+        ALICE_WALLET,
+    )
+
+    if alice_balance >= minimum:
         return
 
-    if not alice_ok:
-        addr = cli("getnewaddress", "", "bech32", wallet=ALICE_WALLET)
-        cli("generatetoaddress", 101, addr)
-
-    if not bob_ok:
-        bob_addr = cli("getnewaddress", "", "bech32", wallet=BOB_WALLET)
-
-        try:
-            cli(
-                "sendtoaddress",
-                bob_addr,
-                f"{minimum:.8f}",
-                wallet=ALICE_WALLET,
-            )
-        except Exception as e:
-            raise TestFailure(
-                f"could not fund the {label} bob wallet from alice: {e}"
-            ) from e
-
-        # One confirmation makes the received amount trusted.
-        addr = cli("getnewaddress", "", "bech32", wallet=ALICE_WALLET)
-        cli("generatetoaddress", 1, addr)
+    bob_balance = trusted_balance(
+        blake_cli,
+        BOB_WALLET,
+    )
 
     print(
-        f"  {label}: alice="
-        f"{trusted_balance(cli, ALICE_WALLET):.8f} "
-        f"bob={trusted_balance(cli, BOB_WALLET):.8f}"
+        "  BLAKE reserve low: "
+        f"alice={alice_balance:.8f} "
+        f"bob={bob_balance:.8f}"
+    )
+
+    if bob_balance > 0:
+        alice_addr = blake_cli(
+            "getnewaddress",
+            "",
+            "bech32",
+            wallet=ALICE_WALLET,
+        )
+
+        txid = blake_cli(
+            "sendall",
+            json.dumps(
+                [alice_addr]
+            ),
+            wallet=BOB_WALLET,
+        )
+
+        #
+        # Mining still confirms transactions even though fresh BLAKE
+        # issuance at this height is exhausted.
+        #
+        mine_addr = blake_cli(
+            "getnewaddress",
+            "",
+            "bech32",
+            wallet=ALICE_WALLET,
+        )
+
+        blake_cli(
+            "generatetoaddress",
+            1,
+            mine_addr,
+        )
+
+        print(
+            "  BLAKE recycled Bob -> Alice:",
+            txid,
+        )
+
+    alice_balance = trusted_balance(
+        blake_cli,
+        ALICE_WALLET,
+    )
+
+    bob_balance = trusted_balance(
+        blake_cli,
+        BOB_WALLET,
+    )
+
+    require(
+        alice_balance >= minimum,
+        (
+            "finite BLAKE test pool cannot restore "
+            f"Alice reserve: alice={alice_balance:.8f}, "
+            f"bob={bob_balance:.8f}, "
+            f"required={minimum:.8f}"
+        ),
+    )
+
+    print(
+        f"  BLAKE: alice={alice_balance:.8f} "
+        f"bob={bob_balance:.8f}"
     )
 
 
 def ensure_test_wallets() -> None:
-    for wallet in (ALICE_WALLET, BOB_WALLET):
-        ensure_wallet(btc_cli, "Bitcoin", wallet)
-        ensure_wallet(blake_cli, "BLAKE", wallet)
+    for wallet in (
+        ALICE_WALLET,
+        BOB_WALLET,
+    ):
+        ensure_wallet(
+            btc_cli,
+            "Bitcoin",
+            wallet,
+        )
 
-    # Both wallets must hold mature coins on both chains, otherwise the
-    # engine refuses to fund an HTLC.
-    ensure_wallet_funds(btc_cli, "Bitcoin")
-    ensure_wallet_funds(blake_cli, "BLAKE")
+        ensure_wallet(
+            blake_cli,
+            "BLAKE",
+            wallet,
+        )
+
+    #
+    # Chain economics are deliberately asymmetric:
+    #
+    #   Alice funds BLAKE.
+    #   Bob funds Bitcoin.
+    #
+    # Bitcoin regtest can bootstrap fresh funds by mining. The BLAKE
+    # test chain now has a finite existing capital pool, so BLAKE is
+    # recycled from Bob back to Alice when needed.
+    #
+    ensure_bitcoin_wallet_funds()
+    ensure_blake_alice_reserve()
 
 
 def mine_btc(blocks: int) -> None:

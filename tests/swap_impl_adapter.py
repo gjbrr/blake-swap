@@ -213,7 +213,7 @@ class SwapImplementationPair:
     def make_fresh_swap(
         self,
         *,
-        blake=0.1,
+        blake=0.001,
         sats=25_000,
     ) -> str:
         #

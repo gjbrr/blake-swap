@@ -176,7 +176,7 @@ def drive_market_swap():
         run(
             "alice",
             "publish-market-offer",
-            "--blake", "0.2",
+            "--blake", "0.001",
             "--sats", "30000",
             "--minutes", "30",
             "--direction", "blake-for-btc",
@@ -342,7 +342,7 @@ def test_cancel_flow():
         run(
             "alice",
             "publish-market-offer",
-            "--blake", "0.5",
+            "--blake", "0.001",
             "--sats", "90000",
             "--minutes", "30",
             "--direction", "blake-for-btc",

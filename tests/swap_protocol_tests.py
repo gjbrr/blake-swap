@@ -563,7 +563,7 @@ def ensure_bitcoin_wallet_funds(
 
 
 def ensure_blake_alice_reserve(
-    minimum: float = 1.0,
+    minimum: float = 0.05,
 ) -> None:
     """
     Maintain the finite BLAKE regtest capital pool.
@@ -718,7 +718,7 @@ def parse_swap_id(output: str) -> str:
     return m.group(1).lower()
 
 
-def make_fresh_swap(*, blake=0.1, sats=25_000) -> str:
+def make_fresh_swap(*, blake=0.001, sats=25_000) -> str:
     #
     # All negotiable test swaps use the same mandatory v1.5
     # timeout-policy path as production.  Absolute BTC and BLAKE

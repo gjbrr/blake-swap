@@ -117,7 +117,7 @@ def make_policy_swap():
     p = h.swap_cmd(
         "new",
         "--blake",
-        "0.1",
+        "0.001",
         "--sats",
         "25000",
         role="alice",

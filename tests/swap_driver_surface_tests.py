@@ -262,7 +262,7 @@ def negotiate_via_next():
     quiet(
         "alice",
         "publish-market-offer",
-        "--blake", "0.25",
+        "--blake", "0.0011",
         "--sats", "40000",
         "--minutes", "60",
         "--direction", "blake-for-btc",
@@ -679,7 +679,7 @@ def test_ignore_match_tombstones_without_creating_state():
     quiet(
         "alice",
         "publish-market-offer",
-        "--blake", "0.3",
+        "--blake", "0.0012",
         "--sats", "50000",
         "--minutes", "60",
         "--direction", "blake-for-btc",
@@ -1190,7 +1190,7 @@ def test_next_refuses_to_choose_between_two_negotiations():
         quiet(
             "alice",
             "publish-market-offer",
-            "--blake", f"0.{40 + index}",
+            "--blake", f"0.00{20 + index}",
             "--sats", str(60000 + index),
             "--minutes", minutes,
             "--direction", "blake-for-btc",
@@ -1349,7 +1349,7 @@ def test_resume_reports_manual_attention():
     quiet(
         "alice",
         "new",
-        "--blake", "0.12",
+        "--blake", "0.0013",
         "--sats", "21000",
         "--btc-timeout", "300",
         "--blake-timeout", "200",
@@ -1430,7 +1430,7 @@ def test_a_new_swap_archives_an_unannounced_placeholder_loudly():
     quiet(
         "alice",
         "new",
-        "--blake", "0.13",
+        "--blake", "0.0014",
         "--sats", "22000",
         "--btc-timeout", "300",
         "--blake-timeout", "200",
@@ -1442,7 +1442,7 @@ def test_a_new_swap_archives_an_unannounced_placeholder_loudly():
     result = quiet(
         "alice",
         "new",
-        "--blake", "0.14",
+        "--blake", "0.0015",
         "--sats", "23000",
         "--btc-timeout", "300",
         "--blake-timeout", "200",

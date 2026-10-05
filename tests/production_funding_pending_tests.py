@@ -87,7 +87,7 @@ def wallet_send_txids(cli, wallet):
 def test_pending_blake_funding():
     h.banner("PRODUCTION BLAKE FUNDING: PENDING CONFIRMATION")
 
-    swap_id = h.make_fresh_swap(blake=0.1)
+    swap_id = h.make_fresh_swap(blake=0.001)
     h.handshake(swap_id)
 
     production_env = {
@@ -248,7 +248,7 @@ def test_pending_blake_funding():
 def test_pending_btc_funding():
     h.banner("PRODUCTION BTC FUNDING: PENDING CONFIRMATION")
 
-    swap_id = h.make_fresh_swap(blake=0.1)
+    swap_id = h.make_fresh_swap(blake=0.001)
     h.handshake(swap_id)
     h.fund_blake_and_sync(swap_id)
 

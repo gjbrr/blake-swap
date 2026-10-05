@@ -47,6 +47,7 @@ FAULT_PROFILES = (
     "reorg-v1",
     "settlement-race-v1",
     "refund-crash-v1",
+    "refund-reorg-v1",
 )
 
 
@@ -1343,6 +1344,216 @@ def crash_recover_btc_refund(
     )
 
 
+def reorg_probe_btc_refund(
+    swap_id,
+    trace,
+):
+    """
+    Disconnect Bob's confirmed BTC refund after Alice has already
+    accepted it.
+
+    Alice may retain durable knowledge that BTC_REFUNDED occurred, but
+    that stale local fact is not sufficient authority to spend the
+    BLAKE refund branch.
+
+    While the BTC refund is disconnected:
+
+      * Alice remains durably BTC_REFUNDED;
+      * BLAKE timeout may mature;
+      * refund-blake must still fail closed;
+      * no BLAKE refund identity may be persisted.
+
+    Restoring the exact BTC refund block makes the prerequisite
+    authoritative again, after which normal BLAKE refund settlement may
+    continue.
+    """
+
+    bob = impl.state(
+        swap_id,
+        "bob",
+    )
+
+    alice = impl.state(
+        swap_id,
+        "alice",
+    )
+
+    h.require(
+        bob["state"] == "BTC_REFUNDED",
+        (
+            "seeded BTC-refund reorg requires Bob BTC_REFUNDED; "
+            f"observed {bob['state']}"
+        ),
+    )
+
+    h.require(
+        alice["state"] == "BTC_REFUNDED",
+        (
+            "seeded BTC-refund reorg requires Alice BTC_REFUNDED; "
+            f"observed {alice['state']}"
+        ),
+    )
+
+    refund_txid = bob.get(
+        "btc_refund_txid"
+    )
+
+    blockhash = bob.get(
+        "btc_refund_blockhash"
+    )
+
+    h.require(
+        bool(refund_txid),
+        "Bob BTC refund has no txid for seeded reorg",
+    )
+
+    h.require(
+        bool(blockhash),
+        "Bob BTC refund has no blockhash for seeded reorg",
+    )
+
+    h.btc_cli(
+        "invalidateblock",
+        blockhash,
+    )
+
+    trace.append(
+        "reorg:disconnect-btc-refund"
+    )
+
+    try:
+        #
+        # Durable state is intentionally stale here. The point of this
+        # test is that economic action must revalidate chain truth.
+        #
+        stale = impl.state(
+            swap_id,
+            "alice",
+        )
+
+        h.require(
+            stale["state"] == "BTC_REFUNDED",
+            (
+                "BTC refund reorg unexpectedly rewrote Alice "
+                f"checkpoint to {stale['state']}"
+            ),
+        )
+
+        #
+        # Mature the BLAKE refund timeout while the BTC prerequisite is
+        # absent. Timeout maturity by itself must not authorize Alice.
+        #
+        current = int(
+            impl.blake_height()
+        )
+
+        remaining = (
+            int(stale["blake_timeout"])
+            - current
+        )
+
+        if remaining > 0:
+            impl.mine_blake(
+                remaining
+            )
+
+        trace.append(
+            "advance:blake-timeout-under-reorg"
+        )
+
+        proc = impl.command(
+            "refund-blake",
+            swap_id,
+            role="alice",
+            expect_ok=False,
+        )
+
+        text = (
+            (proc.stdout or "")
+            + "\n"
+            + (proc.stderr or "")
+        )
+
+        h.require(
+            proc.returncode != 0,
+            "Alice refunded BLAKE from a reorged BTC refund",
+        )
+
+        h.require(
+            (
+                "Bitcoin refund is no longer on the active chain"
+                in text
+                or
+                "Bitcoin refund is not confirmed"
+                in text
+            ),
+            (
+                "reorged BTC refund was rejected for unexpected "
+                f"reason:\n{text[-1600:]}"
+            ),
+        )
+
+        rejected = impl.state(
+            swap_id,
+            "alice",
+        )
+
+        h.require(
+            rejected["state"] == "BTC_REFUNDED",
+            "stale BTC-refund probe changed Alice durable state",
+        )
+
+        h.require(
+            rejected.get("blake_refund_txid") is None,
+            "stale BTC-refund probe persisted BLAKE refund txid",
+        )
+
+        h.require(
+            rejected.get("blake_refund_blockhash") is None,
+            "stale BTC-refund probe persisted BLAKE refund blockhash",
+        )
+
+        trace.append(
+            "reject:blake-refund-from-reorged-btc-refund"
+        )
+
+    finally:
+        h.btc_cli(
+            "reconsiderblock",
+            blockhash,
+        )
+
+    trace.append(
+        "reorg:restore-btc-refund"
+    )
+
+    #
+    # Verify that the same refund transaction is active-chain
+    # authoritative again.
+    #
+    restored = h.btc_cli(
+        "getrawtransaction",
+        refund_txid,
+        True,
+        blockhash,
+    )
+
+    h.require(
+        restored.get("txid") == refund_txid,
+        "restored BTC refund lookup returned wrong txid",
+    )
+
+    h.require(
+        restored.get("blockhash") == blockhash,
+        "restored BTC refund returned wrong block anchor",
+    )
+
+    h.require(
+        int(restored.get("confirmations", 0)) >= 1,
+        "restored BTC refund is not active-chain confirmed",
+    )
+
+
 def run_refund_seed(seed, fault_profile="none"):
     rng = random.Random(seed)
     trace = []
@@ -1453,6 +1664,12 @@ def run_refund_seed(seed, fault_profile="none"):
         role="alice",
     )
     trace.append("receive:btc-refunded")
+
+    if fault_profile == "refund-reorg-v1":
+        reorg_probe_btc_refund(
+            swap_id,
+            trace,
+        )
 
     def duplicate_refund_receive():
         impl.command(

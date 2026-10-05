@@ -43,6 +43,7 @@ CRASH_EXIT = 97
 FAULT_PROFILES = (
     "none",
     "settlement-crash-v1",
+    "reorg-v1",
 )
 
 
@@ -454,6 +455,177 @@ def crash_recover_btc_claim(
     )
 
 
+def reorg_probe_btc_claim(
+    swap_id,
+    trace,
+):
+    """
+    Disconnect the block containing Alice's confirmed Bitcoin claim
+    after Bob has already learned S from that claim.
+
+    Bob's knowledge of S is irreversible local knowledge, but it is not
+    settlement authority. While the claim is off the active chain Bob
+    must refuse to spend the BLAKE HTLC.
+
+    Reconsidering the block restores chain authority; settlement may
+    then continue using the same learned secret.
+    """
+
+    alice = impl.state(
+        swap_id,
+        "alice",
+    )
+
+    bob = impl.state(
+        swap_id,
+        "bob",
+    )
+
+    h.require(
+        alice["state"] == "BTC_CLAIMED",
+        (
+            "seeded BTC-claim reorg requires Alice BTC_CLAIMED; "
+            f"observed {alice['state']}"
+        ),
+    )
+
+    h.require(
+        bob["state"] == "BTC_CLAIMED",
+        (
+            "seeded BTC-claim reorg requires Bob BTC_CLAIMED; "
+            f"observed {bob['state']}"
+        ),
+    )
+
+    h.require(
+        bool(bob.get("revealed_secret_hex")),
+        "Bob must know S before seeded BTC-claim reorg",
+    )
+
+    blockhash = alice.get(
+        "btc_claim_blockhash"
+    )
+
+    h.require(
+        bool(blockhash),
+        "Alice BTC claim has no blockhash for seeded reorg",
+    )
+
+    h.btc_cli(
+        "invalidateblock",
+        blockhash,
+    )
+
+    trace.append(
+        "reorg:disconnect-btc-claim"
+    )
+
+    try:
+        #
+        # Durable state and learned S remain, but active-chain truth has
+        # disappeared. Economic use of S must therefore fail closed.
+        #
+        stale = impl.state(
+            swap_id,
+            "bob",
+        )
+
+        h.require(
+            stale["state"] == "BTC_CLAIMED",
+            (
+                "BTC claim reorg unexpectedly rewrote Bob durable "
+                f"checkpoint to {stale['state']}"
+            ),
+        )
+
+        h.require(
+            bool(stale.get("revealed_secret_hex")),
+            "Bob forgot S after BTC claim reorg",
+        )
+
+        proc = impl.command(
+            "claim-blake",
+            swap_id,
+            role="bob",
+            expect_ok=False,
+        )
+
+        text = (
+            (proc.stdout or "")
+            + "\n"
+            + (proc.stderr or "")
+        )
+
+        h.require(
+            proc.returncode != 0,
+            "Bob claimed BLAKE from a reorged BTC claim",
+        )
+
+        h.require(
+            (
+                "Bitcoin claim is no longer on the active chain"
+                in text
+                or
+                "Bitcoin claim is not confirmed"
+                in text
+            ),
+            (
+                "reorged BTC claim was rejected for unexpected "
+                f"reason:\n{text[-1600:]}"
+            ),
+        )
+
+        after_reject = impl.state(
+            swap_id,
+            "bob",
+        )
+
+        h.require(
+            after_reject["state"] == "BTC_CLAIMED",
+            "failed stale-secret spend changed Bob durable state",
+        )
+
+        h.require(
+            after_reject.get("blake_claim_txid") is None,
+            "failed stale-secret spend persisted BLAKE claim txid",
+        )
+
+        trace.append(
+            "reject:blake-claim-from-reorged-btc-claim"
+        )
+
+    finally:
+        h.btc_cli(
+            "reconsiderblock",
+            blockhash,
+        )
+
+    trace.append(
+        "reorg:restore-btc-claim"
+    )
+
+    #
+    # Prove the original BTC claim is authoritative again before
+    # allowing the caller to continue to BLAKE settlement.
+    #
+    restored = h.btc_cli(
+        "getrawtransaction",
+        alice["btc_claim_txid"],
+        True,
+        blockhash,
+    )
+
+    h.require(
+        restored.get("blockhash") == blockhash,
+        "restored BTC claim returned wrong block anchor",
+    )
+
+    h.require(
+        int(restored.get("confirmations", 0)) >= 1,
+        "restored BTC claim is not active-chain confirmed",
+    )
+
+
 def run_claim_seed(seed, fault_profile="none"):
     rng = random.Random(seed)
     trace = []
@@ -616,6 +788,12 @@ def run_claim_seed(seed, fault_profile="none"):
         role="bob",
     )
     trace.append("extract-secret:bitcoin-witness")
+
+    if fault_profile == "reorg-v1":
+        reorg_probe_btc_claim(
+            swap_id,
+            trace,
+        )
 
     impl.command(
         "claim-blake",

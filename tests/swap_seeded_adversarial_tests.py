@@ -46,6 +46,7 @@ FAULT_PROFILES = (
     "settlement-crash-v1",
     "reorg-v1",
     "settlement-race-v1",
+    "refund-crash-v1",
 )
 
 
@@ -1133,6 +1134,215 @@ def run_claim_seed(seed, fault_profile="none"):
     return swap_id, trace
 
 
+def crash_recover_btc_refund(
+    swap_id,
+    trace,
+):
+    """
+    Crash protocol Bob after the signed BTC refund candidate has been
+    durably saved but before broadcast.
+
+    Recovery requirements mirror the claim-side crash invariant:
+
+      * crash must not advance BTC_FUNDED;
+      * durable refund txid + signed transaction survive;
+      * restart must reuse/rebroadcast that exact candidate;
+      * unconfirmed recovery must remain BTC_FUNDED;
+      * only active-chain confirmation may advance BTC_REFUNDED.
+    """
+
+    before = impl.state(
+        swap_id,
+        "bob",
+    )
+
+    h.require(
+        before["state"] == "BTC_FUNDED",
+        (
+            "seeded BTC-refund crash requires Bob BTC_FUNDED; "
+            f"observed {before['state']}"
+        ),
+    )
+
+    proc = impl.command(
+        "refund-btc",
+        swap_id,
+        role="bob",
+        expect_ok=False,
+        extra_env={
+            "BLAKE_SWAP_FAILPOINT":
+                "after_btc_refund_candidate_save_before_broadcast",
+            "BLAKE_SWAP_AUTO_MINE": "1",
+        },
+    )
+
+    h.require(
+        proc.returncode == CRASH_EXIT,
+        (
+            "seeded BTC-refund failpoint did not crash as expected; "
+            f"rc={proc.returncode}\n"
+            f"stdout:\n{proc.stdout[-1200:]}\n"
+            f"stderr:\n{proc.stderr[-1200:]}"
+        ),
+    )
+
+    crashed = impl.state(
+        swap_id,
+        "bob",
+    )
+
+    h.require(
+        crashed["state"] == "BTC_FUNDED",
+        (
+            "BTC refund crash advanced durable state to "
+            f"{crashed['state']}"
+        ),
+    )
+
+    candidate_txid = crashed.get(
+        "btc_refund_txid"
+    )
+
+    candidate_hex = crashed.get(
+        "btc_refund_hex"
+    )
+
+    h.require(
+        bool(candidate_txid),
+        "BTC refund crash lost durable candidate txid",
+    )
+
+    h.require(
+        bool(candidate_hex),
+        "BTC refund crash lost durable signed transaction",
+    )
+
+    h.require(
+        crashed.get("btc_refund_blockhash") is None,
+        "pre-broadcast BTC refund crash recorded blockhash",
+    )
+
+    trace.append(
+        "crash:btc-refund:candidate-saved-before-broadcast"
+    )
+
+    #
+    # Restart without auto-mining. This must recover/rebroadcast the
+    # exact candidate while leaving durable state at BTC_FUNDED.
+    #
+    proc = impl.command(
+        "refund-btc",
+        swap_id,
+        role="bob",
+        expect_ok=False,
+        extra_env={
+            "BLAKE_SWAP_AUTO_MINE": "0",
+        },
+    )
+
+    h.require(
+        proc.returncode == 0,
+        (
+            "BTC refund restart failed while recovering candidate; "
+            f"rc={proc.returncode}\n"
+            f"stdout:\n{proc.stdout[-1200:]}\n"
+            f"stderr:\n{proc.stderr[-1200:]}"
+        ),
+    )
+
+    pending = impl.state(
+        swap_id,
+        "bob",
+    )
+
+    h.require(
+        pending["state"] == "BTC_FUNDED",
+        (
+            "unconfirmed BTC refund restart advanced state to "
+            f"{pending['state']}"
+        ),
+    )
+
+    h.require(
+        pending.get("btc_refund_txid")
+        == candidate_txid,
+        "BTC refund restart changed candidate txid",
+    )
+
+    h.require(
+        pending.get("btc_refund_hex")
+        == candidate_hex,
+        "BTC refund restart changed signed transaction",
+    )
+
+    h.require(
+        pending.get("btc_refund_blockhash") is None,
+        "unconfirmed BTC refund restart recorded blockhash",
+    )
+
+    h.require(
+        candidate_txid
+        in h.btc_cli("getrawmempool"),
+        "recovered BTC refund candidate is not in mempool",
+    )
+
+    trace.append(
+        "restart:recover-btc-refund:pending-same-candidate"
+    )
+
+    #
+    # External chain confirmation is the authority.
+    #
+    impl.mine_btc(1)
+
+    trace.append(
+        "confirm:btc-refund"
+    )
+
+    impl.command(
+        "refund-btc",
+        swap_id,
+        role="bob",
+        extra_env={
+            "BLAKE_SWAP_AUTO_MINE": "0",
+        },
+    )
+
+    recovered = impl.state(
+        swap_id,
+        "bob",
+    )
+
+    h.require(
+        recovered["state"] == "BTC_REFUNDED",
+        (
+            "confirmed BTC refund recovery did not reach BTC_REFUNDED; "
+            f"observed {recovered['state']}"
+        ),
+    )
+
+    h.require(
+        recovered.get("btc_refund_txid")
+        == candidate_txid,
+        "confirmed BTC refund recovery changed canonical txid",
+    )
+
+    h.require(
+        recovered.get("btc_refund_hex")
+        == candidate_hex,
+        "confirmed BTC refund recovery changed signed transaction",
+    )
+
+    h.require(
+        bool(recovered.get("btc_refund_blockhash")),
+        "confirmed BTC refund recovery has no block anchor",
+    )
+
+    trace.append(
+        "recover:btc-refund:confirmed-same-candidate"
+    )
+
+
 def run_refund_seed(seed, fault_profile="none"):
     rng = random.Random(seed)
     trace = []
@@ -1217,12 +1427,18 @@ def run_refund_seed(seed, fault_profile="none"):
         impl.mine_btc(remaining)
         trace.append("advance:btc-timeout")
 
-    impl.command(
-        "refund-btc",
-        swap_id,
-        role="bob",
-    )
-    trace.append("refund:btc")
+    if fault_profile == "refund-crash-v1":
+        crash_recover_btc_refund(
+            swap_id,
+            trace,
+        )
+    else:
+        impl.command(
+            "refund-btc",
+            swap_id,
+            role="bob",
+        )
+        trace.append("refund:btc")
 
     impl.command(
         "publish-btc-refunded",

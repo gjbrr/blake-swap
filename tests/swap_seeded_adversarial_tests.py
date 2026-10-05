@@ -49,6 +49,7 @@ FAULT_PROFILES = (
     "refund-crash-v1",
     "refund-reorg-v1",
     "refund-race-v1",
+    "combined-fault-v1",
 )
 
 
@@ -718,6 +719,255 @@ def race_btc_claim(
     )
 
 
+def race_blake_claim(
+    swap_id,
+    trace,
+):
+    """
+    Race two concurrent BLAKE claim attempts through Bob's adapter.
+
+    This is used after BTC claim recovery + reorg restoration in the
+    combined fault profile.
+
+    Portable requirements:
+      * at least one racer succeeds;
+      * Bob converges to BLAKE_CLAIMED;
+      * exactly one durable BLAKE claim identity wins;
+      * that transaction spends this swap's exact BLAKE HTLC once;
+      * the canonical transaction is active-chain confirmed;
+      * no competing spend remains in the BLAKE mempool.
+    """
+
+    before = impl.state(
+        swap_id,
+        "bob",
+    )
+
+    h.require(
+        before["state"] == "BTC_CLAIMED",
+        (
+            "seeded BLAKE-claim race requires Bob BTC_CLAIMED; "
+            f"observed {before['state']}"
+        ),
+    )
+
+    h.require(
+        bool(before.get("revealed_secret_hex")),
+        "seeded BLAKE-claim race requires Bob to know S",
+    )
+
+    funding_txid = before.get(
+        "blake_funding_txid"
+    )
+    funding_vout = before.get(
+        "blake_funding_vout"
+    )
+
+    h.require(
+        bool(funding_txid),
+        "seeded BLAKE-claim race has no BLAKE funding txid",
+    )
+
+    h.require(
+        funding_vout is not None,
+        "seeded BLAKE-claim race has no BLAKE funding vout",
+    )
+
+    gate = threading.Barrier(3)
+    results = [None, None]
+    errors = [None, None]
+
+    def worker(index):
+        try:
+            gate.wait()
+
+            results[index] = impl.command(
+                "claim-blake",
+                swap_id,
+                role="bob",
+                expect_ok=False,
+            )
+        except BaseException as exc:
+            errors[index] = exc
+
+    threads = [
+        threading.Thread(
+            target=worker,
+            args=(0,),
+            daemon=True,
+        ),
+        threading.Thread(
+            target=worker,
+            args=(1,),
+            daemon=True,
+        ),
+    ]
+
+    for thread in threads:
+        thread.start()
+
+    gate.wait()
+
+    for thread in threads:
+        thread.join(timeout=90)
+
+    h.require(
+        not any(thread.is_alive() for thread in threads),
+        "seeded BLAKE-claim race did not terminate",
+    )
+
+    h.require(
+        not any(errors),
+        (
+            "seeded BLAKE-claim race raised adapter exception: "
+            f"{errors}"
+        ),
+    )
+
+    h.require(
+        all(result is not None for result in results),
+        "seeded BLAKE-claim race lost a participant result",
+    )
+
+    returncodes = [
+        result.returncode
+        for result in results
+    ]
+
+    h.require(
+        any(code == 0 for code in returncodes),
+        (
+            "both seeded BLAKE-claim racers failed; "
+            f"returncodes={returncodes}"
+        ),
+    )
+
+    trace.append(
+        "race:blake-claim:x2"
+    )
+
+    settled = impl.state(
+        swap_id,
+        "bob",
+    )
+
+    h.require(
+        settled["state"] == "BLAKE_CLAIMED",
+        (
+            "BLAKE-claim race did not converge to BLAKE_CLAIMED; "
+            f"observed {settled['state']}"
+        ),
+    )
+
+    canonical_txid = settled.get(
+        "blake_claim_txid"
+    )
+    canonical_blockhash = settled.get(
+        "blake_claim_blockhash"
+    )
+
+    h.require(
+        bool(canonical_txid),
+        "BLAKE-claim race has no canonical txid",
+    )
+
+    h.require(
+        bool(canonical_blockhash),
+        "BLAKE-claim race has no canonical blockhash",
+    )
+
+    tx = h.blake_cli(
+        "getrawtransaction",
+        canonical_txid,
+        True,
+        canonical_blockhash,
+    )
+
+    h.require(
+        int(tx.get("confirmations", 0)) >= 1,
+        "canonical raced BLAKE claim is not confirmed",
+    )
+
+    exact_inputs = [
+        vin
+        for vin in tx.get("vin", [])
+        if (
+            vin.get("txid") == funding_txid
+            and int(vin.get("vout", -1))
+            == int(funding_vout)
+        )
+    ]
+
+    h.require(
+        len(exact_inputs) == 1,
+        (
+            "canonical raced BLAKE claim does not spend "
+            "the exact HTLC exactly once"
+        ),
+    )
+
+    block = h.blake_cli(
+        "getblock",
+        canonical_blockhash,
+        2,
+    )
+
+    active_spenders = []
+
+    for block_tx in block.get("tx", []):
+        if not isinstance(block_tx, dict):
+            continue
+
+        for vin in block_tx.get("vin", []):
+            if (
+                vin.get("txid") == funding_txid
+                and int(vin.get("vout", -1))
+                == int(funding_vout)
+            ):
+                active_spenders.append(
+                    block_tx.get("txid")
+                )
+                break
+
+    h.require(
+        active_spenders == [canonical_txid],
+        (
+            "BLAKE-claim race produced unexpected active-chain "
+            f"HTLC spenders: {active_spenders}"
+        ),
+    )
+
+    competing = []
+
+    for txid in h.blake_cli("getrawmempool"):
+        memtx = h.blake_cli(
+            "getrawtransaction",
+            txid,
+            True,
+        )
+
+        for vin in memtx.get("vin", []):
+            if (
+                vin.get("txid") == funding_txid
+                and int(vin.get("vout", -1))
+                == int(funding_vout)
+            ):
+                competing.append(txid)
+                break
+
+    h.require(
+        not competing,
+        (
+            "BLAKE-claim race left competing HTLC spend "
+            f"in mempool: {competing}"
+        ),
+    )
+
+    trace.append(
+        "converge:blake-claim:one-canonical-settlement"
+    )
+
+
 def reorg_probe_btc_claim(
     swap_id,
     trace,
@@ -989,7 +1239,10 @@ def run_claim_seed(seed, fault_profile="none"):
     impl.assert_secret_separation(swap_id)
     trace.append("assert:no-transported-secret")
 
-    if fault_profile == "settlement-crash-v1":
+    if fault_profile in {
+        "settlement-crash-v1",
+        "combined-fault-v1",
+    }:
         crash_recover_btc_claim(
             swap_id,
             trace,
@@ -1057,18 +1310,27 @@ def run_claim_seed(seed, fault_profile="none"):
     )
     trace.append("extract-secret:bitcoin-witness")
 
-    if fault_profile == "reorg-v1":
+    if fault_profile in {
+        "reorg-v1",
+        "combined-fault-v1",
+    }:
         reorg_probe_btc_claim(
             swap_id,
             trace,
         )
 
-    impl.command(
-        "claim-blake",
-        swap_id,
-        role="bob",
-    )
-    trace.append("claim:blake")
+    if fault_profile == "combined-fault-v1":
+        race_blake_claim(
+            swap_id,
+            trace,
+        )
+    else:
+        impl.command(
+            "claim-blake",
+            swap_id,
+            role="bob",
+        )
+        trace.append("claim:blake")
 
     impl.command(
         "publish-blake-claimed",

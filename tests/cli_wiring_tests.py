@@ -238,7 +238,11 @@ def live_surface(subcommands):
         text=True,
         timeout=120,
         cwd=str(ROOT),
-        env={**node_config.node_env(), "PYTHONPATH": str(ROOT / "src")},
+        env={
+            **node_config.node_env(),
+            "PYTHONPATH": str(ROOT / "src"),
+            "BLAKE_SWAP_TEST_MODE": "1",
+        },
     )
 
     if completed.returncode != 0:

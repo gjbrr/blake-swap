@@ -106,6 +106,10 @@ UNIT_SUITES=(
     tests/schema_equality_tests.py
     tests/nip44_tests.py
     tests/packaging_tests.py
+    tests/implementation_adapter_tests.py
+    tests/moxie_adapter_smoke_tests.py
+    tests/security_conformance_tests.py
+    tests/swap_model_settlement_identity_tests.py
 )
 
 REGTEST_SUITES=(
@@ -134,6 +138,10 @@ REGTEST_SUITES=(
     tests/swap_driver_surface_tests.py
     tests/swap_encrypted_coordination_tests.py
     tests/htlc_key_recovery_tests.py
+    tests/swap_seeded_adversarial_tests.py
+    tests/swap_settlement_crash_matrix_tests.py
+    tests/swap_settlement_fault_matrix_tests.py
+    tests/swap_settlement_race_tests.py
 )
 
 NOSTR_SUITES=(

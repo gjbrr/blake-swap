@@ -43,6 +43,24 @@ PASS = 0
 FAIL = 0
 
 
+def amount_base_units(record):
+    """
+    Return the canonical BLAKE amount in integer base units.
+
+    Current swap state stores blake_amount_base_units.  Older records
+    used blake_amount as a coin-denominated JSON number.
+    """
+    if record.get("blake_amount_base_units") is not None:
+        return int(record["blake_amount_base_units"])
+
+    from decimal import Decimal
+
+    return int(
+        Decimal(str(amount_base_units(record)))
+        * Decimal(100_000_000)
+    )
+
+
 def skip(reason):
     """
     Abort with the conventional "prerequisites absent" exit code.
@@ -410,10 +428,10 @@ def main():
 
         require(
             float(
-                alice["blake_amount"]
+                amount_base_units(alice)
             )
             == float(
-                bob["blake_amount"]
+                amount_base_units(bob)
             ),
             "participants disagree on BLAKE amount",
         )

@@ -1,6 +1,6 @@
 # BLAKE Swap Test Suites
 
-51 suites covering the atomic-swap engine, the wire format, the market
+59 suites covering the atomic-swap engine, the wire format, the market
 state machine, crash recovery, reorganization safety,
 independent-implementation compatibility, and documentation alignment.
 
@@ -36,8 +36,8 @@ List suites and their prerequisites:
 
 | Class | Needs | Count |
 |---|---|---|
-| `unit` | nothing (some need the declared Python deps) | 24 |
-| `regtest` | reachable Bitcoin + BLAKE regtest nodes | 25 |
+| `unit` | nothing (some need the declared Python deps) | 28 |
+| `regtest` | reachable Bitcoin + BLAKE regtest nodes | 29 |
 | `nostr` | regtest nodes, real relays, two participant keys | 2 |
 
 The two `nostr` suites publish to real relays and are therefore
@@ -253,7 +253,7 @@ honest reading — run `scripts/test-nodes start` first.
 
 ## Suite inventory
 
-### Unit suites — no prerequisites (24)
+### Unit suites — no prerequisites (28)
 
 | Suite | Covers |
 |---|---|
@@ -282,7 +282,12 @@ honest reading — run `scripts/test-nodes start` first.
 | `node_config_tests.py` | node resolution: environment first, then a running rig, then conventional paths; a stopped or corrupt rig state file degrades to a skip instead of a wrong target |
 | `fail_closed_tests.py` | refusal behaviour when preconditions fail: corrupted state files, unknown swap IDs, mismatched chain identities, missing preimages, and unconfirmed settlements all stop the command instead of acting on a guess, and no on-disk state is mutated |
 
-### Regtest suites — need chain nodes (25)
+| `implementation_adapter_tests.py` | structural contract for independently replaceable Alice/Bob implementation adapters |
+| `moxie_adapter_smoke_tests.py` | validates the language-neutral adapter fixture and the first Python/Moxie seed-4 target |
+| `security_conformance_tests.py` | machine-readable C1-C47 security-conformance manifest completeness and proving-suite mappings |
+| `swap_model_settlement_identity_tests.py` | durable settlement identity invariants at the swap-model boundary |
+
+### Regtest suites — need chain nodes (29)
 
 **Core protocol**
 
@@ -333,6 +338,11 @@ wire rules.
 | `swap_cross_impl_btc_claimed_tests.py` | the `btc-claimed` announcement |
 | `swap_cross_impl_blake_claimed_tests.py` | the `blake-claimed` announcement |
 | `swap_cross_impl_full_happy_tests.py` | an end-to-end swap with independently produced messages |
+
+| `swap_seeded_adversarial_tests.py` | replayable seeded adversarial sequences and portable behavioral fingerprints for differential implementations |
+| `swap_settlement_crash_matrix_tests.py` | all four settlement branches crashed at candidate-save, post-broadcast, and confirmation-before-save boundaries |
+| `swap_settlement_fault_matrix_tests.py` | deterministic settlement fault injection and exact-transaction recovery behavior |
+| `swap_settlement_race_tests.py` | concurrent claim/refund attempts converge on one canonical economic transaction identity |
 
 ### Nostr suites — need relays and keys, opt-in (2)
 

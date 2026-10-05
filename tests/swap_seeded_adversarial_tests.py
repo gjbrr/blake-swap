@@ -38,6 +38,14 @@ DEFAULT_SEEDS = (
 )
 
 
+CRASH_EXIT = 97
+
+FAULT_PROFILES = (
+    "none",
+    "settlement-crash-v1",
+)
+
+
 def require_failure(name, proc):
     h.require(
         proc.returncode != 0,
@@ -230,7 +238,223 @@ def run_noise(rng, events):
             yield name
 
 
-def run_claim_seed(seed):
+def crash_recover_btc_claim(
+    swap_id,
+    trace,
+):
+    """
+    Crash protocol Alice after the signed BTC claim candidate has been
+    durably saved but before it is broadcast.
+
+    This is an implementation fault event, but its assertions are
+    portable economic properties:
+
+      * the crash must not advance durable settlement state;
+      * the signed candidate identity must survive restart;
+      * retry must reuse that exact economic candidate;
+      * only active-chain confirmation may advance BTC_CLAIMED.
+
+    The Python reference engine exposes the failpoint through an
+    environment variable. Other implementations can later map the same
+    scheduler event to their own crash mechanism.
+    """
+
+    before = impl.state(
+        swap_id,
+        "alice",
+    )
+
+    h.require(
+        before["state"] == "BTC_FUNDED",
+        (
+            "seeded BTC-claim crash requires Alice BTC_FUNDED; "
+            f"observed {before['state']}"
+        ),
+    )
+
+    proc = impl.command(
+        "claim-btc",
+        swap_id,
+        role="alice",
+        expect_ok=False,
+        extra_env={
+            "BLAKE_SWAP_FAILPOINT":
+                "after_btc_claim_candidate_save_before_broadcast",
+            "BLAKE_SWAP_AUTO_MINE": "1",
+        },
+    )
+
+    h.require(
+        proc.returncode == CRASH_EXIT,
+        (
+            "seeded BTC-claim failpoint did not crash as expected; "
+            f"rc={proc.returncode}\n"
+            f"stdout:\n{proc.stdout[-1200:]}\n"
+            f"stderr:\n{proc.stderr[-1200:]}"
+        ),
+    )
+
+    crashed = impl.state(
+        swap_id,
+        "alice",
+    )
+
+    h.require(
+        crashed["state"] == "BTC_FUNDED",
+        (
+            "BTC claim crash advanced durable protocol state to "
+            f"{crashed['state']}"
+        ),
+    )
+
+    candidate_txid = crashed.get(
+        "btc_claim_txid"
+    )
+
+    candidate_hex = crashed.get(
+        "btc_claim_hex"
+    )
+
+    h.require(
+        bool(candidate_txid),
+        "BTC claim crash lost durable candidate txid",
+    )
+
+    h.require(
+        bool(candidate_hex),
+        "BTC claim crash lost durable signed transaction",
+    )
+
+    h.require(
+        crashed.get("btc_claim_blockhash") is None,
+        "pre-broadcast BTC claim crash recorded authoritative blockhash",
+    )
+
+    trace.append(
+        "crash:btc-claim:candidate-saved-before-broadcast"
+    )
+
+    #
+    # First restart: recover/rebroadcast the exact durable candidate,
+    # but do NOT auto-mine. Durable protocol state must remain
+    # BTC_FUNDED until active-chain confirmation exists.
+    #
+    proc = impl.command(
+        "claim-btc",
+        swap_id,
+        role="alice",
+        expect_ok=False,
+        extra_env={
+            "BLAKE_SWAP_AUTO_MINE": "0",
+        },
+    )
+
+    h.require(
+        proc.returncode == 0,
+        (
+            "BTC claim restart failed while recovering durable "
+            f"candidate; rc={proc.returncode}\n"
+            f"stdout:\n{proc.stdout[-1200:]}\n"
+            f"stderr:\n{proc.stderr[-1200:]}"
+        ),
+    )
+
+    pending = impl.state(
+        swap_id,
+        "alice",
+    )
+
+    h.require(
+        pending["state"] == "BTC_FUNDED",
+        (
+            "unconfirmed BTC claim restart advanced durable state "
+            f"to {pending['state']}"
+        ),
+    )
+
+    h.require(
+        pending.get("btc_claim_txid")
+        == candidate_txid,
+        "BTC claim restart changed durable candidate txid",
+    )
+
+    h.require(
+        pending.get("btc_claim_hex")
+        == candidate_hex,
+        "BTC claim restart changed durable signed transaction",
+    )
+
+    h.require(
+        pending.get("btc_claim_blockhash") is None,
+        "unconfirmed BTC claim restart recorded blockhash",
+    )
+
+    h.require(
+        candidate_txid
+        in h.btc_cli("getrawmempool"),
+        "recovered BTC claim candidate is not in mempool",
+    )
+
+    trace.append(
+        "restart:recover-btc-claim:pending-same-candidate"
+    )
+
+    #
+    # The laboratory, not the participant, produces the confirming
+    # block. Only after that active-chain fact exists may durable state
+    # advance.
+    #
+    impl.mine_btc(1)
+
+    trace.append(
+        "confirm:btc-claim"
+    )
+
+    impl.command(
+        "claim-btc",
+        swap_id,
+        role="alice",
+        extra_env={
+            "BLAKE_SWAP_AUTO_MINE": "0",
+        },
+    )
+
+    recovered = impl.state(
+        swap_id,
+        "alice",
+    )
+
+    h.require(
+        recovered["state"] == "BTC_CLAIMED",
+        (
+            "confirmed BTC claim recovery did not reach BTC_CLAIMED; "
+            f"observed {recovered['state']}"
+        ),
+    )
+
+    h.require(
+        recovered.get("btc_claim_txid")
+        == candidate_txid,
+        "confirmed BTC claim recovery changed canonical txid",
+    )
+
+    h.require(
+        recovered.get("btc_claim_hex")
+        == candidate_hex,
+        "confirmed BTC claim recovery changed signed transaction",
+    )
+
+    h.require(
+        bool(recovered.get("btc_claim_blockhash")),
+        "confirmed BTC claim recovery has no active-chain block anchor",
+    )
+
+    trace.append(
+        "recover:btc-claim:confirmed-same-candidate"
+    )
+
+
+def run_claim_seed(seed, fault_profile="none"):
     rng = random.Random(seed)
     trace = []
 
@@ -330,12 +554,18 @@ def run_claim_seed(seed):
     impl.assert_secret_separation(swap_id)
     trace.append("assert:no-transported-secret")
 
-    impl.command(
-        "claim-btc",
-        swap_id,
-        role="alice",
-    )
-    trace.append("claim:btc")
+    if fault_profile == "settlement-crash-v1":
+        crash_recover_btc_claim(
+            swap_id,
+            trace,
+        )
+    else:
+        impl.command(
+            "claim-btc",
+            swap_id,
+            role="alice",
+        )
+        trace.append("claim:btc")
 
     impl.command(
         "publish-btc-claimed",
@@ -460,7 +690,7 @@ def run_claim_seed(seed):
     return swap_id, trace
 
 
-def run_refund_seed(seed):
+def run_refund_seed(seed, fault_profile="none"):
     rng = random.Random(seed)
     trace = []
 
@@ -647,7 +877,7 @@ def run_refund_seed(seed):
     return swap_id, trace
 
 
-def run_seed(seed):
+def run_seed(seed, fault_profile="none"):
     #
     # Path selection is itself deterministic and portable.
     #
@@ -658,9 +888,15 @@ def run_seed(seed):
     )
 
     if path == "claim":
-        swap_id, trace = run_claim_seed(seed)
+        swap_id, trace = run_claim_seed(
+            seed,
+            fault_profile=fault_profile,
+        )
     else:
-        swap_id, trace = run_refund_seed(seed)
+        swap_id, trace = run_refund_seed(
+            seed,
+            fault_profile=fault_profile,
+        )
 
     raw_final = raw_snapshot(swap_id)
     final = portable_snapshot(raw_final)
@@ -668,6 +904,7 @@ def run_seed(seed):
     result = {
         "seed": seed,
         "path": path,
+        "fault_profile": fault_profile,
         "swap_id": swap_id,
         "trace": trace,
         "final": final,
@@ -723,6 +960,16 @@ def main():
         help=(
             "External blake-swap-adapter-v1 executable "
             "for protocol Bob."
+        ),
+    )
+
+    parser.add_argument(
+        "--fault-profile",
+        choices=FAULT_PROFILES,
+        default="none",
+        help=(
+            "Deterministic laboratory fault schedule. "
+            "Default 'none' preserves the established seeded oracle."
         ),
     )
 
@@ -873,7 +1120,10 @@ def main():
                 f"SEEDED ADVERSARIAL SEQUENCE {seed}"
             )
 
-            result = run_seed(seed)
+            result = run_seed(
+                seed,
+                fault_profile=args.fault_profile,
+            )
             results.append(result)
 
             h.ok(

@@ -14,6 +14,7 @@ import argparse
 import hashlib
 import json
 import random
+import threading
 import time
 
 import swap_protocol_tests as h
@@ -44,6 +45,7 @@ FAULT_PROFILES = (
     "none",
     "settlement-crash-v1",
     "reorg-v1",
+    "settlement-race-v1",
 )
 
 
@@ -455,6 +457,264 @@ def crash_recover_btc_claim(
     )
 
 
+def race_btc_claim(
+    swap_id,
+    trace,
+):
+    """
+    Launch two concurrent BTC-claim attempts through Alice's participant
+    adapter.
+
+    The scheduler does not care how an implementation serializes the
+    work internally. The portable requirements are:
+
+      * at least one attempt succeeds;
+      * Alice converges to BTC_CLAIMED;
+      * exactly one durable BTC-claim identity wins;
+      * that transaction spends this swap's exact BTC HTLC;
+      * the canonical settlement is confirmed on the active chain;
+      * no competing spend of the same HTLC remains in the mempool.
+
+    Because both calls go through the adapter, this same race can later
+    be replayed against an external implementation.
+    """
+
+    before = impl.state(
+        swap_id,
+        "alice",
+    )
+
+    h.require(
+        before["state"] == "BTC_FUNDED",
+        (
+            "seeded BTC-claim race requires Alice BTC_FUNDED; "
+            f"observed {before['state']}"
+        ),
+    )
+
+    funding_txid = before.get(
+        "btc_funding_txid"
+    )
+    funding_vout = before.get(
+        "btc_funding_vout"
+    )
+
+    h.require(
+        bool(funding_txid),
+        "seeded BTC-claim race has no BTC funding txid",
+    )
+
+    h.require(
+        funding_vout is not None,
+        "seeded BTC-claim race has no BTC funding vout",
+    )
+
+    gate = threading.Barrier(3)
+    results = [None, None]
+    errors = [None, None]
+
+    def worker(index):
+        try:
+            gate.wait()
+
+            results[index] = impl.command(
+                "claim-btc",
+                swap_id,
+                role="alice",
+                expect_ok=False,
+            )
+        except BaseException as exc:
+            errors[index] = exc
+
+    threads = [
+        threading.Thread(
+            target=worker,
+            args=(0,),
+            daemon=True,
+        ),
+        threading.Thread(
+            target=worker,
+            args=(1,),
+            daemon=True,
+        ),
+    ]
+
+    for thread in threads:
+        thread.start()
+
+    #
+    # Release both participant calls at the same scheduler boundary.
+    #
+    gate.wait()
+
+    for thread in threads:
+        thread.join(timeout=90)
+
+    h.require(
+        not any(thread.is_alive() for thread in threads),
+        "seeded BTC-claim race did not terminate",
+    )
+
+    h.require(
+        not any(errors),
+        (
+            "seeded BTC-claim race raised adapter exception: "
+            f"{errors}"
+        ),
+    )
+
+    h.require(
+        all(result is not None for result in results),
+        "seeded BTC-claim race lost a participant result",
+    )
+
+    returncodes = [
+        result.returncode
+        for result in results
+    ]
+
+    h.require(
+        any(code == 0 for code in returncodes),
+        (
+            "both seeded BTC-claim racers failed; "
+            f"returncodes={returncodes}"
+        ),
+    )
+
+    trace.append(
+        "race:btc-claim:x2"
+    )
+
+    settled = impl.state(
+        swap_id,
+        "alice",
+    )
+
+    h.require(
+        settled["state"] == "BTC_CLAIMED",
+        (
+            "BTC-claim race did not converge to BTC_CLAIMED; "
+            f"observed {settled['state']}"
+        ),
+    )
+
+    canonical_txid = settled.get(
+        "btc_claim_txid"
+    )
+
+    canonical_blockhash = settled.get(
+        "btc_claim_blockhash"
+    )
+
+    h.require(
+        bool(canonical_txid),
+        "BTC-claim race has no canonical txid",
+    )
+
+    h.require(
+        bool(canonical_blockhash),
+        "BTC-claim race has no canonical blockhash",
+    )
+
+    tx = h.btc_cli(
+        "getrawtransaction",
+        canonical_txid,
+        True,
+        canonical_blockhash,
+    )
+
+    h.require(
+        int(tx.get("confirmations", 0)) >= 1,
+        "canonical raced BTC claim is not confirmed",
+    )
+
+    exact_inputs = [
+        vin
+        for vin in tx.get("vin", [])
+        if (
+            vin.get("txid") == funding_txid
+            and int(vin.get("vout", -1))
+            == int(funding_vout)
+        )
+    ]
+
+    h.require(
+        len(exact_inputs) == 1,
+        (
+            "canonical raced BTC claim does not spend "
+            "the exact HTLC exactly once"
+        ),
+    )
+
+    #
+    # Confirm that the active block contains only this settlement for
+    # the exact funding outpoint.
+    #
+    block = h.btc_cli(
+        "getblock",
+        canonical_blockhash,
+        2,
+    )
+
+    active_spenders = []
+
+    for block_tx in block.get("tx", []):
+        if not isinstance(block_tx, dict):
+            continue
+
+        for vin in block_tx.get("vin", []):
+            if (
+                vin.get("txid") == funding_txid
+                and int(vin.get("vout", -1))
+                == int(funding_vout)
+            ):
+                active_spenders.append(
+                    block_tx.get("txid")
+                )
+                break
+
+    h.require(
+        active_spenders == [canonical_txid],
+        (
+            "BTC-claim race produced unexpected active-chain "
+            f"HTLC spenders: {active_spenders}"
+        ),
+    )
+
+    #
+    # Nor may a competing spend remain live in the mempool.
+    #
+    competing = []
+
+    for txid in h.btc_cli("getrawmempool"):
+        memtx = h.btc_cli(
+            "getrawtransaction",
+            txid,
+            True,
+        )
+
+        for vin in memtx.get("vin", []):
+            if (
+                vin.get("txid") == funding_txid
+                and int(vin.get("vout", -1))
+                == int(funding_vout)
+            ):
+                competing.append(txid)
+                break
+
+    h.require(
+        not competing,
+        (
+            "BTC-claim race left competing HTLC spend "
+            f"in mempool: {competing}"
+        ),
+    )
+
+    trace.append(
+        "converge:btc-claim:one-canonical-settlement"
+    )
+
+
 def reorg_probe_btc_claim(
     swap_id,
     trace,
@@ -728,6 +988,11 @@ def run_claim_seed(seed, fault_profile="none"):
 
     if fault_profile == "settlement-crash-v1":
         crash_recover_btc_claim(
+            swap_id,
+            trace,
+        )
+    elif fault_profile == "settlement-race-v1":
+        race_btc_claim(
             swap_id,
             trace,
         )

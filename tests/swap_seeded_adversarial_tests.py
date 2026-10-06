@@ -53,6 +53,7 @@ FAULT_PROFILES = (
     "combined-refund-fault-v1",
     "scheduled-v1",
     "scheduled-v2",
+    "scheduled-v3",
 )
 
 
@@ -308,6 +309,400 @@ def build_fault_schedule_v2(
     }
 
 
+
+SCHEDULE_VERSION_V3 = "scheduled-v3"
+
+
+def deterministic_schedule_choice_v3(
+    seed,
+    path,
+    stage,
+    options,
+):
+    """
+    Stable cross-language scheduled-v3 chooser.
+
+    SHA-256 input:
+
+        scheduled-v3:<seed>:<path>:<stage>
+    """
+
+    material = (
+        f"{SCHEDULE_VERSION_V3}:{seed}:{path}:{stage}"
+    ).encode("utf-8")
+
+    digest = hashlib.sha256(
+        material
+    ).digest()
+
+    index = (
+        int.from_bytes(
+            digest,
+            "big",
+        )
+        % len(options)
+    )
+
+    return options[index]
+
+
+def build_fault_schedule_v3(
+    seed,
+    path,
+):
+    """
+    Transport-focused adversarial schedule.
+
+    Each coordination boundary chooses:
+
+        normal
+        replay
+        omit-sync
+
+    omit-sync means the coordination message is omitted and the
+    participant must recover the authoritative fact from chain state.
+    """
+
+    blake_funding_delivery = (
+        deterministic_schedule_choice_v3(
+            seed,
+            path,
+            "blake-funding-delivery",
+            (
+                "normal",
+                "replay",
+                "omit-sync",
+            ),
+        )
+    )
+
+    btc_funding_delivery = (
+        deterministic_schedule_choice_v3(
+            seed,
+            path,
+            "btc-funding-delivery",
+            (
+                "normal",
+                "replay",
+                "omit-sync",
+            ),
+        )
+    )
+
+    primary_delivery = (
+        deterministic_schedule_choice_v3(
+            seed,
+            path,
+            "primary-settlement-delivery",
+            (
+                "normal",
+                "replay",
+                "omit-sync",
+            ),
+        )
+    )
+
+    #
+    # Do not allow scheduled-v3 to degenerate into an entirely
+    # undisturbed transport sequence.
+    #
+    if (
+        blake_funding_delivery == "normal"
+        and btc_funding_delivery == "normal"
+        and primary_delivery == "normal"
+    ):
+        primary_delivery = "replay"
+
+    return {
+        "version": SCHEDULE_VERSION_V3,
+        "path": path,
+
+        #
+        # Keep the common scheduler result surface intact.
+        #
+        "primary_settlement": "normal",
+        "reorg_probe": False,
+        "secondary_settlement": "normal",
+
+        "blake_funding_delivery":
+            blake_funding_delivery,
+
+        "btc_funding_delivery":
+            btc_funding_delivery,
+
+        "primary_delivery":
+            primary_delivery,
+    }
+
+
+def fund_blake_with_delivery(
+    swap_id,
+    mode,
+    trace,
+):
+    """
+    Alice funds BLAKE, then coordination delivery is disturbed
+    according to scheduled-v3.
+    """
+
+    impl.command(
+        "fund-blake",
+        swap_id,
+        role="alice",
+    )
+
+    impl.assert_state(
+        swap_id,
+        "alice",
+        "BLAKE_FUNDED",
+    )
+
+    impl.command(
+        "publish-blake-funded",
+        swap_id,
+        role="alice",
+    )
+
+    trace.append(
+        "publish:blake-funded"
+    )
+
+    if mode == "normal":
+        impl.command(
+            "receive-blake-funded",
+            swap_id,
+            role="bob",
+        )
+
+        trace.append(
+            "deliver:blake-funded:normal"
+        )
+
+    elif mode == "replay":
+        impl.command(
+            "receive-blake-funded",
+            swap_id,
+            role="bob",
+        )
+
+        impl.command(
+            "receive-blake-funded",
+            swap_id,
+            role="bob",
+        )
+
+        trace.append(
+            "deliver:blake-funded:replay"
+        )
+
+    elif mode == "omit-sync":
+        #
+        # No receive-blake-funded call. Bob must discover/validate
+        # Alice's HTLC directly from chain truth.
+        #
+        impl.command(
+            "sync-funding",
+            "--role",
+            "bob",
+            swap_id,
+            role="bob",
+        )
+
+        trace.append(
+            "recover:blake-funded:chain-sync"
+        )
+
+    else:
+        raise ValueError(
+            f"unknown BLAKE funding delivery mode: {mode}"
+        )
+
+    impl.assert_state(
+        swap_id,
+        "bob",
+        "BLAKE_FUNDED",
+    )
+
+
+def fund_btc_with_delivery(
+    swap_id,
+    mode,
+    trace,
+):
+    """
+    Bob funds BTC, then coordination delivery is disturbed
+    according to scheduled-v3.
+    """
+
+    impl.command(
+        "fund-btc",
+        swap_id,
+        role="bob",
+    )
+
+    impl.assert_state(
+        swap_id,
+        "bob",
+        "BTC_FUNDED",
+    )
+
+    impl.command(
+        "publish-btc-funded",
+        swap_id,
+        role="bob",
+    )
+
+    trace.append(
+        "publish:btc-funded"
+    )
+
+    if mode == "normal":
+        impl.command(
+            "receive-btc-funded",
+            swap_id,
+            role="alice",
+        )
+
+        trace.append(
+            "deliver:btc-funded:normal"
+        )
+
+    elif mode == "replay":
+        impl.command(
+            "receive-btc-funded",
+            swap_id,
+            role="alice",
+        )
+
+        impl.command(
+            "receive-btc-funded",
+            swap_id,
+            role="alice",
+        )
+
+        trace.append(
+            "deliver:btc-funded:replay"
+        )
+
+    elif mode == "omit-sync":
+        #
+        # No receive-btc-funded call. Alice reconstructs/validates
+        # Bob's BTC HTLC from chain truth.
+        #
+        impl.command(
+            "sync-funding",
+            "--role",
+            "alice",
+            swap_id,
+            role="alice",
+        )
+
+        trace.append(
+            "recover:btc-funded:chain-sync"
+        )
+
+    else:
+        raise ValueError(
+            f"unknown BTC funding delivery mode: {mode}"
+        )
+
+    impl.assert_state(
+        swap_id,
+        "alice",
+        "BTC_FUNDED",
+    )
+
+
+def deliver_primary_settlement_v3(
+    swap_id,
+    path,
+    mode,
+    trace,
+):
+    """
+    Disturb delivery of the primary Bitcoin settlement fact.
+
+    claim:
+        Alice BTC claim -> Bob
+
+    refund:
+        Bob BTC refund -> Alice
+    """
+
+    if path == "claim":
+        command = "receive-btc-claimed"
+        receiver = "bob"
+        expected = "BTC_CLAIMED"
+        label = "btc-claimed"
+
+    elif path == "refund":
+        command = "receive-btc-refunded"
+        receiver = "alice"
+        expected = "BTC_REFUNDED"
+        label = "btc-refunded"
+
+    else:
+        raise ValueError(
+            f"unknown scheduled-v3 path: {path}"
+        )
+
+    if mode == "normal":
+        impl.command(
+            command,
+            swap_id,
+            role=receiver,
+        )
+
+        trace.append(
+            f"deliver:{label}:normal"
+        )
+
+    elif mode == "replay":
+        impl.command(
+            command,
+            swap_id,
+            role=receiver,
+        )
+
+        impl.command(
+            command,
+            swap_id,
+            role=receiver,
+        )
+
+        trace.append(
+            f"deliver:{label}:replay"
+        )
+
+    elif mode == "omit-sync":
+        #
+        # Coordination event is never delivered. Receiver recovers
+        # settlement state from the authoritative chains.
+        #
+        impl.command(
+            "sync-settlement",
+            "--role",
+            receiver,
+            swap_id,
+            role=receiver,
+        )
+
+        trace.append(
+            f"recover:{label}:chain-sync"
+        )
+
+    else:
+        raise ValueError(
+            f"unknown primary settlement delivery mode: {mode}"
+        )
+
+    impl.assert_state(
+        swap_id,
+        receiver,
+        expected,
+    )
+
+
 def reconcile_funding(
     swap_id,
     trace,
@@ -396,6 +791,24 @@ def append_schedule_trace(
                 (
                     "schedule:settlement-reconcile:"
                     + schedule["settlement_reconcile"]
+                ),
+            )
+        )
+
+    if schedule.get("version") == SCHEDULE_VERSION_V3:
+        trace.extend(
+            (
+                (
+                    "schedule:blake-funding-delivery:"
+                    + schedule["blake_funding_delivery"]
+                ),
+                (
+                    "schedule:btc-funding-delivery:"
+                    + schedule["btc_funding_delivery"]
+                ),
+                (
+                    "schedule:primary-delivery:"
+                    + schedule["primary_delivery"]
                 ),
             )
         )
@@ -1533,8 +1946,15 @@ def run_claim_seed(
         )
     )
 
-    impl.fund_blake_and_sync(swap_id)
-    trace.append("fund-and-confirm:blake")
+    if fault_profile == "scheduled-v3":
+        fund_blake_with_delivery(
+            swap_id,
+            fault_schedule["blake_funding_delivery"],
+            trace,
+        )
+    else:
+        impl.fund_blake_and_sync(swap_id)
+        trace.append("fund-and-confirm:blake")
 
     def duplicate_blake_receive():
         impl.command(
@@ -1555,24 +1975,48 @@ def run_claim_seed(
             p,
         )
 
-    trace.extend(
-        run_noise(
-            rng,
-            [
-                (
-                    "replay:blake-funded",
-                    duplicate_blake_receive,
-                ),
-                (
-                    "reject:wrong-role-fund-btc",
-                    wrong_role_btc,
-                ),
-            ],
+    if fault_profile == "scheduled-v3":
+        p = impl.command(
+            "fund-btc",
+            swap_id,
+            role="alice",
+            expect_ok=False,
         )
-    )
 
-    impl.fund_btc_and_sync(swap_id)
-    trace.append("fund-and-confirm:btc")
+        require_failure(
+            "wrong-role fund-btc",
+            p,
+        )
+
+        trace.append(
+            "reject:wrong-role-fund-btc"
+        )
+    else:
+        trace.extend(
+            run_noise(
+                rng,
+                [
+                    (
+                        "replay:blake-funded",
+                        duplicate_blake_receive,
+                    ),
+                    (
+                        "reject:wrong-role-fund-btc",
+                        wrong_role_btc,
+                    ),
+                ],
+            )
+        )
+
+    if fault_profile == "scheduled-v3":
+        fund_btc_with_delivery(
+            swap_id,
+            fault_schedule["btc_funding_delivery"],
+            trace,
+        )
+    else:
+        impl.fund_btc_and_sync(swap_id)
+        trace.append("fund-and-confirm:btc")
 
     def duplicate_btc_receive():
         impl.command(
@@ -1581,17 +2025,18 @@ def run_claim_seed(
             role="alice",
         )
 
-    trace.extend(
-        run_noise(
-            rng,
-            [
-                (
-                    "replay:btc-funded",
-                    duplicate_btc_receive,
-                ),
-            ],
+    if fault_profile != "scheduled-v3":
+        trace.extend(
+            run_noise(
+                rng,
+                [
+                    (
+                        "replay:btc-funded",
+                        duplicate_btc_receive,
+                    ),
+                ],
+            )
         )
-    )
 
     impl.assert_secret_separation(swap_id)
     trace.append("assert:no-transported-secret")
@@ -1652,12 +2097,20 @@ def run_claim_seed(
     )
     trace.append("publish:btc-claimed")
 
-    impl.command(
-        "receive-btc-claimed",
-        swap_id,
-        role="bob",
-    )
-    trace.append("receive:btc-claimed")
+    if fault_profile == "scheduled-v3":
+        deliver_primary_settlement_v3(
+            swap_id,
+            "claim",
+            fault_schedule["primary_delivery"],
+            trace,
+        )
+    else:
+        impl.command(
+            "receive-btc-claimed",
+            swap_id,
+            role="bob",
+        )
+        trace.append("receive:btc-claimed")
 
     if (
         fault_profile == "scheduled-v2"
@@ -1676,34 +2129,77 @@ def run_claim_seed(
             role="bob",
         )
 
-    trace.extend(
-        run_noise(
-            rng,
-            [
-                (
-                    "replay:btc-claimed",
-                    duplicate_claim_receive,
-                ),
-            ],
+    if fault_profile != "scheduled-v3":
+        trace.extend(
+            run_noise(
+                rng,
+                [
+                    (
+                        "replay:btc-claimed",
+                        duplicate_claim_receive,
+                    ),
+                ],
+            )
         )
-    )
 
     before = impl.state(
         swap_id,
         "bob",
     )
 
-    h.require(
-        before.get("revealed_secret_hex") is None,
-        "Bob learned S before explicit witness extraction",
+    recovered_via_sync = (
+        fault_profile == "scheduled-v3"
+        and fault_schedule is not None
+        and fault_schedule.get("primary_delivery") == "omit-sync"
     )
 
-    impl.command(
-        "extract-secret",
-        swap_id,
-        role="bob",
-    )
-    trace.append("extract-secret:bitcoin-witness")
+    if recovered_via_sync:
+        #
+        # sync-settlement recovered the confirmed BTC claim directly
+        # from chain truth. It is therefore legitimate for Bob to learn
+        # S from the Bitcoin witness during reconciliation.
+        #
+        h.require(
+            bool(before.get("revealed_secret_hex")),
+            (
+                "Bob recovered BTC claim via sync-settlement "
+                "but did not learn S from its witness"
+            ),
+        )
+
+        alice = impl.state(
+            swap_id,
+            "alice",
+        )
+
+        h.require(
+            before.get("revealed_secret_hex")
+            == alice.get("secret_hex"),
+            (
+                "sync-settlement recovered a secret that does "
+                "not match Alice's original S"
+            ),
+        )
+
+        trace.append(
+            "extract-secret:bitcoin-witness-via-sync-settlement"
+        )
+
+    else:
+        h.require(
+            before.get("revealed_secret_hex") is None,
+            "Bob learned S before explicit witness extraction",
+        )
+
+        impl.command(
+            "extract-secret",
+            swap_id,
+            role="bob",
+        )
+
+        trace.append(
+            "extract-secret:bitcoin-witness"
+        )
 
     scheduled_reorg = (
         bool(fault_schedule.get("reorg_probe"))
@@ -2737,11 +3233,24 @@ def run_refund_seed(
     impl.handshake(swap_id)
     trace.append("handshake")
 
-    impl.fund_blake_and_sync(swap_id)
-    trace.append("fund-and-confirm:blake")
+    if fault_profile == "scheduled-v3":
+        fund_blake_with_delivery(
+            swap_id,
+            fault_schedule["blake_funding_delivery"],
+            trace,
+        )
 
-    impl.fund_btc_and_sync(swap_id)
-    trace.append("fund-and-confirm:btc")
+        fund_btc_with_delivery(
+            swap_id,
+            fault_schedule["btc_funding_delivery"],
+            trace,
+        )
+    else:
+        impl.fund_blake_and_sync(swap_id)
+        trace.append("fund-and-confirm:blake")
+
+        impl.fund_btc_and_sync(swap_id)
+        trace.append("fund-and-confirm:btc")
 
     #
     # Replay funding messages in seed-selected order before timeout.
@@ -2760,15 +3269,16 @@ def run_refund_seed(
             role="alice",
         )
 
-    trace.extend(
-        run_noise(
-            rng,
-            [
-                ("replay:blake-funded", replay_blake),
-                ("replay:btc-funded", replay_btc),
-            ],
+    if fault_profile != "scheduled-v3":
+        trace.extend(
+            run_noise(
+                rng,
+                [
+                    ("replay:blake-funded", replay_blake),
+                    ("replay:btc-funded", replay_btc),
+                ],
+            )
         )
-    )
 
     if (
         fault_profile == "scheduled-v2"
@@ -2867,12 +3377,20 @@ def run_refund_seed(
     )
     trace.append("publish:btc-refunded")
 
-    impl.command(
-        "receive-btc-refunded",
-        swap_id,
-        role="alice",
-    )
-    trace.append("receive:btc-refunded")
+    if fault_profile == "scheduled-v3":
+        deliver_primary_settlement_v3(
+            swap_id,
+            "refund",
+            fault_schedule["primary_delivery"],
+            trace,
+        )
+    else:
+        impl.command(
+            "receive-btc-refunded",
+            swap_id,
+            role="alice",
+        )
+        trace.append("receive:btc-refunded")
 
     if (
         fault_profile == "scheduled-v2"
@@ -2912,17 +3430,18 @@ def run_refund_seed(
             role="alice",
         )
 
-    trace.extend(
-        run_noise(
-            rng,
-            [
-                (
-                    "replay:btc-refunded",
-                    duplicate_refund_receive,
-                ),
-            ],
+    if fault_profile != "scheduled-v3":
+        trace.extend(
+            run_noise(
+                rng,
+                [
+                    (
+                        "replay:btc-refunded",
+                        duplicate_refund_receive,
+                    ),
+                ],
+            )
         )
-    )
 
     alice = impl.state(
         swap_id,
@@ -3024,6 +3543,11 @@ def run_seed(seed, fault_profile="none"):
         )
     elif fault_profile == "scheduled-v2":
         fault_schedule = build_fault_schedule_v2(
+            seed,
+            path,
+        )
+    elif fault_profile == "scheduled-v3":
+        fault_schedule = build_fault_schedule_v3(
             seed,
             path,
         )

@@ -40,6 +40,7 @@ REPLAY_RE = re.compile(
 EXPECTED_COUNTS = {
     "scheduled-v1": 22,
     "scheduled-v2": 94,
+    "scheduled-v3": 52,
 }
 
 
@@ -220,6 +221,90 @@ def schedule_key_v2(seed):
 
 
 # ============================================================
+# V3
+# ============================================================
+
+def normalize_v3(
+    path,
+    blake_funding_delivery,
+    btc_funding_delivery,
+    primary_delivery,
+):
+    #
+    # scheduled-v3 never emits a completely undisturbed transport
+    # sequence. The all-normal cell is normalized to primary replay.
+    #
+    if (
+        blake_funding_delivery == "normal"
+        and btc_funding_delivery == "normal"
+        and primary_delivery == "normal"
+    ):
+        primary_delivery = "replay"
+
+    return (
+        path,
+        blake_funding_delivery,
+        btc_funding_delivery,
+        primary_delivery,
+    )
+
+
+def expected_shapes_v3():
+    """
+    Nominal space:
+
+        2 paths
+        × 3 BLAKE funding delivery modes
+        × 3 BTC funding delivery modes
+        × 3 primary settlement delivery modes
+        = 54
+
+    One all-normal cell per path is normalized into an existing replay
+    cell, leaving 52 effective shapes.
+    """
+
+    shapes = set()
+
+    for (
+        path,
+        blake_funding_delivery,
+        btc_funding_delivery,
+        primary_delivery,
+    ) in itertools.product(
+        ("claim", "refund"),
+        ("normal", "replay", "omit-sync"),
+        ("normal", "replay", "omit-sync"),
+        ("normal", "replay", "omit-sync"),
+    ):
+        shapes.add(
+            normalize_v3(
+                path,
+                blake_funding_delivery,
+                btc_funding_delivery,
+                primary_delivery,
+            )
+        )
+
+    return shapes
+
+
+def schedule_key_v3(seed):
+    path = path_for_seed(seed)
+
+    schedule = seeded.build_fault_schedule_v3(
+        seed,
+        path,
+    )
+
+    return (
+        path,
+        schedule["blake_funding_delivery"],
+        schedule["btc_funding_delivery"],
+        schedule["primary_delivery"],
+    )
+
+
+# ============================================================
 # Generic profile dispatch
 # ============================================================
 
@@ -229,6 +314,9 @@ def expected_shapes(profile):
 
     if profile == "scheduled-v2":
         return expected_shapes_v2()
+
+    if profile == "scheduled-v3":
+        return expected_shapes_v3()
 
     raise ValueError(
         f"unsupported scheduled profile: {profile}"
@@ -241,6 +329,9 @@ def schedule_key(profile, seed):
 
     if profile == "scheduled-v2":
         return schedule_key_v2(seed)
+
+    if profile == "scheduled-v3":
+        return schedule_key_v3(seed)
 
     raise ValueError(
         f"unsupported scheduled profile: {profile}"
@@ -293,22 +384,37 @@ def format_shape(
             f"secondary={secondary:<6}"
         )
 
+    if profile == "scheduled-v2":
+        (
+            path,
+            primary,
+            reorg_probe,
+            secondary,
+            funding_reconcile,
+            settlement_reconcile,
+        ) = shape
+
+        return (
+            f"{path:<6}  "
+            f"primary={primary:<6}  "
+            f"reorg={'yes' if reorg_probe else 'no ':<3}  "
+            f"secondary={secondary:<6}  "
+            f"funding-sync={funding_reconcile:<4}  "
+            f"settlement-sync={settlement_reconcile:<4}"
+        )
+
     (
         path,
-        primary,
-        reorg_probe,
-        secondary,
-        funding_reconcile,
-        settlement_reconcile,
+        blake_funding_delivery,
+        btc_funding_delivery,
+        primary_delivery,
     ) = shape
 
     return (
         f"{path:<6}  "
-        f"primary={primary:<6}  "
-        f"reorg={'yes' if reorg_probe else 'no ':<3}  "
-        f"secondary={secondary:<6}  "
-        f"funding-sync={funding_reconcile:<4}  "
-        f"settlement-sync={settlement_reconcile:<4}"
+        f"blake-funding={blake_funding_delivery:<9}  "
+        f"btc-funding={btc_funding_delivery:<9}  "
+        f"primary={primary_delivery:<9}"
     )
 
 
@@ -561,6 +667,7 @@ def main():
         choices=(
             "scheduled-v1",
             "scheduled-v2",
+            "scheduled-v3",
         ),
         default="scheduled-v1",
         help=(

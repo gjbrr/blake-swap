@@ -52,6 +52,7 @@ FAULT_PROFILES = (
     "combined-fault-v1",
     "combined-refund-fault-v1",
     "scheduled-v1",
+    "scheduled-v2",
 )
 
 
@@ -180,6 +181,183 @@ def build_fault_schedule(
     }
 
 
+SCHEDULE_VERSION_V2 = "scheduled-v2"
+
+
+def deterministic_schedule_choice_v2(
+    seed,
+    path,
+    stage,
+    options,
+):
+    material = (
+        f"{SCHEDULE_VERSION_V2}:{seed}:{path}:{stage}"
+    ).encode("utf-8")
+
+    digest = hashlib.sha256(
+        material
+    ).digest()
+
+    index = (
+        int.from_bytes(
+            digest,
+            "big",
+        )
+        % len(options)
+    )
+
+    return options[index]
+
+
+def build_fault_schedule_v2(
+    seed,
+    path,
+):
+    """
+    scheduled-v2 extends the settlement scheduler with explicit
+    reconciliation disturbances.
+
+    Dimensions:
+      primary_settlement:
+          normal | crash | race
+
+      reorg_probe:
+          False | True
+
+      secondary_settlement:
+          normal | race
+
+      funding_reconcile:
+          none | both
+
+      settlement_reconcile:
+          none | both
+    """
+
+    primary = deterministic_schedule_choice_v2(
+        seed,
+        path,
+        "primary-settlement",
+        (
+            "normal",
+            "crash",
+            "race",
+        ),
+    )
+
+    reorg_probe = deterministic_schedule_choice_v2(
+        seed,
+        path,
+        "reorg-probe",
+        (
+            False,
+            True,
+        ),
+    )
+
+    secondary = deterministic_schedule_choice_v2(
+        seed,
+        path,
+        "secondary-settlement",
+        (
+            "normal",
+            "race",
+        ),
+    )
+
+    funding_reconcile = deterministic_schedule_choice_v2(
+        seed,
+        path,
+        "funding-reconcile",
+        (
+            "none",
+            "both",
+        ),
+    )
+
+    settlement_reconcile = deterministic_schedule_choice_v2(
+        seed,
+        path,
+        "settlement-reconcile",
+        (
+            "none",
+            "both",
+        ),
+    )
+
+    #
+    # Never emit a completely disturbance-free scheduled run.
+    #
+    if (
+        primary == "normal"
+        and not reorg_probe
+        and secondary == "normal"
+        and funding_reconcile == "none"
+        and settlement_reconcile == "none"
+    ):
+        settlement_reconcile = "both"
+
+    return {
+        "version": SCHEDULE_VERSION_V2,
+        "path": path,
+        "primary_settlement": primary,
+        "reorg_probe": reorg_probe,
+        "secondary_settlement": secondary,
+        "funding_reconcile": funding_reconcile,
+        "settlement_reconcile": settlement_reconcile,
+    }
+
+
+def reconcile_funding(
+    swap_id,
+    trace,
+):
+    impl.command(
+        "sync-funding",
+        "--role",
+        "alice",
+        swap_id,
+        role="alice",
+    )
+
+    impl.command(
+        "sync-funding",
+        "--role",
+        "bob",
+        swap_id,
+        role="bob",
+    )
+
+    trace.append(
+        "reconcile:funding:both"
+    )
+
+
+def reconcile_settlement(
+    swap_id,
+    trace,
+):
+    impl.command(
+        "sync-settlement",
+        "--role",
+        "alice",
+        swap_id,
+        role="alice",
+    )
+
+    impl.command(
+        "sync-settlement",
+        "--role",
+        "bob",
+        swap_id,
+        role="bob",
+    )
+
+    trace.append(
+        "reconcile:settlement:both"
+    )
+
+
 def append_schedule_trace(
     trace,
     schedule,
@@ -207,6 +385,20 @@ def append_schedule_trace(
             ),
         )
     )
+
+    if schedule.get("version") == SCHEDULE_VERSION_V2:
+        trace.extend(
+            (
+                (
+                    "schedule:funding-reconcile:"
+                    + schedule["funding_reconcile"]
+                ),
+                (
+                    "schedule:settlement-reconcile:"
+                    + schedule["settlement_reconcile"]
+                ),
+            )
+        )
 
 
 def require_failure(name, proc):
@@ -1404,6 +1596,16 @@ def run_claim_seed(
     impl.assert_secret_separation(swap_id)
     trace.append("assert:no-transported-secret")
 
+    if (
+        fault_profile == "scheduled-v2"
+        and fault_schedule is not None
+        and fault_schedule.get("funding_reconcile") == "both"
+    ):
+        reconcile_funding(
+            swap_id,
+            trace,
+        )
+
     scheduled_primary = (
         fault_schedule.get("primary_settlement")
         if fault_schedule is not None
@@ -1416,7 +1618,7 @@ def run_claim_seed(
             "combined-fault-v1",
         }
         or (
-            fault_profile == "scheduled-v1"
+            fault_profile in {"scheduled-v1", "scheduled-v2"}
             and scheduled_primary == "crash"
         )
     ):
@@ -1427,7 +1629,7 @@ def run_claim_seed(
     elif (
         fault_profile == "settlement-race-v1"
         or (
-            fault_profile == "scheduled-v1"
+            fault_profile in {"scheduled-v1", "scheduled-v2"}
             and scheduled_primary == "race"
         )
     ):
@@ -1456,6 +1658,16 @@ def run_claim_seed(
         role="bob",
     )
     trace.append("receive:btc-claimed")
+
+    if (
+        fault_profile == "scheduled-v2"
+        and fault_schedule is not None
+        and fault_schedule.get("settlement_reconcile") == "both"
+    ):
+        reconcile_settlement(
+            swap_id,
+            trace,
+        )
 
     def duplicate_claim_receive():
         impl.command(
@@ -1505,7 +1717,7 @@ def run_claim_seed(
             "combined-fault-v1",
         }
         or (
-            fault_profile == "scheduled-v1"
+            fault_profile in {"scheduled-v1", "scheduled-v2"}
             and scheduled_reorg
         )
     ):
@@ -1523,7 +1735,7 @@ def run_claim_seed(
     if (
         fault_profile == "combined-fault-v1"
         or (
-            fault_profile == "scheduled-v1"
+            fault_profile in {"scheduled-v1", "scheduled-v2"}
             and scheduled_secondary == "race"
         )
     ):
@@ -2558,6 +2770,16 @@ def run_refund_seed(
         )
     )
 
+    if (
+        fault_profile == "scheduled-v2"
+        and fault_schedule is not None
+        and fault_schedule.get("funding_reconcile") == "both"
+    ):
+        reconcile_funding(
+            swap_id,
+            trace,
+        )
+
     bob = impl.state(
         swap_id,
         "bob",
@@ -2611,7 +2833,7 @@ def run_refund_seed(
             "combined-refund-fault-v1",
         }
         or (
-            fault_profile == "scheduled-v1"
+            fault_profile in {"scheduled-v1", "scheduled-v2"}
             and scheduled_primary == "crash"
         )
     ):
@@ -2622,7 +2844,7 @@ def run_refund_seed(
     elif (
         fault_profile == "refund-race-v1"
         or (
-            fault_profile == "scheduled-v1"
+            fault_profile in {"scheduled-v1", "scheduled-v2"}
             and scheduled_primary == "race"
         )
     ):
@@ -2652,6 +2874,16 @@ def run_refund_seed(
     )
     trace.append("receive:btc-refunded")
 
+    if (
+        fault_profile == "scheduled-v2"
+        and fault_schedule is not None
+        and fault_schedule.get("settlement_reconcile") == "both"
+    ):
+        reconcile_settlement(
+            swap_id,
+            trace,
+        )
+
     scheduled_reorg = (
         bool(fault_schedule.get("reorg_probe"))
         if fault_schedule is not None
@@ -2664,7 +2896,7 @@ def run_refund_seed(
             "combined-refund-fault-v1",
         }
         or (
-            fault_profile == "scheduled-v1"
+            fault_profile in {"scheduled-v1", "scheduled-v2"}
             and scheduled_reorg
         )
     ):
@@ -2738,7 +2970,7 @@ def run_refund_seed(
     if (
         fault_profile == "combined-refund-fault-v1"
         or (
-            fault_profile == "scheduled-v1"
+            fault_profile in {"scheduled-v1", "scheduled-v2"}
             and scheduled_secondary == "race"
         )
     ):
@@ -2787,6 +3019,11 @@ def run_seed(seed, fault_profile="none"):
 
     if fault_profile == "scheduled-v1":
         fault_schedule = build_fault_schedule(
+            seed,
+            path,
+        )
+    elif fault_profile == "scheduled-v2":
+        fault_schedule = build_fault_schedule_v2(
             seed,
             path,
         )

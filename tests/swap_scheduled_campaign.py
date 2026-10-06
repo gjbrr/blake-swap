@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
 
 """
-Coverage campaign for scheduled-v1 adversarial schedules.
+Coverage campaign for scheduled adversarial profiles.
+
+Supports:
+    scheduled-v1
+    scheduled-v2
 
 Cheap phase:
     Scan integer seeds without touching either chain and find the first
-    seed covering every effective scheduled-v1 schedule shape.
+    seed covering every effective schedule shape.
 
 Execution phase:
     Replay that minimal coverage corpus through the seeded adversarial
@@ -18,6 +22,7 @@ Differential phase:
 
 import argparse
 import itertools
+import random
 import re
 import subprocess
 import sys
@@ -32,12 +37,13 @@ REPLAY_RE = re.compile(
 )
 
 
-def path_for_seed(seed):
-    #
-    # Preserve the established path-selection oracle exactly.
-    #
-    import random
+EXPECTED_COUNTS = {
+    "scheduled-v1": 22,
+    "scheduled-v2": 94,
+}
 
+
+def path_for_seed(seed):
     return (
         "claim"
         if random.Random(seed).randrange(2) == 0
@@ -45,15 +51,16 @@ def path_for_seed(seed):
     )
 
 
-def normalize_schedule(
+# ============================================================
+# V1
+# ============================================================
+
+def normalize_v1(
     path,
     primary,
     reorg_probe,
     secondary,
 ):
-    #
-    # scheduled-v1 refuses to generate a completely fault-free plan.
-    #
     if (
         primary == "normal"
         and not reorg_probe
@@ -69,7 +76,33 @@ def normalize_schedule(
     )
 
 
-def schedule_key(seed):
+def expected_shapes_v1():
+    shapes = set()
+
+    for (
+        path,
+        primary,
+        reorg_probe,
+        secondary,
+    ) in itertools.product(
+        ("claim", "refund"),
+        ("normal", "crash", "race"),
+        (False, True),
+        ("normal", "race"),
+    ):
+        shapes.add(
+            normalize_v1(
+                path,
+                primary,
+                reorg_probe,
+                secondary,
+            )
+        )
+
+    return shapes
+
+
+def schedule_key_v1(seed):
     path = path_for_seed(seed)
 
     schedule = seeded.build_fault_schedule(
@@ -85,20 +118,56 @@ def schedule_key(seed):
     )
 
 
-def expected_shapes():
+# ============================================================
+# V2
+# ============================================================
+
+def normalize_v2(
+    path,
+    primary,
+    reorg_probe,
+    secondary,
+    funding_reconcile,
+    settlement_reconcile,
+):
+    #
+    # scheduled-v2 refuses to produce a completely disturbance-free
+    # sequence.
+    #
+    if (
+        primary == "normal"
+        and not reorg_probe
+        and secondary == "normal"
+        and funding_reconcile == "none"
+        and settlement_reconcile == "none"
+    ):
+        settlement_reconcile = "both"
+
+    return (
+        path,
+        primary,
+        bool(reorg_probe),
+        secondary,
+        funding_reconcile,
+        settlement_reconcile,
+    )
+
+
+def expected_shapes_v2():
     """
-    Enumerate the effective scheduled-v1 state space independently of
-    the SHA-256 seed chooser.
+    Nominal space:
 
-    Nominally:
-        2 paths × 3 primary × 2 reorg × 2 secondary = 24
+        2 paths
+        × 3 primary
+        × 2 reorg
+        × 2 secondary
+        × 2 funding reconcile
+        × 2 settlement reconcile
+        = 96
 
-    But each path maps:
-        normal / no-reorg / normal
-    to:
-        normal / no-reorg / race
-
-    Therefore the effective space is 22 unique schedule shapes.
+    One completely disturbance-free cell per path is normalized into an
+    already-existing settlement-reconcile cell, leaving 94 effective
+    shapes.
     """
 
     shapes = set()
@@ -108,30 +177,88 @@ def expected_shapes():
         primary,
         reorg_probe,
         secondary,
+        funding_reconcile,
+        settlement_reconcile,
     ) in itertools.product(
         ("claim", "refund"),
         ("normal", "crash", "race"),
         (False, True),
         ("normal", "race"),
+        ("none", "both"),
+        ("none", "both"),
     ):
         shapes.add(
-            normalize_schedule(
+            normalize_v2(
                 path,
                 primary,
                 reorg_probe,
                 secondary,
+                funding_reconcile,
+                settlement_reconcile,
             )
         )
 
     return shapes
 
 
-def discover_coverage(scan_limit):
-    target = expected_shapes()
+def schedule_key_v2(seed):
+    path = path_for_seed(seed)
+
+    schedule = seeded.build_fault_schedule_v2(
+        seed,
+        path,
+    )
+
+    return (
+        path,
+        schedule["primary_settlement"],
+        bool(schedule["reorg_probe"]),
+        schedule["secondary_settlement"],
+        schedule["funding_reconcile"],
+        schedule["settlement_reconcile"],
+    )
+
+
+# ============================================================
+# Generic profile dispatch
+# ============================================================
+
+def expected_shapes(profile):
+    if profile == "scheduled-v1":
+        return expected_shapes_v1()
+
+    if profile == "scheduled-v2":
+        return expected_shapes_v2()
+
+    raise ValueError(
+        f"unsupported scheduled profile: {profile}"
+    )
+
+
+def schedule_key(profile, seed):
+    if profile == "scheduled-v1":
+        return schedule_key_v1(seed)
+
+    if profile == "scheduled-v2":
+        return schedule_key_v2(seed)
+
+    raise ValueError(
+        f"unsupported scheduled profile: {profile}"
+    )
+
+
+def discover_coverage(
+    profile,
+    scan_limit,
+):
+    target = expected_shapes(profile)
     found = {}
 
     for seed in range(scan_limit):
-        key = schedule_key(seed)
+        key = schedule_key(
+            profile,
+            seed,
+        )
 
         if key in target:
             found.setdefault(
@@ -147,30 +274,59 @@ def discover_coverage(scan_limit):
     return target, found, missing
 
 
-def format_shape(shape):
+def format_shape(
+    profile,
+    shape,
+):
+    if profile == "scheduled-v1":
+        (
+            path,
+            primary,
+            reorg_probe,
+            secondary,
+        ) = shape
+
+        return (
+            f"{path:<6}  "
+            f"primary={primary:<6}  "
+            f"reorg={'yes' if reorg_probe else 'no ':<3}  "
+            f"secondary={secondary:<6}"
+        )
+
     (
         path,
         primary,
         reorg_probe,
         secondary,
+        funding_reconcile,
+        settlement_reconcile,
     ) = shape
 
     return (
         f"{path:<6}  "
         f"primary={primary:<6}  "
         f"reorg={'yes' if reorg_probe else 'no ':<3}  "
-        f"secondary={secondary:<6}"
+        f"secondary={secondary:<6}  "
+        f"funding-sync={funding_reconcile:<4}  "
+        f"settlement-sync={settlement_reconcile:<4}"
     )
 
 
 def print_coverage(
+    profile,
     target,
     found,
     missing,
 ):
+    title = (
+        profile.upper()
+        + " COVERAGE"
+    )
+
     print()
-    print("SCHEDULED-V1 COVERAGE")
-    print("=====================")
+    print(title)
+    print("=" * len(title))
+
     print(
         f"effective shapes: {len(target)}"
     )
@@ -184,18 +340,16 @@ def print_coverage(
 
     ordered = sorted(
         found.items(),
-        key=lambda item: (
-            item[0][0],
-            item[0][1],
-            item[0][2],
-            item[0][3],
-        ),
+        key=lambda item: item[0],
     )
 
     for shape, seed in ordered:
         print(
             f"seed {seed:<8}  "
-            + format_shape(shape)
+            + format_shape(
+                profile,
+                shape,
+            )
         )
 
     if missing:
@@ -204,13 +358,15 @@ def print_coverage(
         print("=======")
 
         for shape in sorted(missing):
-            print(format_shape(shape))
+            print(
+                format_shape(
+                    profile,
+                    shape,
+                )
+            )
 
 
 def coverage_seeds(found):
-    #
-    # Sort numerically so execution order itself is deterministic.
-    #
     return sorted(
         set(found.values())
     )
@@ -235,6 +391,7 @@ def parse_replay_corpus(output):
 
 
 def run_campaign(
+    profile,
     seeds,
     adapter,
 ):
@@ -244,7 +401,7 @@ def run_campaign(
         "--adapter",
         adapter,
         "--fault-profile",
-        "scheduled-v1",
+        profile,
         *[
             str(seed)
             for seed in seeds
@@ -254,6 +411,10 @@ def run_campaign(
     print()
     print("EXECUTION")
     print("=========")
+    print(
+        "profile:",
+        profile,
+    )
     print(
         "adapter:",
         adapter,
@@ -280,6 +441,9 @@ def run_campaign(
         print()
         print("CAMPAIGN FAILED")
         print("===============")
+        print(
+            f"profile: {profile}"
+        )
         print(
             f"adapter: {adapter}"
         )
@@ -314,7 +478,7 @@ def run_campaign(
 
     print(
         f"PASS  {adapter}: "
-        f"{len(corpus)} scheduled seeds "
+        f"{len(corpus)} {profile} seeds "
         f"in {elapsed:.1f}s"
     )
 
@@ -335,6 +499,7 @@ def run_campaign(
 
 
 def compare_corpora(
+    profile,
     direct,
     subprocess_corpus,
 ):
@@ -378,12 +543,12 @@ def compare_corpora(
     if failures:
         raise RuntimeError(
             f"{len(failures)} differential "
-            "scheduled-v1 mismatch(es)"
+            f"{profile} mismatch(es)"
         )
 
     print()
     print(
-        "PASS  all scheduled-v1 coverage seeds "
+        f"PASS  all {profile} coverage seeds "
         "match across adapter boundary"
     )
 
@@ -392,9 +557,22 @@ def main():
     parser = argparse.ArgumentParser()
 
     parser.add_argument(
+        "--profile",
+        choices=(
+            "scheduled-v1",
+            "scheduled-v2",
+        ),
+        default="scheduled-v1",
+        help=(
+            "Scheduled adversarial profile whose state space "
+            "should be covered."
+        ),
+    )
+
+    parser.add_argument(
         "--scan-limit",
         type=int,
-        default=100000,
+        default=1_000_000,
         help=(
             "Maximum integer seed (exclusive) to scan "
             "while looking for full schedule coverage."
@@ -435,24 +613,31 @@ def main():
     args = parser.parse_args()
 
     target, found, missing = discover_coverage(
-        args.scan_limit
+        args.profile,
+        args.scan_limit,
     )
 
     print_coverage(
+        args.profile,
         target,
         found,
         missing,
     )
 
-    if len(target) != 22:
+    expected_count = EXPECTED_COUNTS[
+        args.profile
+    ]
+
+    if len(target) != expected_count:
         raise RuntimeError(
-            "scheduled-v1 effective state-space changed: "
-            f"expected 22 shapes, observed {len(target)}"
+            f"{args.profile} effective state-space changed: "
+            f"expected {expected_count} shapes, "
+            f"observed {len(target)}"
         )
 
     if missing:
         raise RuntimeError(
-            "could not cover every scheduled-v1 shape "
+            f"could not cover every {args.profile} shape "
             f"within seeds 0..{args.scan_limit - 1}"
         )
 
@@ -462,7 +647,7 @@ def main():
 
     print()
     print(
-        "PASS  full scheduled-v1 shape coverage "
+        f"PASS  full {args.profile} shape coverage "
         f"with {len(seeds)} seed(s)"
     )
 
@@ -476,22 +661,26 @@ def main():
 
     if args.compare_adapters:
         direct = run_campaign(
+            args.profile,
             seeds,
             "direct",
         )
 
         subprocess_corpus = run_campaign(
+            args.profile,
             seeds,
             "json-subprocess",
         )
 
         compare_corpora(
+            args.profile,
             direct,
             subprocess_corpus,
         )
 
     elif args.execute:
         run_campaign(
+            args.profile,
             seeds,
             args.adapter,
         )

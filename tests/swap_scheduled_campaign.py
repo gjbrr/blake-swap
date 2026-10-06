@@ -44,6 +44,7 @@ EXPECTED_COUNTS = {
     "scheduled-v4": 32,
     "scheduled-v5": 10,
     "scheduled-v6": 7,
+    "scheduled-v7": 12,
 }
 
 
@@ -415,6 +416,34 @@ def schedule_key_v6(seed):
 
 
 # ============================================================
+# V7
+# ============================================================
+
+def expected_shapes_v7():
+    return {
+        ("claim", scenario)
+        for scenario in seeded.V7_CLAIM_SCENARIOS
+    } | {
+        ("refund", scenario)
+        for scenario in seeded.V7_REFUND_SCENARIOS
+    }
+
+
+def schedule_key_v7(seed):
+    path = path_for_seed(seed)
+
+    schedule = seeded.build_fault_schedule_v7(
+        seed,
+        path,
+    )
+
+    return (
+        path,
+        schedule["scenario"],
+    )
+
+
+# ============================================================
 # Generic profile dispatch
 # ============================================================
 
@@ -436,6 +465,9 @@ def expected_shapes(profile):
 
     if profile == "scheduled-v6":
         return expected_shapes_v6()
+
+    if profile == "scheduled-v7":
+        return expected_shapes_v7()
 
     raise ValueError(
         f"unsupported scheduled profile: {profile}"
@@ -460,6 +492,9 @@ def schedule_key(profile, seed):
 
     if profile == "scheduled-v6":
         return schedule_key_v6(seed)
+
+    if profile == "scheduled-v7":
+        return schedule_key_v7(seed)
 
     raise ValueError(
         f"unsupported scheduled profile: {profile}"
@@ -567,11 +602,24 @@ def format_shape(
             f"restart={checkpoint}"
         )
 
-    path, stale_event = shape
+    if profile == "scheduled-v6":
+        path, stale_event = shape
 
-    return (
-        f"{path:<6}  "
-        f"stale-event={stale_event}"
+        return (
+            f"{path:<6}  "
+            f"stale-event={stale_event}"
+        )
+
+    if profile == "scheduled-v7":
+        path, scenario = shape
+
+        return (
+            f"{path:<6}  "
+            f"scenario={scenario}"
+        )
+
+    raise ValueError(
+        f"unsupported scheduled profile: {profile}"
     )
 
 
@@ -828,6 +876,7 @@ def main():
             "scheduled-v4",
             "scheduled-v5",
             "scheduled-v6",
+            "scheduled-v7",
         ),
         default="scheduled-v1",
         help=(

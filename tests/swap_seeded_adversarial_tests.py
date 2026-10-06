@@ -57,6 +57,7 @@ FAULT_PROFILES = (
     "scheduled-v4",
     "scheduled-v5",
     "scheduled-v6",
+    "scheduled-v7",
 )
 
 
@@ -1540,6 +1541,153 @@ def crash_recover_secondary_v4(
     )
 
 
+SCHEDULE_VERSION_V7 = "scheduled-v7"
+
+
+V7_CLAIM_SCENARIOS = (
+    "stale-btc-funding__primary-broadcast-crash",
+    "stale-btc-claim__secondary-race",
+    "primary-confirmed-crash__reorg__restart",
+    "stale-btc-claim__secondary-broadcast-crash",
+    "stale-blake-funding__primary-race__restart",
+    "primary-candidate-crash__reorg__secondary-confirmed-crash",
+)
+
+
+V7_REFUND_SCENARIOS = (
+    "stale-btc-funding__primary-broadcast-crash",
+    "stale-btc-refund__secondary-broadcast-crash",
+    "primary-confirmed-crash__reorg__restart",
+    "stale-btc-refund__secondary-race",
+    "stale-blake-funding__primary-race__restart",
+    "primary-candidate-crash__reorg__secondary-confirmed-crash",
+)
+
+
+def deterministic_schedule_choice_v7(
+    seed,
+    path,
+    stage,
+    options,
+):
+    material = (
+        f"{SCHEDULE_VERSION_V7}:{seed}:{path}:{stage}"
+    ).encode("utf-8")
+
+    digest = hashlib.sha256(material).digest()
+
+    return options[
+        int.from_bytes(digest, "big")
+        % len(options)
+    ]
+
+
+def build_fault_schedule_v7(
+    seed,
+    path,
+):
+    """
+    Curated mixed-chaos compositions.
+
+    Unlike earlier exhaustive scheduler dimensions, v7 intentionally
+    selects from a small catalog of meaningful multi-fault scenarios.
+    Every individual fault class has already been proven separately;
+    v7 asks whether those recovery mechanisms remain safe when composed.
+    """
+
+    if path == "claim":
+        options = V7_CLAIM_SCENARIOS
+
+    elif path == "refund":
+        options = V7_REFUND_SCENARIOS
+
+    else:
+        raise ValueError(
+            f"unknown scheduled-v7 path: {path}"
+        )
+
+    scenario = deterministic_schedule_choice_v7(
+        seed,
+        path,
+        "scenario",
+        options,
+    )
+
+    schedule = {
+        "version": SCHEDULE_VERSION_V7,
+        "path": path,
+
+        # Common scheduler surface.
+        "primary_settlement": "normal",
+        "reorg_probe": False,
+        "secondary_settlement": "normal",
+
+        # v7 composition controls.
+        "scenario": scenario,
+        "stale_event": None,
+        "primary_action": "normal",
+        "secondary_action": "normal",
+        "restart_before_secondary": False,
+    }
+
+    if scenario == (
+        "stale-btc-funding__primary-broadcast-crash"
+    ):
+        schedule["stale_event"] = "btc-funded"
+        schedule["primary_action"] = "crash-broadcast"
+
+    elif scenario in {
+        "stale-btc-claim__secondary-race",
+        "stale-btc-refund__secondary-race",
+    }:
+        schedule["stale_event"] = (
+            "btc-claimed"
+            if path == "claim"
+            else "btc-refunded"
+        )
+        schedule["secondary_action"] = "race"
+
+    elif scenario == (
+        "primary-confirmed-crash__reorg__restart"
+    ):
+        schedule["primary_action"] = "crash-confirmed"
+        schedule["reorg_probe"] = True
+        schedule["restart_before_secondary"] = True
+
+    elif scenario in {
+        "stale-btc-claim__secondary-broadcast-crash",
+        "stale-btc-refund__secondary-broadcast-crash",
+    }:
+        schedule["stale_event"] = (
+            "btc-claimed"
+            if path == "claim"
+            else "btc-refunded"
+        )
+        schedule["secondary_action"] = "crash-broadcast"
+
+    elif scenario == (
+        "stale-blake-funding__primary-race__restart"
+    ):
+        schedule["stale_event"] = "blake-funded"
+        schedule["primary_action"] = "race"
+        schedule["restart_before_secondary"] = True
+
+    elif scenario == (
+        "primary-candidate-crash__reorg__"
+        "secondary-confirmed-crash"
+    ):
+        schedule["primary_action"] = "crash-candidate"
+        schedule["reorg_probe"] = True
+        schedule["secondary_action"] = "crash-confirmed"
+
+    else:
+        raise AssertionError(
+            f"unhandled scheduled-v7 scenario: {scenario}"
+        )
+
+    return schedule
+
+
 SCHEDULE_VERSION_V6 = "scheduled-v6"
 
 
@@ -2485,6 +2633,36 @@ def append_schedule_trace(
         trace.append(
             "schedule:stale-event:"
             + schedule["stale_event"]
+        )
+
+    if schedule.get("version") == SCHEDULE_VERSION_V7:
+        trace.extend(
+            (
+                "schedule:scenario:"
+                + schedule["scenario"],
+                "schedule:v7-primary-action:"
+                + schedule["primary_action"],
+                "schedule:v7-secondary-action:"
+                + schedule["secondary_action"],
+                "schedule:v7-stale-event:"
+                + (
+                    schedule["stale_event"]
+                    if schedule["stale_event"] is not None
+                    else "none"
+                ),
+                "schedule:v7-reorg:"
+                + (
+                    "yes"
+                    if schedule["reorg_probe"]
+                    else "no"
+                ),
+                "schedule:v7-restart-before-secondary:"
+                + (
+                    "yes"
+                    if schedule["restart_before_secondary"]
+                    else "no"
+                ),
+            )
         )
 
 
@@ -3636,7 +3814,7 @@ def run_claim_seed(
             trace,
         )
     elif (
-        fault_profile == "scheduled-v6"
+        fault_profile in {"scheduled-v6", "scheduled-v7"}
         and fault_schedule["stale_event"] == "blake-funded"
     ):
         fund_with_stale_recovery_v6(
@@ -3716,7 +3894,7 @@ def run_claim_seed(
             trace,
         )
     elif (
-        fault_profile == "scheduled-v6"
+        fault_profile in {"scheduled-v6", "scheduled-v7"}
         and fault_schedule["stale_event"] == "btc-funded"
     ):
         fund_with_stale_recovery_v6(
@@ -3808,6 +3986,46 @@ def run_claim_seed(
             fault_schedule["primary_crash_window"],
             trace,
         )
+    elif fault_profile == "scheduled-v7":
+        action = fault_schedule["primary_action"]
+
+        if action == "crash-candidate":
+            crash_recover_primary_v4(
+                swap_id,
+                "claim",
+                "candidate",
+                trace,
+            )
+        elif action == "crash-broadcast":
+            crash_recover_primary_v4(
+                swap_id,
+                "claim",
+                "broadcast",
+                trace,
+            )
+        elif action == "crash-confirmed":
+            crash_recover_primary_v4(
+                swap_id,
+                "claim",
+                "confirmed",
+                trace,
+            )
+        elif action == "race":
+            race_btc_claim(
+                swap_id,
+                trace,
+            )
+        elif action == "normal":
+            impl.command(
+                "claim-btc",
+                swap_id,
+                role="alice",
+            )
+            trace.append("claim:btc")
+        else:
+            raise ValueError(
+                f"unknown v7 claim primary action: {action}"
+            )
     else:
         impl.command(
             "claim-btc",
@@ -3831,7 +4049,7 @@ def run_claim_seed(
             trace,
         )
     elif (
-        fault_profile == "scheduled-v6"
+        fault_profile in {"scheduled-v6", "scheduled-v7"}
         and fault_schedule["stale_event"] == "btc-claimed"
     ):
         recover_primary_stale_v6(
@@ -3899,7 +4117,7 @@ def run_claim_seed(
         )
         or
         (
-            fault_profile == "scheduled-v6"
+            fault_profile in {"scheduled-v6", "scheduled-v7"}
             and fault_schedule is not None
             and fault_schedule.get("stale_event") == "btc-claimed"
         )
@@ -3934,7 +4152,7 @@ def run_claim_seed(
         )
 
         if (
-            fault_profile == "scheduled-v6"
+            fault_profile in {"scheduled-v6", "scheduled-v7"}
             and fault_schedule is not None
             and fault_schedule.get("stale_event") == "btc-claimed"
         ):
@@ -3977,6 +4195,10 @@ def run_claim_seed(
             fault_profile in {"scheduled-v1", "scheduled-v2"}
             and scheduled_reorg
         )
+        or (
+            fault_profile == "scheduled-v7"
+            and scheduled_reorg
+        )
     ):
         reorg_probe_btc_claim(
             swap_id,
@@ -3987,6 +4209,17 @@ def run_claim_seed(
         maybe_restart_v5(
             swap_id,
             fault_schedule["restart_checkpoint"],
+            "before-secondary-settlement",
+            "claim",
+            trace,
+        )
+
+    if (
+        fault_profile == "scheduled-v7"
+        and fault_schedule["restart_before_secondary"]
+    ):
+        restart_checkpoint_v5(
+            swap_id,
             "before-secondary-settlement",
             "claim",
             trace,
@@ -4016,6 +4249,39 @@ def run_claim_seed(
             fault_schedule["secondary_crash_window"],
             trace,
         )
+    elif fault_profile == "scheduled-v7":
+        action = fault_schedule["secondary_action"]
+
+        if action == "race":
+            race_blake_claim(
+                swap_id,
+                trace,
+            )
+        elif action == "crash-broadcast":
+            crash_recover_secondary_v4(
+                swap_id,
+                "claim",
+                "broadcast",
+                trace,
+            )
+        elif action == "crash-confirmed":
+            crash_recover_secondary_v4(
+                swap_id,
+                "claim",
+                "confirmed",
+                trace,
+            )
+        elif action == "normal":
+            impl.command(
+                "claim-blake",
+                swap_id,
+                role="bob",
+            )
+            trace.append("claim:blake")
+        else:
+            raise ValueError(
+                f"unknown v7 claim secondary action: {action}"
+            )
     else:
         impl.command(
             "claim-blake",
@@ -5042,7 +5308,7 @@ def run_refund_seed(
         )
     else:
         if (
-            fault_profile == "scheduled-v6"
+            fault_profile in {"scheduled-v6", "scheduled-v7"}
             and fault_schedule["stale_event"] == "blake-funded"
         ):
             fund_with_stale_recovery_v6(
@@ -5064,7 +5330,7 @@ def run_refund_seed(
             )
 
         if (
-            fault_profile == "scheduled-v6"
+            fault_profile in {"scheduled-v6", "scheduled-v7"}
             and fault_schedule["stale_event"] == "btc-funded"
         ):
             fund_with_stale_recovery_v6(
@@ -5202,6 +5468,46 @@ def run_refund_seed(
             fault_schedule["primary_crash_window"],
             trace,
         )
+    elif fault_profile == "scheduled-v7":
+        action = fault_schedule["primary_action"]
+
+        if action == "crash-candidate":
+            crash_recover_primary_v4(
+                swap_id,
+                "refund",
+                "candidate",
+                trace,
+            )
+        elif action == "crash-broadcast":
+            crash_recover_primary_v4(
+                swap_id,
+                "refund",
+                "broadcast",
+                trace,
+            )
+        elif action == "crash-confirmed":
+            crash_recover_primary_v4(
+                swap_id,
+                "refund",
+                "confirmed",
+                trace,
+            )
+        elif action == "race":
+            race_btc_refund(
+                swap_id,
+                trace,
+            )
+        elif action == "normal":
+            impl.command(
+                "refund-btc",
+                swap_id,
+                role="bob",
+            )
+            trace.append("refund:btc")
+        else:
+            raise ValueError(
+                f"unknown v7 refund primary action: {action}"
+            )
     else:
         impl.command(
             "refund-btc",
@@ -5225,7 +5531,7 @@ def run_refund_seed(
             trace,
         )
     elif (
-        fault_profile == "scheduled-v6"
+        fault_profile in {"scheduled-v6", "scheduled-v7"}
         and fault_schedule["stale_event"] == "btc-refunded"
     ):
         recover_primary_stale_v6(
@@ -5273,6 +5579,10 @@ def run_refund_seed(
         }
         or (
             fault_profile in {"scheduled-v1", "scheduled-v2"}
+            and scheduled_reorg
+        )
+        or (
+            fault_profile == "scheduled-v7"
             and scheduled_reorg
         )
     ):
@@ -5347,6 +5657,17 @@ def run_refund_seed(
             trace,
         )
 
+    if (
+        fault_profile == "scheduled-v7"
+        and fault_schedule["restart_before_secondary"]
+    ):
+        restart_checkpoint_v5(
+            swap_id,
+            "before-secondary-settlement",
+            "refund",
+            trace,
+        )
+
     scheduled_secondary = (
         fault_schedule.get("secondary_settlement")
         if fault_schedule is not None
@@ -5371,6 +5692,39 @@ def run_refund_seed(
             fault_schedule["secondary_crash_window"],
             trace,
         )
+    elif fault_profile == "scheduled-v7":
+        action = fault_schedule["secondary_action"]
+
+        if action == "race":
+            race_blake_refund(
+                swap_id,
+                trace,
+            )
+        elif action == "crash-broadcast":
+            crash_recover_secondary_v4(
+                swap_id,
+                "refund",
+                "broadcast",
+                trace,
+            )
+        elif action == "crash-confirmed":
+            crash_recover_secondary_v4(
+                swap_id,
+                "refund",
+                "confirmed",
+                trace,
+            )
+        elif action == "normal":
+            impl.command(
+                "refund-blake",
+                swap_id,
+                role="alice",
+            )
+            trace.append("refund:blake")
+        else:
+            raise ValueError(
+                f"unknown v7 refund secondary action: {action}"
+            )
     else:
         impl.command(
             "refund-blake",
@@ -5437,6 +5791,11 @@ def run_seed(seed, fault_profile="none"):
         )
     elif fault_profile == "scheduled-v6":
         fault_schedule = build_fault_schedule_v6(
+            seed,
+            path,
+        )
+    elif fault_profile == "scheduled-v7":
+        fault_schedule = build_fault_schedule_v7(
             seed,
             path,
         )

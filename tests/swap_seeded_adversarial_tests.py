@@ -55,6 +55,7 @@ FAULT_PROFILES = (
     "scheduled-v2",
     "scheduled-v3",
     "scheduled-v4",
+    "scheduled-v5",
 )
 
 
@@ -1538,6 +1539,366 @@ def crash_recover_secondary_v4(
     )
 
 
+SCHEDULE_VERSION_V5 = "scheduled-v5"
+
+
+def deterministic_schedule_choice_v5(
+    seed,
+    path,
+    stage,
+    options,
+):
+    material = (
+        f"{SCHEDULE_VERSION_V5}:{seed}:{path}:{stage}"
+    ).encode("utf-8")
+
+    digest = hashlib.sha256(material).digest()
+
+    return options[
+        int.from_bytes(digest, "big")
+        % len(options)
+    ]
+
+
+def build_fault_schedule_v5(
+    seed,
+    path,
+):
+    """
+    Restart/reconciliation checkpoint scheduler.
+
+    Each command already executes through a fresh subprocess, so v5
+    models an application/process restart by forcing a durable reload
+    plus authoritative chain reconciliation at one selected protocol
+    boundary.
+
+    Checkpoints:
+
+      after-handshake
+      after-blake-funding
+      after-btc-funding
+      after-primary-settlement
+      before-secondary-settlement
+    """
+
+    checkpoint = deterministic_schedule_choice_v5(
+        seed,
+        path,
+        "restart-checkpoint",
+        (
+            "after-handshake",
+            "after-blake-funding",
+            "after-btc-funding",
+            "after-primary-settlement",
+            "before-secondary-settlement",
+        ),
+    )
+
+    return {
+        "version": SCHEDULE_VERSION_V5,
+        "path": path,
+
+        # Common scheduler surface.
+        "primary_settlement": "normal",
+        "reorg_probe": False,
+        "secondary_settlement": "normal",
+
+        "restart_checkpoint": checkpoint,
+    }
+
+
+def portable_restart_identity(state):
+    """
+    Durable/economic identity fields that a restart must not silently
+    rewrite merely because state was reloaded/reconciled.
+    """
+
+    fields = (
+        "state",
+        "blake_funding_txid",
+        "blake_funding_vout",
+        "btc_funding_txid",
+        "btc_funding_vout",
+        "btc_claim_txid",
+        "btc_refund_txid",
+        "blake_claim_txid",
+        "blake_refund_txid",
+        "secret_hex",
+        "revealed_secret_hex",
+    )
+
+    return {
+        field: state.get(field)
+        for field in fields
+    }
+
+
+def restart_checkpoint_v5(
+    swap_id,
+    checkpoint,
+    path,
+    trace,
+):
+    """
+    Simulate process restart at a protocol boundary.
+
+    Because every adapter command is already a fresh subprocess, the
+    meaningful restart test is:
+
+      1. reload both durable participant states;
+      2. reconcile only facts that should be discoverable at this stage;
+      3. verify reconciliation does not replace existing economic
+         identities;
+      4. continue protocol execution from that recovered state.
+
+    Chain truth is allowed to advance a stale participant to a fact that
+    was already authoritative on-chain. It is not allowed to invent a
+    conflicting settlement or forget irreversible secret knowledge.
+    """
+
+    before_alice = impl.state(
+        swap_id,
+        "alice",
+    )
+
+    before_bob = impl.state(
+        swap_id,
+        "bob",
+    )
+
+    before_a_id = portable_restart_identity(
+        before_alice,
+    )
+
+    before_b_id = portable_restart_identity(
+        before_bob,
+    )
+
+    trace.append(
+        f"restart:{checkpoint}:reload"
+    )
+
+    if checkpoint == "after-handshake":
+        #
+        # No chain facts exist yet. Pure durable reload only.
+        #
+        pass
+
+    elif checkpoint in {
+        "after-blake-funding",
+        "after-btc-funding",
+    }:
+        #
+        # Recover authoritative funding anchors.
+        #
+        impl.command(
+            "sync-funding",
+            "--role",
+            "alice",
+            swap_id,
+            role="alice",
+        )
+
+        impl.command(
+            "sync-funding",
+            "--role",
+            "bob",
+            swap_id,
+            role="bob",
+        )
+
+        trace.append(
+            f"restart:{checkpoint}:sync-funding"
+        )
+
+    elif checkpoint in {
+        "after-primary-settlement",
+        "before-secondary-settlement",
+    }:
+        #
+        # Recover both funding and settlement truth. This deliberately
+        # exercises startup logic from durable state rather than relying
+        # on the immediately preceding transport event.
+        #
+        impl.command(
+            "sync-funding",
+            "--role",
+            "alice",
+            swap_id,
+            role="alice",
+        )
+
+        impl.command(
+            "sync-funding",
+            "--role",
+            "bob",
+            swap_id,
+            role="bob",
+        )
+
+        impl.command(
+            "sync-settlement",
+            "--role",
+            "alice",
+            swap_id,
+            role="alice",
+        )
+
+        impl.command(
+            "sync-settlement",
+            "--role",
+            "bob",
+            swap_id,
+            role="bob",
+        )
+
+        trace.append(
+            f"restart:{checkpoint}:sync-all"
+        )
+
+    else:
+        raise ValueError(
+            f"unknown scheduled-v5 restart checkpoint: {checkpoint}"
+        )
+
+    after_alice = impl.state(
+        swap_id,
+        "alice",
+    )
+
+    after_bob = impl.state(
+        swap_id,
+        "bob",
+    )
+
+    after_a_id = portable_restart_identity(
+        after_alice,
+    )
+
+    after_b_id = portable_restart_identity(
+        after_bob,
+    )
+
+    #
+    # Existing non-null economic identities may never be silently
+    # replaced by reconciliation.
+    #
+    economic_fields = (
+        "blake_funding_txid",
+        "blake_funding_vout",
+        "btc_funding_txid",
+        "btc_funding_vout",
+        "btc_claim_txid",
+        "btc_refund_txid",
+        "blake_claim_txid",
+        "blake_refund_txid",
+    )
+
+    for role, before_id, after_id in (
+        (
+            "alice",
+            before_a_id,
+            after_a_id,
+        ),
+        (
+            "bob",
+            before_b_id,
+            after_b_id,
+        ),
+    ):
+        for field in economic_fields:
+            old = before_id.get(field)
+            new = after_id.get(field)
+
+            if old is not None:
+                h.require(
+                    new == old,
+                    (
+                        f"{role} restart at {checkpoint} "
+                        f"rewrote {field}: {old} -> {new}"
+                    ),
+                )
+
+    #
+    # Alice's original secret is irreversible local knowledge.
+    #
+    if before_a_id.get("secret_hex") is not None:
+        h.require(
+            after_a_id.get("secret_hex")
+            == before_a_id.get("secret_hex"),
+            (
+                f"Alice lost/replaced original S during "
+                f"restart at {checkpoint}"
+            ),
+        )
+
+    #
+    # Bob's revealed secret, once learned, is also irreversible local
+    # knowledge. sync-settlement may legitimately learn it if the BTC
+    # claim is already confirmed.
+    #
+    if before_b_id.get("revealed_secret_hex") is not None:
+        h.require(
+            after_b_id.get("revealed_secret_hex")
+            == before_b_id.get("revealed_secret_hex"),
+            (
+                f"Bob lost/replaced revealed S during "
+                f"restart at {checkpoint}"
+            ),
+        )
+
+    #
+    # No restart checkpoint may create an economic branch conflict.
+    #
+    for role, state in (
+        ("alice", after_alice),
+        ("bob", after_bob),
+    ):
+        h.require(
+            not (
+                state.get("btc_claim_txid")
+                and state.get("btc_refund_txid")
+            ),
+            (
+                f"{role} restart at {checkpoint} produced "
+                "conflicting BTC settlement identities"
+            ),
+        )
+
+        h.require(
+            not (
+                state.get("blake_claim_txid")
+                and state.get("blake_refund_txid")
+            ),
+            (
+                f"{role} restart at {checkpoint} produced "
+                "conflicting BLAKE settlement identities"
+            ),
+        )
+
+    trace.append(
+        f"restart:{checkpoint}:recovered"
+    )
+
+
+def maybe_restart_v5(
+    swap_id,
+    checkpoint,
+    current_stage,
+    path,
+    trace,
+):
+    if checkpoint != current_stage:
+        return
+
+    restart_checkpoint_v5(
+        swap_id,
+        checkpoint,
+        path,
+        trace,
+    )
+
+
 def reconcile_funding(
     swap_id,
     trace,
@@ -1660,6 +2021,12 @@ def append_schedule_trace(
                     + schedule["secondary_crash_window"]
                 ),
             )
+        )
+
+    if schedule.get("version") == SCHEDULE_VERSION_V5:
+        trace.append(
+            "schedule:restart-checkpoint:"
+            + schedule["restart_checkpoint"]
         )
 
 
@@ -2768,6 +3135,15 @@ def run_claim_seed(
     impl.handshake(swap_id)
     trace.append("handshake")
 
+    if fault_profile == "scheduled-v5":
+        maybe_restart_v5(
+            swap_id,
+            fault_schedule["restart_checkpoint"],
+            "after-handshake",
+            "claim",
+            trace,
+        )
+
     #
     # Bob must never be able to perform Alice's BLAKE funding action.
     #
@@ -2804,6 +3180,15 @@ def run_claim_seed(
     else:
         impl.fund_blake_and_sync(swap_id)
         trace.append("fund-and-confirm:blake")
+
+    if fault_profile == "scheduled-v5":
+        maybe_restart_v5(
+            swap_id,
+            fault_schedule["restart_checkpoint"],
+            "after-blake-funding",
+            "claim",
+            trace,
+        )
 
     def duplicate_blake_receive():
         impl.command(
@@ -2885,6 +3270,15 @@ def run_claim_seed(
                     ),
                 ],
             )
+        )
+
+    if fault_profile == "scheduled-v5":
+        maybe_restart_v5(
+            swap_id,
+            fault_schedule["restart_checkpoint"],
+            "after-btc-funding",
+            "claim",
+            trace,
         )
 
     impl.assert_secret_separation(swap_id)
@@ -2975,6 +3369,15 @@ def run_claim_seed(
     ):
         reconcile_settlement(
             swap_id,
+            trace,
+        )
+
+    if fault_profile == "scheduled-v5":
+        maybe_restart_v5(
+            swap_id,
+            fault_schedule["restart_checkpoint"],
+            "after-primary-settlement",
+            "claim",
             trace,
         )
 
@@ -3075,6 +3478,15 @@ def run_claim_seed(
     ):
         reorg_probe_btc_claim(
             swap_id,
+            trace,
+        )
+
+    if fault_profile == "scheduled-v5":
+        maybe_restart_v5(
+            swap_id,
+            fault_schedule["restart_checkpoint"],
+            "before-secondary-settlement",
+            "claim",
             trace,
         )
 
@@ -4096,6 +4508,15 @@ def run_refund_seed(
     impl.handshake(swap_id)
     trace.append("handshake")
 
+    if fault_profile == "scheduled-v5":
+        maybe_restart_v5(
+            swap_id,
+            fault_schedule["restart_checkpoint"],
+            "after-handshake",
+            "refund",
+            trace,
+        )
+
     if fault_profile == "scheduled-v3":
         fund_blake_with_delivery(
             swap_id,
@@ -4112,8 +4533,26 @@ def run_refund_seed(
         impl.fund_blake_and_sync(swap_id)
         trace.append("fund-and-confirm:blake")
 
+        if fault_profile == "scheduled-v5":
+            maybe_restart_v5(
+                swap_id,
+                fault_schedule["restart_checkpoint"],
+                "after-blake-funding",
+                "refund",
+                trace,
+            )
+
         impl.fund_btc_and_sync(swap_id)
         trace.append("fund-and-confirm:btc")
+
+        if fault_profile == "scheduled-v5":
+            maybe_restart_v5(
+                swap_id,
+                fault_schedule["restart_checkpoint"],
+                "after-btc-funding",
+                "refund",
+                trace,
+            )
 
     #
     # Replay funding messages in seed-selected order before timeout.
@@ -4272,6 +4711,15 @@ def run_refund_seed(
             trace,
         )
 
+    if fault_profile == "scheduled-v5":
+        maybe_restart_v5(
+            swap_id,
+            fault_schedule["restart_checkpoint"],
+            "after-primary-settlement",
+            "refund",
+            trace,
+        )
+
     scheduled_reorg = (
         bool(fault_schedule.get("reorg_probe"))
         if fault_schedule is not None
@@ -4349,6 +4797,15 @@ def run_refund_seed(
 
         impl.mine_blake(remaining)
         trace.append("advance:blake-timeout")
+
+    if fault_profile == "scheduled-v5":
+        maybe_restart_v5(
+            swap_id,
+            fault_schedule["restart_checkpoint"],
+            "before-secondary-settlement",
+            "refund",
+            trace,
+        )
 
     scheduled_secondary = (
         fault_schedule.get("secondary_settlement")
@@ -4430,6 +4887,11 @@ def run_seed(seed, fault_profile="none"):
         )
     elif fault_profile == "scheduled-v4":
         fault_schedule = build_fault_schedule_v4(
+            seed,
+            path,
+        )
+    elif fault_profile == "scheduled-v5":
+        fault_schedule = build_fault_schedule_v5(
             seed,
             path,
         )

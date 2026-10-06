@@ -42,6 +42,7 @@ EXPECTED_COUNTS = {
     "scheduled-v2": 94,
     "scheduled-v3": 52,
     "scheduled-v4": 32,
+    "scheduled-v5": 10,
 }
 
 
@@ -348,6 +349,41 @@ def schedule_key_v4(seed):
 
 
 # ============================================================
+# V5
+# ============================================================
+
+def expected_shapes_v5():
+    return {
+        (
+            path,
+            checkpoint,
+        )
+        for path in ("claim", "refund")
+        for checkpoint in (
+            "after-handshake",
+            "after-blake-funding",
+            "after-btc-funding",
+            "after-primary-settlement",
+            "before-secondary-settlement",
+        )
+    }
+
+
+def schedule_key_v5(seed):
+    path = path_for_seed(seed)
+
+    schedule = seeded.build_fault_schedule_v5(
+        seed,
+        path,
+    )
+
+    return (
+        path,
+        schedule["restart_checkpoint"],
+    )
+
+
+# ============================================================
 # Generic profile dispatch
 # ============================================================
 
@@ -363,6 +399,9 @@ def expected_shapes(profile):
 
     if profile == "scheduled-v4":
         return expected_shapes_v4()
+
+    if profile == "scheduled-v5":
+        return expected_shapes_v5()
 
     raise ValueError(
         f"unsupported scheduled profile: {profile}"
@@ -381,6 +420,9 @@ def schedule_key(profile, seed):
 
     if profile == "scheduled-v4":
         return schedule_key_v4(seed)
+
+    if profile == "scheduled-v5":
+        return schedule_key_v5(seed)
 
     raise ValueError(
         f"unsupported scheduled profile: {profile}"
@@ -467,16 +509,24 @@ def format_shape(
             f"primary={primary_delivery:<9}"
         )
 
-    (
-        path,
-        primary_crash_window,
-        secondary_crash_window,
-    ) = shape
+    if profile == "scheduled-v4":
+        (
+            path,
+            primary_crash_window,
+            secondary_crash_window,
+        ) = shape
+
+        return (
+            f"{path:<6}  "
+            f"btc-crash={primary_crash_window:<9}  "
+            f"blake-crash={secondary_crash_window:<9}"
+        )
+
+    path, checkpoint = shape
 
     return (
         f"{path:<6}  "
-        f"btc-crash={primary_crash_window:<9}  "
-        f"blake-crash={secondary_crash_window:<9}"
+        f"restart={checkpoint}"
     )
 
 
@@ -731,6 +781,7 @@ def main():
             "scheduled-v2",
             "scheduled-v3",
             "scheduled-v4",
+            "scheduled-v5",
         ),
         default="scheduled-v1",
         help=(

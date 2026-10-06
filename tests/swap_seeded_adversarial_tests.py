@@ -762,6 +762,18 @@ def build_fault_schedule_v4(
         ),
     )
 
+    secondary_crash_window = deterministic_schedule_choice_v4(
+        seed,
+        path,
+        "secondary-crash-window",
+        (
+            "none",
+            "candidate",
+            "broadcast",
+            "confirmed",
+        ),
+    )
+
     return {
         "version": SCHEDULE_VERSION_V4,
         "path": path,
@@ -772,6 +784,7 @@ def build_fault_schedule_v4(
         "secondary_settlement": "normal",
 
         "primary_crash_window": crash_window,
+        "secondary_crash_window": secondary_crash_window,
     }
 
 
@@ -1146,6 +1159,385 @@ def crash_recover_primary_v4(
     )
 
 
+def crash_recover_secondary_v4(
+    swap_id,
+    path,
+    window,
+    trace,
+):
+    """
+    Crash/recover the secondary BLAKE settlement.
+
+    claim path:
+        Bob claims BLAKE after learning S from BTC claim.
+
+    refund path:
+        Alice refunds BLAKE after BTC refund and timeout.
+
+    Across every crash boundary, restart must preserve the exact
+    durable settlement candidate.
+    """
+
+    if path == "claim":
+        command = "claim-blake"
+        role = "bob"
+        source_state = "BTC_CLAIMED"
+        target_state = "BLAKE_CLAIMED"
+
+        txid_field = "blake_claim_txid"
+        hex_field = "blake_claim_hex"
+        block_field = "blake_claim_blockhash"
+
+        failpoints = {
+            "candidate":
+                "after_blake_claim_candidate_save_before_broadcast",
+            "broadcast":
+                "after_blake_claim_broadcast",
+            "confirmed":
+                "after_blake_claim_confirmation_before_state_save",
+        }
+
+        label = "blake-claim"
+
+    elif path == "refund":
+        command = "refund-blake"
+        role = "alice"
+        source_state = "BTC_REFUNDED"
+        target_state = "BLAKE_REFUNDED"
+
+        txid_field = "blake_refund_txid"
+        hex_field = "blake_refund_hex"
+        block_field = "blake_refund_blockhash"
+
+        failpoints = {
+            "candidate":
+                "after_blake_refund_candidate_save_before_broadcast",
+            "broadcast":
+                "after_blake_refund_broadcast",
+            "confirmed":
+                "after_blake_refund_confirmation_before_state_save",
+        }
+
+        label = "blake-refund"
+
+    else:
+        raise ValueError(
+            f"unknown scheduled-v4 secondary path: {path}"
+        )
+
+    if window == "none":
+        impl.command(
+            command,
+            swap_id,
+            role=role,
+        )
+
+        trace.append(
+            f"settle:{label}:normal"
+        )
+
+        return
+
+    if window not in failpoints:
+        raise ValueError(
+            f"unknown scheduled-v4 secondary crash window: {window}"
+        )
+
+    before = impl.state(
+        swap_id,
+        role,
+    )
+
+    h.require(
+        before["state"] == source_state,
+        (
+            f"{label} v4 crash requires {source_state}; "
+            f"observed {before['state']}"
+        ),
+    )
+
+    proc = impl.command(
+        command,
+        swap_id,
+        role=role,
+        expect_ok=False,
+        extra_env={
+            "BLAKE_SWAP_FAILPOINT":
+                failpoints[window],
+            "BLAKE_SWAP_AUTO_MINE": "1",
+        },
+    )
+
+    h.require(
+        proc.returncode == CRASH_EXIT,
+        (
+            f"{label} {window}: expected crash exit "
+            f"{CRASH_EXIT}, got {proc.returncode}\\n"
+            f"stdout:\\n{proc.stdout[-1200:]}\\n"
+            f"stderr:\\n{proc.stderr[-1200:]}"
+        ),
+    )
+
+    crashed = impl.state(
+        swap_id,
+        role,
+    )
+
+    h.require(
+        crashed["state"] == source_state,
+        (
+            f"{label} {window}: crash advanced state "
+            f"to {crashed['state']}"
+        ),
+    )
+
+    canonical_txid = crashed.get(
+        txid_field
+    )
+
+    canonical_hex = crashed.get(
+        hex_field
+    )
+
+    h.require(
+        bool(canonical_txid),
+        f"{label} {window}: lost durable txid",
+    )
+
+    h.require(
+        bool(canonical_hex),
+        f"{label} {window}: lost durable signed transaction",
+    )
+
+    h.require(
+        crashed.get(block_field) is None,
+        (
+            f"{label} {window}: crash prematurely persisted "
+            "authoritative blockhash"
+        ),
+    )
+
+    trace.append(
+        f"crash:{label}:{window}"
+    )
+
+    mempool = set(
+        h.blake_cli("getrawmempool")
+    )
+
+    if window == "candidate":
+        h.require(
+            canonical_txid not in mempool,
+            (
+                f"{label}: candidate unexpectedly reached "
+                "mempool before broadcast"
+            ),
+        )
+
+    elif window == "broadcast":
+        h.require(
+            canonical_txid in mempool,
+            (
+                f"{label}: broadcast candidate missing "
+                "from mempool after crash"
+            ),
+        )
+
+    #
+    # Candidate/broadcast crash:
+    # restart without automining, proving recovery reuses the durable
+    # signed candidate while it is still unconfirmed.
+    #
+    if window in {
+        "candidate",
+        "broadcast",
+    }:
+        proc = impl.command(
+            command,
+            swap_id,
+            role=role,
+            expect_ok=False,
+            extra_env={
+                "BLAKE_SWAP_AUTO_MINE": "0",
+            },
+        )
+
+        h.require(
+            proc.returncode == 0,
+            (
+                f"{label}: pending restart failed\\n"
+                f"stdout:\\n{proc.stdout[-1200:]}\\n"
+                f"stderr:\\n{proc.stderr[-1200:]}"
+            ),
+        )
+
+        pending = impl.state(
+            swap_id,
+            role,
+        )
+
+        h.require(
+            pending["state"] == source_state,
+            (
+                f"{label}: unconfirmed recovery advanced state "
+                f"to {pending['state']}"
+            ),
+        )
+
+        h.require(
+            pending.get(txid_field)
+            == canonical_txid,
+            (
+                f"{label}: restart replaced canonical txid"
+            ),
+        )
+
+        h.require(
+            pending.get(hex_field)
+            == canonical_hex,
+            (
+                f"{label}: restart replaced signed candidate"
+            ),
+        )
+
+        h.require(
+            canonical_txid
+            in set(h.blake_cli("getrawmempool")),
+            (
+                f"{label}: recovered candidate not in BLAKE mempool"
+            ),
+        )
+
+        trace.append(
+            f"restart:{label}:pending-same-candidate"
+        )
+
+        impl.mine_blake(1)
+
+        trace.append(
+            f"confirm:{label}"
+        )
+
+    else:
+        #
+        # In the confirmed window AUTO_MINE already mined the exact
+        # settlement before the injected crash.
+        #
+        h.require(
+            canonical_txid
+            not in set(h.blake_cli("getrawmempool")),
+            (
+                f"{label}: confirmed transaction still "
+                "present in BLAKE mempool"
+            ),
+        )
+
+        trace.append(
+            f"confirm:{label}:before-crash"
+        )
+
+    #
+    # Restart after active-chain confirmation. Durable state must now
+    # advance using the same canonical candidate.
+    #
+    proc = impl.command(
+        command,
+        swap_id,
+        role=role,
+        expect_ok=False,
+        extra_env={
+            "BLAKE_SWAP_AUTO_MINE": "0",
+        },
+    )
+
+    h.require(
+        proc.returncode == 0,
+        (
+            f"{label}: final recovery failed\\n"
+            f"stdout:\\n{proc.stdout[-1200:]}\\n"
+            f"stderr:\\n{proc.stderr[-1200:]}"
+        ),
+    )
+
+    recovered = impl.state(
+        swap_id,
+        role,
+    )
+
+    h.require(
+        recovered["state"] == target_state,
+        (
+            f"{label}: recovered to {recovered['state']}, "
+            f"expected {target_state}"
+        ),
+    )
+
+    h.require(
+        recovered.get(txid_field)
+        == canonical_txid,
+        (
+            f"{label}: confirmed recovery changed txid"
+        ),
+    )
+
+    h.require(
+        bool(recovered.get(block_field)),
+        (
+            f"{label}: confirmed recovery failed to persist "
+            "active-chain blockhash"
+        ),
+    )
+
+    trace.append(
+        f"restart:{label}:confirmed-same-candidate"
+    )
+
+    #
+    # A further retry must be economically idempotent.
+    #
+    before_retry = impl.state(
+        swap_id,
+        role,
+    )
+
+    impl.command(
+        command,
+        swap_id,
+        role=role,
+        expect_ok=False,
+        extra_env={
+            "BLAKE_SWAP_AUTO_MINE": "0",
+        },
+    )
+
+    after_retry = impl.state(
+        swap_id,
+        role,
+    )
+
+    h.require(
+        after_retry.get(txid_field)
+        == before_retry.get(txid_field),
+        f"{label}: settled retry changed txid",
+    )
+
+    h.require(
+        after_retry.get(block_field)
+        == before_retry.get(block_field),
+        f"{label}: settled retry changed blockhash",
+    )
+
+    h.require(
+        after_retry["state"]
+        == before_retry["state"],
+        f"{label}: settled retry changed state",
+    )
+
+    trace.append(
+        f"retry:{label}:idempotent"
+    )
+
+
 def reconcile_funding(
     swap_id,
     trace,
@@ -1257,9 +1649,17 @@ def append_schedule_trace(
         )
 
     if schedule.get("version") == SCHEDULE_VERSION_V4:
-        trace.append(
-            "schedule:primary-crash-window:"
-            + schedule["primary_crash_window"]
+        trace.extend(
+            (
+                (
+                    "schedule:primary-crash-window:"
+                    + schedule["primary_crash_window"]
+                ),
+                (
+                    "schedule:secondary-crash-window:"
+                    + schedule["secondary_crash_window"]
+                ),
+            )
         )
 
 
@@ -2695,6 +3095,13 @@ def run_claim_seed(
             swap_id,
             trace,
         )
+    elif fault_profile == "scheduled-v4":
+        crash_recover_secondary_v4(
+            swap_id,
+            "claim",
+            fault_schedule["secondary_crash_window"],
+            trace,
+        )
     else:
         impl.command(
             "claim-blake",
@@ -3958,6 +4365,13 @@ def run_refund_seed(
     ):
         race_blake_refund(
             swap_id,
+            trace,
+        )
+    elif fault_profile == "scheduled-v4":
+        crash_recover_secondary_v4(
+            swap_id,
+            "refund",
+            fault_schedule["secondary_crash_window"],
             trace,
         )
     else:

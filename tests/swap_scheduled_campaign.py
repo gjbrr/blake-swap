@@ -41,7 +41,7 @@ EXPECTED_COUNTS = {
     "scheduled-v1": 22,
     "scheduled-v2": 94,
     "scheduled-v3": 52,
-    "scheduled-v4": 8,
+    "scheduled-v4": 32,
 }
 
 
@@ -311,9 +311,19 @@ def schedule_key_v3(seed):
 
 def expected_shapes_v4():
     return {
-        (path, crash_window)
+        (
+            path,
+            primary_crash_window,
+            secondary_crash_window,
+        )
         for path in ("claim", "refund")
-        for crash_window in (
+        for primary_crash_window in (
+            "none",
+            "candidate",
+            "broadcast",
+            "confirmed",
+        )
+        for secondary_crash_window in (
             "none",
             "candidate",
             "broadcast",
@@ -333,6 +343,7 @@ def schedule_key_v4(seed):
     return (
         path,
         schedule["primary_crash_window"],
+        schedule["secondary_crash_window"],
     )
 
 
@@ -456,11 +467,16 @@ def format_shape(
             f"primary={primary_delivery:<9}"
         )
 
-    path, crash_window = shape
+    (
+        path,
+        primary_crash_window,
+        secondary_crash_window,
+    ) = shape
 
     return (
         f"{path:<6}  "
-        f"primary-crash={crash_window:<9}"
+        f"btc-crash={primary_crash_window:<9}  "
+        f"blake-crash={secondary_crash_window:<9}"
     )
 
 

@@ -41,6 +41,7 @@ EXPECTED_COUNTS = {
     "scheduled-v1": 22,
     "scheduled-v2": 94,
     "scheduled-v3": 52,
+    "scheduled-v4": 8,
 }
 
 
@@ -305,6 +306,37 @@ def schedule_key_v3(seed):
 
 
 # ============================================================
+# V4
+# ============================================================
+
+def expected_shapes_v4():
+    return {
+        (path, crash_window)
+        for path in ("claim", "refund")
+        for crash_window in (
+            "none",
+            "candidate",
+            "broadcast",
+            "confirmed",
+        )
+    }
+
+
+def schedule_key_v4(seed):
+    path = path_for_seed(seed)
+
+    schedule = seeded.build_fault_schedule_v4(
+        seed,
+        path,
+    )
+
+    return (
+        path,
+        schedule["primary_crash_window"],
+    )
+
+
+# ============================================================
 # Generic profile dispatch
 # ============================================================
 
@@ -317,6 +349,9 @@ def expected_shapes(profile):
 
     if profile == "scheduled-v3":
         return expected_shapes_v3()
+
+    if profile == "scheduled-v4":
+        return expected_shapes_v4()
 
     raise ValueError(
         f"unsupported scheduled profile: {profile}"
@@ -332,6 +367,9 @@ def schedule_key(profile, seed):
 
     if profile == "scheduled-v3":
         return schedule_key_v3(seed)
+
+    if profile == "scheduled-v4":
+        return schedule_key_v4(seed)
 
     raise ValueError(
         f"unsupported scheduled profile: {profile}"
@@ -403,18 +441,26 @@ def format_shape(
             f"settlement-sync={settlement_reconcile:<4}"
         )
 
-    (
-        path,
-        blake_funding_delivery,
-        btc_funding_delivery,
-        primary_delivery,
-    ) = shape
+    if profile == "scheduled-v3":
+        (
+            path,
+            blake_funding_delivery,
+            btc_funding_delivery,
+            primary_delivery,
+        ) = shape
+
+        return (
+            f"{path:<6}  "
+            f"blake-funding={blake_funding_delivery:<9}  "
+            f"btc-funding={btc_funding_delivery:<9}  "
+            f"primary={primary_delivery:<9}"
+        )
+
+    path, crash_window = shape
 
     return (
         f"{path:<6}  "
-        f"blake-funding={blake_funding_delivery:<9}  "
-        f"btc-funding={btc_funding_delivery:<9}  "
-        f"primary={primary_delivery:<9}"
+        f"primary-crash={crash_window:<9}"
     )
 
 
@@ -668,6 +714,7 @@ def main():
             "scheduled-v1",
             "scheduled-v2",
             "scheduled-v3",
+            "scheduled-v4",
         ),
         default="scheduled-v1",
         help=(

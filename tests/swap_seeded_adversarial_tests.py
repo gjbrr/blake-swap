@@ -56,6 +56,7 @@ FAULT_PROFILES = (
     "scheduled-v3",
     "scheduled-v4",
     "scheduled-v5",
+    "scheduled-v6",
 )
 
 
@@ -1539,6 +1540,457 @@ def crash_recover_secondary_v4(
     )
 
 
+SCHEDULE_VERSION_V6 = "scheduled-v6"
+
+
+def deterministic_schedule_choice_v6(
+    seed,
+    path,
+    stage,
+    options,
+):
+    material = (
+        f"{SCHEDULE_VERSION_V6}:{seed}:{path}:{stage}"
+    ).encode("utf-8")
+
+    digest = hashlib.sha256(material).digest()
+
+    return options[
+        int.from_bytes(digest, "big")
+        % len(options)
+    ]
+
+
+def build_fault_schedule_v6(
+    seed,
+    path,
+):
+    """
+    Transport omission + stale restart + chain recovery.
+
+    Real protocol boundaries:
+
+      claim:
+          blake-funded
+          btc-funded
+          btc-claimed
+          blake-claimed
+
+      refund:
+          blake-funded
+          btc-funded
+          btc-refunded
+    """
+
+    if path == "claim":
+        options = (
+            "blake-funded",
+            "btc-funded",
+            "btc-claimed",
+            "blake-claimed",
+        )
+
+    elif path == "refund":
+        options = (
+            "blake-funded",
+            "btc-funded",
+            "btc-refunded",
+        )
+
+    else:
+        raise ValueError(
+            f"unknown scheduled-v6 path: {path}"
+        )
+
+    stale_event = deterministic_schedule_choice_v6(
+        seed,
+        path,
+        "stale-event",
+        options,
+    )
+
+    return {
+        "version": SCHEDULE_VERSION_V6,
+        "path": path,
+        "primary_settlement": "normal",
+        "reorg_probe": False,
+        "secondary_settlement": "normal",
+        "stale_event": stale_event,
+    }
+
+
+def fund_with_stale_recovery_v6(
+    swap_id,
+    asset,
+    trace,
+):
+    """
+    Confirm funding but deliberately omit the peer transport event.
+
+    The receiver must remain stale until a fresh-process sync-funding
+    call reconstructs the exact authoritative funding anchor.
+    """
+
+    if asset == "blake":
+        actor = "alice"
+        receiver = "bob"
+        fund_command = "fund-blake"
+        publish_command = "publish-blake-funded"
+        txid_field = "blake_funding_txid"
+        vout_field = "blake_funding_vout"
+        expected_state = "BLAKE_FUNDED"
+        label = "blake-funded"
+
+    elif asset == "btc":
+        actor = "bob"
+        receiver = "alice"
+        fund_command = "fund-btc"
+        publish_command = "publish-btc-funded"
+        txid_field = "btc_funding_txid"
+        vout_field = "btc_funding_vout"
+        expected_state = "BTC_FUNDED"
+        label = "btc-funded"
+
+    else:
+        raise ValueError(
+            f"unknown v6 funding asset: {asset}"
+        )
+
+    before = impl.state(
+        swap_id,
+        receiver,
+    )
+
+    impl.command(
+        fund_command,
+        swap_id,
+        role=actor,
+    )
+
+    impl.command(
+        publish_command,
+        swap_id,
+        role=actor,
+    )
+
+    trace.append(
+        f"publish:{label}"
+    )
+
+    authoritative = impl.state(
+        swap_id,
+        actor,
+    )
+
+    txid = authoritative.get(
+        txid_field
+    )
+    vout = authoritative.get(
+        vout_field
+    )
+
+    h.require(
+        bool(txid),
+        f"{label}: authoritative txid missing",
+    )
+
+    h.require(
+        vout is not None,
+        f"{label}: authoritative vout missing",
+    )
+
+    #
+    # No receive-* call occurs here.
+    #
+    stale = impl.state(
+        swap_id,
+        receiver,
+    )
+
+    h.require(
+        stale["state"] == before["state"],
+        (
+            f"{label}: omitted transport unexpectedly "
+            f"advanced {receiver} from {before['state']} "
+            f"to {stale['state']}"
+        ),
+    )
+
+    h.require(
+        stale.get(txid_field)
+        == before.get(txid_field),
+        (
+            f"{label}: stale receiver learned txid "
+            "without transport or reconciliation"
+        ),
+    )
+
+    trace.append(
+        f"omit:{label}"
+    )
+
+    #
+    # Every adapter command is a fresh process. This command is
+    # therefore the restart/reload boundary.
+    #
+    trace.append(
+        f"restart:{receiver}:stale"
+    )
+
+    impl.command(
+        "sync-funding",
+        "--role",
+        receiver,
+        swap_id,
+        role=receiver,
+    )
+
+    recovered = impl.state(
+        swap_id,
+        receiver,
+    )
+
+    h.require(
+        recovered["state"] == expected_state,
+        (
+            f"{label}: sync recovered state "
+            f"{recovered['state']}, expected {expected_state}"
+        ),
+    )
+
+    h.require(
+        recovered.get(txid_field) == txid,
+        (
+            f"{label}: stale recovery selected "
+            "wrong funding txid"
+        ),
+    )
+
+    h.require(
+        recovered.get(vout_field) == vout,
+        (
+            f"{label}: stale recovery selected "
+            "wrong funding vout"
+        ),
+    )
+
+    trace.append(
+        f"recover:{label}:chain-sync-after-restart"
+    )
+
+
+def recover_primary_stale_v6(
+    swap_id,
+    path,
+    trace,
+):
+    """
+    Recover an omitted confirmed BTC claim/refund purely from chain
+    truth after the receiver restarts stale.
+    """
+
+    if path == "claim":
+        actor = "alice"
+        receiver = "bob"
+        expected_state = "BTC_CLAIMED"
+        txid_field = "btc_claim_txid"
+        label = "btc-claimed"
+
+    elif path == "refund":
+        actor = "bob"
+        receiver = "alice"
+        expected_state = "BTC_REFUNDED"
+        txid_field = "btc_refund_txid"
+        label = "btc-refunded"
+
+    else:
+        raise ValueError(
+            f"unknown v6 primary path: {path}"
+        )
+
+    authoritative = impl.state(
+        swap_id,
+        actor,
+    )
+
+    txid = authoritative.get(
+        txid_field
+    )
+
+    h.require(
+        bool(txid),
+        f"{label}: authoritative txid missing",
+    )
+
+    stale = impl.state(
+        swap_id,
+        receiver,
+    )
+
+    h.require(
+        stale.get(txid_field) is None,
+        (
+            f"{label}: receiver was not actually stale "
+            "before recovery"
+        ),
+    )
+
+    if path == "claim":
+        h.require(
+            stale.get("revealed_secret_hex") is None,
+            (
+                "Bob learned S before BTC-claim "
+                "chain reconciliation"
+            ),
+        )
+
+    trace.append(
+        f"omit:{label}"
+    )
+    trace.append(
+        f"restart:{receiver}:stale"
+    )
+
+    impl.command(
+        "sync-settlement",
+        "--role",
+        receiver,
+        swap_id,
+        role=receiver,
+    )
+
+    recovered = impl.state(
+        swap_id,
+        receiver,
+    )
+
+    h.require(
+        recovered["state"] == expected_state,
+        (
+            f"{label}: sync recovered state "
+            f"{recovered['state']}, expected {expected_state}"
+        ),
+    )
+
+    h.require(
+        recovered.get(txid_field) == txid,
+        (
+            f"{label}: stale recovery selected "
+            "wrong settlement txid"
+        ),
+    )
+
+    if path == "claim":
+        secret = recovered.get(
+            "revealed_secret_hex"
+        )
+
+        h.require(
+            bool(secret),
+            (
+                "Bob recovered BTC claim but failed "
+                "to recover S from its witness"
+            ),
+        )
+
+        h.require(
+            secret == authoritative.get("secret_hex"),
+            (
+                "Bob recovered a witness secret that "
+                "does not equal Alice's original S"
+            ),
+        )
+
+        trace.append(
+            "extract-secret:bitcoin-witness-via-stale-recovery"
+        )
+
+    else:
+        h.require(
+            recovered.get("revealed_secret_hex") is None,
+            "refund recovery unexpectedly revealed S",
+        )
+
+    trace.append(
+        f"recover:{label}:chain-sync-after-restart"
+    )
+
+
+def recover_blake_claim_stale_v6(
+    swap_id,
+    trace,
+):
+    """
+    Bob's BLAKE claim is confirmed, but Alice never receives the
+    coordination announcement. Alice must reconstruct the exact claim
+    from BLAKE chain truth after restart.
+    """
+
+    bob = impl.state(
+        swap_id,
+        "bob",
+    )
+
+    txid = bob.get(
+        "blake_claim_txid"
+    )
+
+    h.require(
+        bool(txid),
+        "authoritative BLAKE claim txid missing",
+    )
+
+    stale = impl.state(
+        swap_id,
+        "alice",
+    )
+
+    h.require(
+        stale.get("blake_claim_txid") is None,
+        (
+            "Alice was not stale before BLAKE "
+            "claim recovery"
+        ),
+    )
+
+    trace.append(
+        "omit:blake-claimed"
+    )
+    trace.append(
+        "restart:alice:stale"
+    )
+
+    impl.command(
+        "sync-settlement",
+        "--role",
+        "alice",
+        swap_id,
+        role="alice",
+    )
+
+    recovered = impl.state(
+        swap_id,
+        "alice",
+    )
+
+    h.require(
+        recovered["state"] == "BLAKE_CLAIMED",
+        (
+            "Alice failed to recover BLAKE_CLAIMED; "
+            f"observed {recovered['state']}"
+        ),
+    )
+
+    h.require(
+        recovered.get("blake_claim_txid") == txid,
+        "Alice recovered wrong BLAKE claim txid",
+    )
+
+    trace.append(
+        "recover:blake-claimed:chain-sync-after-restart"
+    )
+
+
 SCHEDULE_VERSION_V5 = "scheduled-v5"
 
 
@@ -2027,6 +2479,12 @@ def append_schedule_trace(
         trace.append(
             "schedule:restart-checkpoint:"
             + schedule["restart_checkpoint"]
+        )
+
+    if schedule.get("version") == SCHEDULE_VERSION_V6:
+        trace.append(
+            "schedule:stale-event:"
+            + schedule["stale_event"]
         )
 
 
@@ -3177,6 +3635,15 @@ def run_claim_seed(
             fault_schedule["blake_funding_delivery"],
             trace,
         )
+    elif (
+        fault_profile == "scheduled-v6"
+        and fault_schedule["stale_event"] == "blake-funded"
+    ):
+        fund_with_stale_recovery_v6(
+            swap_id,
+            "blake",
+            trace,
+        )
     else:
         impl.fund_blake_and_sync(swap_id)
         trace.append("fund-and-confirm:blake")
@@ -3246,6 +3713,15 @@ def run_claim_seed(
         fund_btc_with_delivery(
             swap_id,
             fault_schedule["btc_funding_delivery"],
+            trace,
+        )
+    elif (
+        fault_profile == "scheduled-v6"
+        and fault_schedule["stale_event"] == "btc-funded"
+    ):
+        fund_with_stale_recovery_v6(
+            swap_id,
+            "btc",
             trace,
         )
     else:
@@ -3354,6 +3830,15 @@ def run_claim_seed(
             fault_schedule["primary_delivery"],
             trace,
         )
+    elif (
+        fault_profile == "scheduled-v6"
+        and fault_schedule["stale_event"] == "btc-claimed"
+    ):
+        recover_primary_stale_v6(
+            swap_id,
+            "claim",
+            trace,
+        )
     else:
         impl.command(
             "receive-btc-claimed",
@@ -3407,9 +3892,17 @@ def run_claim_seed(
     )
 
     recovered_via_sync = (
-        fault_profile == "scheduled-v3"
-        and fault_schedule is not None
-        and fault_schedule.get("primary_delivery") == "omit-sync"
+        (
+            fault_profile == "scheduled-v3"
+            and fault_schedule is not None
+            and fault_schedule.get("primary_delivery") == "omit-sync"
+        )
+        or
+        (
+            fault_profile == "scheduled-v6"
+            and fault_schedule is not None
+            and fault_schedule.get("stale_event") == "btc-claimed"
+        )
     )
 
     if recovered_via_sync:
@@ -3440,9 +3933,18 @@ def run_claim_seed(
             ),
         )
 
-        trace.append(
-            "extract-secret:bitcoin-witness-via-sync-settlement"
-        )
+        if (
+            fault_profile == "scheduled-v6"
+            and fault_schedule is not None
+            and fault_schedule.get("stale_event") == "btc-claimed"
+        ):
+            trace.append(
+                "assert:secret-preserved-after-stale-recovery"
+            )
+        else:
+            trace.append(
+                "extract-secret:bitcoin-witness-via-sync-settlement"
+            )
 
     else:
         h.require(
@@ -3529,12 +4031,21 @@ def run_claim_seed(
     )
     trace.append("publish:blake-claimed")
 
-    impl.command(
-        "receive-blake-claimed",
-        swap_id,
-        role="alice",
-    )
-    trace.append("receive:blake-claimed")
+    if (
+        fault_profile == "scheduled-v6"
+        and fault_schedule["stale_event"] == "blake-claimed"
+    ):
+        recover_blake_claim_stale_v6(
+            swap_id,
+            trace,
+        )
+    else:
+        impl.command(
+            "receive-blake-claimed",
+            swap_id,
+            role="alice",
+        )
+        trace.append("receive:blake-claimed")
 
     def duplicate_blake_claim_receive():
         impl.command(
@@ -4530,8 +5041,18 @@ def run_refund_seed(
             trace,
         )
     else:
-        impl.fund_blake_and_sync(swap_id)
-        trace.append("fund-and-confirm:blake")
+        if (
+            fault_profile == "scheduled-v6"
+            and fault_schedule["stale_event"] == "blake-funded"
+        ):
+            fund_with_stale_recovery_v6(
+                swap_id,
+                "blake",
+                trace,
+            )
+        else:
+            impl.fund_blake_and_sync(swap_id)
+            trace.append("fund-and-confirm:blake")
 
         if fault_profile == "scheduled-v5":
             maybe_restart_v5(
@@ -4542,8 +5063,18 @@ def run_refund_seed(
                 trace,
             )
 
-        impl.fund_btc_and_sync(swap_id)
-        trace.append("fund-and-confirm:btc")
+        if (
+            fault_profile == "scheduled-v6"
+            and fault_schedule["stale_event"] == "btc-funded"
+        ):
+            fund_with_stale_recovery_v6(
+                swap_id,
+                "btc",
+                trace,
+            )
+        else:
+            impl.fund_btc_and_sync(swap_id)
+            trace.append("fund-and-confirm:btc")
 
         if fault_profile == "scheduled-v5":
             maybe_restart_v5(
@@ -4691,6 +5222,15 @@ def run_refund_seed(
             swap_id,
             "refund",
             fault_schedule["primary_delivery"],
+            trace,
+        )
+    elif (
+        fault_profile == "scheduled-v6"
+        and fault_schedule["stale_event"] == "btc-refunded"
+    ):
+        recover_primary_stale_v6(
+            swap_id,
+            "refund",
             trace,
         )
     else:
@@ -4892,6 +5432,11 @@ def run_seed(seed, fault_profile="none"):
         )
     elif fault_profile == "scheduled-v5":
         fault_schedule = build_fault_schedule_v5(
+            seed,
+            path,
+        )
+    elif fault_profile == "scheduled-v6":
+        fault_schedule = build_fault_schedule_v6(
             seed,
             path,
         )

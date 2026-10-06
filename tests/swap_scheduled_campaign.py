@@ -43,6 +43,7 @@ EXPECTED_COUNTS = {
     "scheduled-v3": 52,
     "scheduled-v4": 32,
     "scheduled-v5": 10,
+    "scheduled-v6": 7,
 }
 
 
@@ -384,6 +385,36 @@ def schedule_key_v5(seed):
 
 
 # ============================================================
+# V6
+# ============================================================
+
+def expected_shapes_v6():
+    return {
+        ("claim", "blake-funded"),
+        ("claim", "btc-funded"),
+        ("claim", "btc-claimed"),
+        ("claim", "blake-claimed"),
+        ("refund", "blake-funded"),
+        ("refund", "btc-funded"),
+        ("refund", "btc-refunded"),
+    }
+
+
+def schedule_key_v6(seed):
+    path = path_for_seed(seed)
+
+    schedule = seeded.build_fault_schedule_v6(
+        seed,
+        path,
+    )
+
+    return (
+        path,
+        schedule["stale_event"],
+    )
+
+
+# ============================================================
 # Generic profile dispatch
 # ============================================================
 
@@ -402,6 +433,9 @@ def expected_shapes(profile):
 
     if profile == "scheduled-v5":
         return expected_shapes_v5()
+
+    if profile == "scheduled-v6":
+        return expected_shapes_v6()
 
     raise ValueError(
         f"unsupported scheduled profile: {profile}"
@@ -423,6 +457,9 @@ def schedule_key(profile, seed):
 
     if profile == "scheduled-v5":
         return schedule_key_v5(seed)
+
+    if profile == "scheduled-v6":
+        return schedule_key_v6(seed)
 
     raise ValueError(
         f"unsupported scheduled profile: {profile}"
@@ -522,11 +559,19 @@ def format_shape(
             f"blake-crash={secondary_crash_window:<9}"
         )
 
-    path, checkpoint = shape
+    if profile == "scheduled-v5":
+        path, checkpoint = shape
+
+        return (
+            f"{path:<6}  "
+            f"restart={checkpoint}"
+        )
+
+    path, stale_event = shape
 
     return (
         f"{path:<6}  "
-        f"restart={checkpoint}"
+        f"stale-event={stale_event}"
     )
 
 
@@ -782,6 +827,7 @@ def main():
             "scheduled-v3",
             "scheduled-v4",
             "scheduled-v5",
+            "scheduled-v6",
         ),
         default="scheduled-v1",
         help=(

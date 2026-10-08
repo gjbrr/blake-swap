@@ -17,6 +17,10 @@ dependencies = [
     "websockets==17.1",
 ]
 
+[project.scripts]
+blake-swap-engine = "swap_v2:main"
+blake-swap-agent = "swap_agent:main"
+
 [project.optional-dependencies]
 # Only needed for the encrypted coordination mode
 # (BLAKE_SWAP_NOSTR_ENCRYPTION=nip44_v2). Plaintext coordination, the
@@ -30,10 +34,8 @@ dev = ["PyYAML>=6.0"]
 [project.urls]
 Repository = "https://github.com/gjbrr/blake-swap"
 
-# The engine is a set of top-level modules in src/, run from the checkout
-# (scripts/blake, scripts/swap, scripts/test.sh) rather than installed as a
-# console script. This describes what to include if the project is ever
-# distributed as a package.
+# The Python engine modules are installable and expose console entry points.
+# The richer scripts/blake operator wrapper remains checkout-oriented for now.
 #
 # Coverage configuration deliberately lives only in .coveragerc, which
 # scripts/coverage.sh points coverage at explicitly. Two sources of truth

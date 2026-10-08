@@ -214,6 +214,38 @@ def test_dependencies_match_requirements():
         )
 
 
+def test_console_scripts_are_declared():
+    project = read_pyproject()["project"]
+
+    scripts = project.get("scripts")
+
+    expected = {
+        "blake-swap-engine": "swap_v2:main",
+        "blake-swap-agent": "swap_agent:main",
+    }
+
+    if scripts != expected:
+        raise AssertionError(
+            "unexpected installed console scripts:\n"
+            f"  expected: {expected}\n"
+            f"  observed: {scripts}"
+        )
+
+
+def test_readme_python_range_matches_pyproject():
+    readme = (ROOT / "README.md").read_text()
+
+    if "Python 3.12–3.13" not in readme:
+        raise AssertionError(
+            "README does not advertise the supported Python 3.12–3.13 range"
+        )
+
+    if "Python 3.10+" in readme:
+        raise AssertionError(
+            "README still advertises the obsolete Python 3.10+ range"
+        )
+
+
 def test_declared_modules_match_src():
     declared = set(
         read_pyproject()["tool"]["setuptools"]["py-modules"]
@@ -462,6 +494,8 @@ def main():
     check("pyproject.toml declares the project", test_pyproject_declares_the_project)
     check("LICENSE is an MIT licence", test_licence_is_mit)
     check("dependencies match requirements.txt", test_dependencies_match_requirements)
+    check("installed console scripts are declared", test_console_scripts_are_declared)
+    check("README Python range matches pyproject", test_readme_python_range_matches_pyproject)
     check("the declared modules match src/", test_declared_modules_match_src)
 
     check("the CI workflow parses", test_the_workflow_parses)

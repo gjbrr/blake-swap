@@ -61,7 +61,7 @@ and the settlement announcements; the chains carry the truth.
 
 | Requirement | Notes |
 |---|---|
-| Python 3.10+ | the engine uses `X \| None` type syntax |
+| Python 3.12–3.13 | supported range is declared by `pyproject.toml` |
 | `coincurve` | BIP-340 Schnorr signing and verification |
 | `websockets` | Nostr transport |
 | Bitcoin Core | the BTC chain (regtest) |
@@ -156,7 +156,7 @@ scripts/
   stability-check          static safety-invariant checks
   wire_inventory.py        regenerate the wire message inventory
 
-tests/                     59 suites: unit tests and regtest integration
+tests/                     60 suites: unit tests and regtest integration
 tools/minimal_*.py         independent wire-message producers
 tools/minimal_nip44.py     standalone NIP-44 v2 implementation (cross-checks src/nip44.py)
 checkpoints/v1.5/          frozen earlier snapshot with SHA256SUMS

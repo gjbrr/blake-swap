@@ -1,6 +1,6 @@
 # BLAKE Swap Test Suites
 
-59 suites covering the atomic-swap engine, the wire format, the market
+60 suites covering the atomic-swap engine, the wire format, the market
 state machine, crash recovery, reorganization safety,
 independent-implementation compatibility, and documentation alignment.
 
@@ -36,7 +36,7 @@ List suites and their prerequisites:
 
 | Class | Needs | Count |
 |---|---|---|
-| `unit` | nothing (some need the declared Python deps) | 28 |
+| `unit` | nothing (some need the declared Python deps) | 29 |
 | `regtest` | reachable Bitcoin + BLAKE regtest nodes | 29 |
 | `nostr` | regtest nodes, real relays, two participant keys | 2 |
 
@@ -253,7 +253,7 @@ honest reading — run `scripts/test-nodes start` first.
 
 ## Suite inventory
 
-### Unit suites — no prerequisites (28)
+### Unit suites — no prerequisites (29)
 
 | Suite | Covers |
 |---|---|
@@ -274,6 +274,7 @@ honest reading — run `scripts/test-nodes start` first.
 | `swap_resume_step_budget_tests.py` | `resume --max-steps` forwards an explicit step budget to the driver |
 | `schema_equality_tests.py` | the engine's acceptance boundary *is* the canonical schema, for all seven settlement types: a schema-valid message is accepted field for field, every required field is required, unknown fields and a nested `secret_hex` are refused by both, internal annotations are tolerated on receipt and refused on send, and a static check that every message type the engine hands to the transport has a schema (and vice versa) |
 | `packaging_tests.py` | `pyproject.toml` against `requirements.txt` and `src/` (runtime pins, the optional extra, the declared modules, the licence and the Python range), and the CI workflow itself: it parses, pins the runner and Python, provisions **both** node binaries with matching version/checksum pairs, verifies the rig came up, gates the full suite at the documented threshold, and never makes a merge depend on public relays |
+| `installed_wheel_tests.py` | builds the distributable wheel, installs it into a fresh isolated virtual environment, runs the installed console entry points and a node-free engine command outside the checkout, and proves core imports resolve from the installed environment rather than `src/` or inherited `PYTHONPATH` |
 | `nip44_tests.py` | the NIP-44 v2 codec against the **official** test vectors rather than its own output: conversation keys, message keys, all published padding lengths, plaintext/payload pairs (ASCII, multi-plane Unicode, emoji, right-to-left), long messages by hash, the 2026 extended length-prefix boundary, and every published invalid class. Eleven cipher-dependent checks need the `crypto` extra and skip without it, and three of them check the standalone implementation in `tools/minimal_nip44.py` against the engine in both directions |
 | `blake_amount_tests.py` | BLAKE amounts as integer base units: exact parse/render round-trips, canonical wire strings, refusal of anything finer than one base unit, the legacy float record migration (including the rounded-and-reported case), and the one-base-unit difference that the old `1e-8` tolerance accepted |
 | `agent_policy_tests.py` | the autonomous agent's (state → command) table for both roles, the child-process environment and output forwarding, escalation of a child's `SECURITY FAILURE`, the give-up bound on consecutive failures, and clean SIGTERM unwinding |

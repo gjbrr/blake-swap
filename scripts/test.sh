@@ -106,6 +106,7 @@ UNIT_SUITES=(
     tests/schema_equality_tests.py
     tests/nip44_tests.py
     tests/packaging_tests.py
+    tests/installed_wheel_tests.py
     tests/implementation_adapter_tests.py
     tests/moxie_adapter_smoke_tests.py
     tests/security_conformance_tests.py

@@ -218,9 +218,6 @@ BTC_CLI, BTC_CLI_SOURCE = _resolve_executable(
         "/usr/local/bin/bitcoin-cli",
         "/usr/bin/bitcoin-cli",
         "bitcoin-cli",
-        # Historical author-host layout, kept as a last resort so the
-        # original clean-room environment still works unconfigured.
-        "/home/gary/bitcoin-core/build/bin/bitcoin-cli",
     ],
 )
 
@@ -237,7 +234,6 @@ BLAKE_CLI, BLAKE_CLI_SOURCE = _resolve_executable(
         HOME / "bitcoin-blake-rc2" / "build-rc2" / "bin" / "bitcoin-cli",
         HOME / "bitcoin-blake-rc2" / "build" / "bin" / "bitcoin-cli",
         HOME / "bitcoin-blake" / "build" / "bin" / "bitcoin-cli",
-        "/home/gary/bitcoin-blake-rc2/build-rc2/bin/bitcoin-cli",
     ],
 )
 
@@ -253,7 +249,6 @@ BTC_DATADIR, BTC_DATADIR_SOURCE = _resolve_datadir(
         *_rig_candidates("btc_datadir", RIG_ROOT / "btc"),
         HOME / "bitcoin-swap-regtest",
         HOME / ".bitcoin",
-        "/home/gary/bitcoin-swap-regtest",
     ],
 )
 
@@ -263,7 +258,6 @@ BLAKE_DATADIR, BLAKE_DATADIR_SOURCE = _resolve_datadir(
         *_rig_candidates("blake_datadir", RIG_ROOT / "blake"),
         HOME / "blake-swap-regtest",
         HOME / ".blake-swap-regtest",
-        "/home/gary/blake-swap-regtest",
     ],
 )
 

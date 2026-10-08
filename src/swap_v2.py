@@ -69,14 +69,20 @@ for directory in (
 ):
     directory.mkdir(parents=True, exist_ok=True)
 
+class ChainConfigurationError(RuntimeError):
+    """Required chain-node configuration is missing."""
+
+
 # BLAKE node
+#
+# BLAKE deliberately has no generic bitcoin-cli fallback. A bitcoin-cli on
+# PATH is overwhelmingly likely to be Bitcoin Core, and silently targeting
+# the wrong chain is worse than refusing to run.
 BLAKE_CLI = os.environ.get(
     "BLAKE_SWAP_BLAKE_CLI",
-    "/home/gary/bitcoin-blake-rc2/build-rc2/bin/bitcoin-cli",
 )
 BLAKE_DATADIR = os.environ.get(
     "BLAKE_SWAP_BLAKE_DATADIR",
-    "/home/gary/blake-swap-regtest",
 )
 
 BLAKE_RPC_ARGS = tuple(
@@ -89,13 +95,16 @@ BLAKE_RPC_ARGS = tuple(
 )
 
 # Normal Bitcoin Core node
+#
+# Bitcoin may use bitcoin-cli from PATH when no explicit executable is
+# configured. Its datadir is optional: omitting it lets bitcoin-cli use its
+# normal node configuration.
 BTC_CLI = os.environ.get(
     "BLAKE_SWAP_BTC_CLI",
-    "/home/gary/bitcoin-core/build/bin/bitcoin-cli",
+    "bitcoin-cli",
 )
 BTC_DATADIR = os.environ.get(
     "BLAKE_SWAP_BTC_DATADIR",
-    "/home/gary/bitcoin-swap-regtest",
 )
 
 BTC_RPC_ARGS = tuple(
@@ -1695,9 +1704,31 @@ def _call_chain_cli(label, base_cmd, wallet, args):
     )
 
 
+def require_chain_cli(label, cli, env_name):
+    """
+    Return a configured chain CLI executable or fail with an operator-facing
+    diagnostic.
+
+    This is deliberately evaluated only when a command actually touches a
+    chain. Node-free commands such as --help and list remain usable in a
+    freshly installed package.
+    """
+    if cli:
+        return cli
+
+    raise ChainConfigurationError(
+        f"{label} node CLI is not configured. "
+        f"Set {env_name} to the correct bitcoin-cli executable."
+    )
+
+
 def blake_cli(*args, wallet=None):
     cmd = [
-        BLAKE_CLI,
+        require_chain_cli(
+            "BLAKE",
+            BLAKE_CLI,
+            "BLAKE_SWAP_BLAKE_CLI",
+        ),
         "-regtest",
     ]
 
@@ -1712,7 +1743,11 @@ def blake_cli(*args, wallet=None):
 
 def btc_cli(*args, wallet=None):
     cmd = [
-        BTC_CLI,
+        require_chain_cli(
+            "Bitcoin",
+            BTC_CLI,
+            "BLAKE_SWAP_BTC_CLI",
+        ),
     ]
 
     if BTC_DATADIR:
@@ -23717,7 +23752,14 @@ def main():
 
     # Parse only AFTER every command has been registered.
     args = parser.parse_args()
-    args.func(args)
+    try:
+        args.func(args)
+    except ChainConfigurationError as exc:
+        print(
+            f"ERROR: {exc}",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
 
 
 if __name__ == "__main__":

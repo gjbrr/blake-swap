@@ -8,6 +8,24 @@ successfully in both physical directions.
 
 **Do not use with valuable funds.**
 
+## Using this with an AI assistant
+
+The current reference implementation can be operated manually or with an
+AI assistant guiding the operator one command at a time.
+
+Give the assistant this repository and ask it:
+
+> Help me operate a BTC ↔ BLAKE atomic swap using this repository.
+> Read the README and relevant documentation first. Guide me one command
+> at a time and explain what each command will do before I run it.
+> Never fund a swap, broadcast a transaction, reveal a secret, withdraw
+> funds, or make another economic commitment without my explicit approval.
+> Stop if the repository state or command output differs from what you
+> expect.
+
+Start on regtest. This is experimental, unaudited software; do not use
+valuable funds.
+
 ---
 
 ## What has been demonstrated

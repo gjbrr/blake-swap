@@ -1,35 +1,3 @@
-# Python Reference Implementation — v1.0 RC1
-
-This document records the release-candidate status of the Python reference implementation of the BTC ↔ BLAKE atomic-swap protocol.
-
-The purpose of this checkpoint is not to declare the software production-ready for valuable funds. It is to freeze a portable, independently installable reference implementation that can serve as:
-
-- an executable protocol specification;
-- a differential-testing oracle;
-- a conformance target for independent implementations such as Moxie;
-- a reproducible regtest implementation for protocol development and review.
-
-The Python implementation remains experimental and unaudited. It should not be used with valuable funds.
-
----
-
-## Release-candidate baseline
-
-The release-hardening work was built on top of the completed scheduled-v7 mixed-chaos campaign.
-
-Relevant commits:
-
-```text
-c538d13 Remove machine-specific node defaults
-b2f8611 Make Python reference implementation installable
-f4d57b1 Add scheduled-v7 mixed chaos campaign
-dd682f0 Add exhaustive scheduled-v6 stale recovery coverage
-1ac8925 Add exhaustive scheduled-v5 restart recovery coverage
-
-
-cd ~/blake-swap
-
-cat > docs/PYTHON_REFERENCE_RELEASE.md <<'EOF'
 # Python Reference Implementation — Release Candidate
 
 This document records the release-readiness baseline for the Python

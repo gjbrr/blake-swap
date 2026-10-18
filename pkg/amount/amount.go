@@ -46,6 +46,8 @@ func scalar(v any) (decimal.Dec, error) {
 		return value, nil
 	case string:
 		return decimal.Parse(value)
+	case Coin:
+		return decimal.Parse(string(value))
 	case int:
 		return decimal.FromInt64(int64(value)), nil
 	case int32:

@@ -251,7 +251,7 @@ Five layers. Arrows are import direction; nothing lower imports anything higher.
 
 | Package | Port of | Contents |
 |---|---|---|
-| `pkg/amount` | `blake_base_units*`, `format_blake_amount` | BLAKE base units ↔ decimal, BTC sats ↔ coin, exact parsing, no float |
+| `pkg/amount` | `blake_base_units*`, `format_blake_amount` | BLAKE base units ↔ decimal, BTC sats ↔ coin, exact parsing, no float, and `Coin` for the two JSON shapes a node uses for the same quantity |
 | `pkg/wire` | `swap_wire.py` | the 7 swap messages as structs, the shared envelope, `Validate`, `Encode`/`Decode` |
 | `pkg/market` | market builders/validators | `Offer`/`Take`/`Match`/`Cancel` v1 and v2, direction → roles, binding rules |
 | `pkg/state` | `State`, transition tables | the enum, forward and reorg edges, the two transition functions |
@@ -320,7 +320,7 @@ func (e *Engine) Next(role Role, id SwapID) (reconcile.Action, error)
 | M0 | Spikes | **partly done**: orly crypto + NIP-44 + event encoders run under TinyGo; `ws` and `wasmdb` are ruled out. Remaining: JS WebSocket bridge, JS IndexedDB store, node proxy |
 | M1 | Value layer (`amount`, `wire`, `market`, `state`, `model`, `timeout`, `fees`) | ported vectors pass under `go test` on the host |
 | M2 | `reconcile`, `htlc`, `psbt` | the 12-action table and witness classifier match Python on recorded fixtures |
-| M3 | `rpc`/`chain`/`fund`/`settle`/`observe` against a real regtest through the proxy | read-only parity, then a funded swap |
+| M3 | `rpc`/`chain`/`fund`/`settle`/`observe` against a real regtest through the proxy | **partly done**: `rpc` and `chain` are in and tested against the rig; `fund`, `settle` and `observe` remain |
 | M4 | `pkg/cli` + `cmd/blake-swap-cli` | the existing suites run with `$SWAP_V2` pointed at the Go binary |
 | M5 | `store`/`vault`/`coord`/`nostr` + worker domains | two browser instances complete a swap on regtest |
 | M6 | `marketflow` (offer, take, match, cancel, import) + page UI | the whole market cycle driven from the UI |
@@ -345,6 +345,11 @@ data-model work entirely.
 5. **Watch-only observation and the bounded fallback scan are both kept.**
 6. **Market scope is total**: offer, take, cancel, match, accept, import,
    ignore, reverse directions.
+7. **Amounts never touch a float.** The node writes the same quantity two
+   ways — a bare number from `getrawtransaction`, a quoted string from
+   `listunspent` — so `amount.Coin` accepts both and keeps the digits the
+   node sent. A float would turn `0.1` into a nearby number and the engine
+   would compare its own records against the wrong amount.
 
 Open, deliberately: the passphrase UX (when it is asked, and what happens on a
 wrong one), whether the server also proxies relays, and whether the CLI shim

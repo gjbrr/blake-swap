@@ -40,6 +40,16 @@ func main() {
 	command := os.Args[1]
 	args := os.Args[2:]
 
+	// A market read talks to relays, not to nodes, so it runs before the engine is
+	// built: looking for an offer must not require a regtest datadir and two nodes.
+	if isMarketCommand(command) {
+		if err := runMarketCommand(context.Background(), command, args); err != nil {
+			fail(err)
+		}
+
+		return
+	}
+
 	engine, cleanup, err := buildEngine()
 
 	if err != nil {

@@ -254,3 +254,38 @@ func TestBookIgnoresEvidenceAboutNothing(t *testing.T) {
 		t.Fatalf("entries = %+v, want none without the offer", entries)
 	}
 }
+
+// TestMarketFiltersSizesEvidenceGenerously: offers are asked for at the caller's limit,
+// but cancellations and matches at least at 100, because a window sized for offers would
+// hide the events that settle them.
+func TestMarketFiltersSizesEvidenceGenerously(t *testing.T) {
+	small := MarketFilters(5)
+
+	if len(small) != 3 {
+		t.Fatalf("filters = %d, want 3", len(small))
+	}
+
+	if small[0].Limit != 5 {
+		t.Fatalf("offer limit = %d, want 5", small[0].Limit)
+	}
+
+	if small[1].Limit != 100 || small[2].Limit != 100 {
+		t.Fatalf("evidence limits = %d, %d, want 100", small[1].Limit, small[2].Limit)
+	}
+
+	if small[0].Topics[0] != MarketTag ||
+		small[1].Topics[0] != CancelTag ||
+		small[2].Topics[0] != MatchTag {
+		t.Fatalf("topics = %v %v %v", small[0].Topics, small[1].Topics, small[2].Topics)
+	}
+
+	large := MarketFilters(100)
+
+	if large[1].Limit != 400 {
+		t.Fatalf("evidence limit = %d, want 400", large[1].Limit)
+	}
+
+	if defaulted := MarketFilters(0); defaulted[0].Limit != 50 {
+		t.Fatalf("zero limit = %d, want the default 50", defaulted[0].Limit)
+	}
+}

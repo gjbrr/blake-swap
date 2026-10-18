@@ -645,12 +645,37 @@ func (c *Client) Fetch(ctx context.Context, filter Filter) ([]event.Event, error
 // straddle a cancellation and report a marketplace that never existed at any instant.
 // The reference engine issues them the same way, as one REQ carrying three filters.
 func (c *Client) FetchMany(ctx context.Context, filters ...Filter) ([]event.Event, error) {
+	report, err := c.FetchReport(ctx, filters...)
+
+	if err != nil {
+		return nil, err
+	}
+
+	return report.Events, nil
+}
+
+// FetchReport is what one multi-filter read found, and how much of the network
+// answered.
+//
+// The counts are not decoration: a market view that read two of three relays is a
+// different claim about the world from one that read all three, and a caller that
+// wants to say so needs the numbers.
+type FetchReport struct {
+	// Events are the distinct events that verified, newest first.
+	Events []event.Event
+	// Answered is how many relays answered, and Relays how many were asked.
+	Answered int
+	Relays   int
+}
+
+// FetchReport queries every relay for several filters and reports the union.
+func (c *Client) FetchReport(ctx context.Context, filters ...Filter) (FetchReport, error) {
 	if len(c.Relays) == 0 {
-		return nil, fmt.Errorf("no Nostr relays configured")
+		return FetchReport{}, fmt.Errorf("no Nostr relays configured")
 	}
 
 	if len(filters) == 0 {
-		return nil, fmt.Errorf("no filters to fetch")
+		return FetchReport{}, fmt.Errorf("no filters to fetch")
 	}
 
 	byID := map[string]event.Event{}
@@ -683,7 +708,7 @@ func (c *Client) FetchMany(ctx context.Context, filters ...Filter) ([]event.Even
 	}
 
 	if answered == 0 {
-		return nil, fmt.Errorf("Could not query any configured Nostr relay")
+		return FetchReport{}, fmt.Errorf("Could not query any configured Nostr relay")
 	}
 
 	events := make([]event.Event, 0, len(byID))
@@ -703,7 +728,7 @@ func (c *Client) FetchMany(ctx context.Context, filters ...Filter) ([]event.Even
 		return events[i].ID < events[j].ID
 	})
 
-	return events, nil
+	return FetchReport{Events: events, Answered: answered, Relays: len(c.Relays)}, nil
 }
 
 // fetchFromRelay opens a subscription, reads until EOSE and closes it.

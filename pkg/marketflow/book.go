@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/gjbrr/blake-swap/pkg/event"
+	"github.com/gjbrr/blake-swap/pkg/nostr"
 )
 
 // Entry is one advertisement with the state the evidence supports.
@@ -116,4 +117,28 @@ func OpenOffers(entries []Entry) []Entry {
 	}
 
 	return open
+}
+
+// MarketFilters are the subscriptions one canonical market read issues.
+//
+// Cancellations and matches are asked for in larger numbers than offers, and that is
+// not a tuning choice: they are the evidence that settles offers, so a window sized for
+// advertisements would routinely hide the events that make one MATCHED or CANCELLED.
+// The reference sizes them the same way.
+func MarketFilters(limit int) []nostr.Filter {
+	if limit <= 0 {
+		limit = 50
+	}
+
+	evidence := limit * 4
+
+	if evidence < 100 {
+		evidence = 100
+	}
+
+	return []nostr.Filter{
+		{Kinds: []int{1}, Topics: []string{MarketTag}, Limit: limit},
+		{Kinds: []int{1}, Topics: []string{CancelTag}, Limit: evidence},
+		{Kinds: []int{1}, Topics: []string{MatchTag}, Limit: evidence},
+	}
 }

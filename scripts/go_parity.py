@@ -344,7 +344,7 @@ MODULES: list[Module] = [
     Module(
         "src/swap_v2.py (relays)", "pkg/nostr", "ported",
         "relay sessions over a platform connection, publish report, REQ/EOSE with topic filters and several filters per subscription, event cache, the encryption policy",
-        ["Client", "BuildCoordinationEvent", "DecodeContent", "Cache", "Filter", "FetchMany"],
+        ["Client", "BuildCoordinationEvent", "DecodeContent", "Cache", "Filter", "FetchMany", "FetchReport"],
         ["nostr_send_message", "nostr_receive_message", "nostr_publish_event", "decode_coordination_content"],
     ),
     Module(
@@ -382,14 +382,14 @@ MODULES: list[Module] = [
         "src/swap_v2.py (market flow)", "pkg/marketflow", "partial",
         "market events: offer, take, cancel and match are built, parsed and validated by the reference; state is derived from evidence the same way, for one offer and for a whole book of them; the market commands remain",
         ["BuildOffer", "ParseOffer", "BuildTake", "ParseTake", "BuildCancel", "ParseCancel", "BuildMatch",
-         "ParseMatch", "DeriveState", "CancellationApplies", "Book", "OpenOffers", "Entry"],
+         "ParseMatch", "DeriveState", "CancellationApplies", "Book", "OpenOffers", "Entry", "MarketFilters"],
         ["build_market_offer_v2_event", "nostr_parse_market_offer_event", "build_market_take_event",
          "nostr_validate_market_take_event", "build_market_cancel_event", "build_market_match_event",
          "validate_market_match_evidence", "nostr_derive_market_offer_state", "nostr_market_cancellation_applies"],
     ),
     Module(
         "src/swap_v2.py (CLI)", "cmd/blake-swap-cli", "partial",
-        "the drop-in CLI: the implemented commands with the reference's arguments and environment; the output text is not yet byte-identical",
+        "the drop-in CLI: the implemented commands with the reference's arguments and environment; `market`, `market-state` and `market-state --json` are byte-identical to the reference on live relay evidence, the rest of the output text is not yet",
         [], ["main"],
     ),
     Module(

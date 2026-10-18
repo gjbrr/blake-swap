@@ -76,6 +76,17 @@ func setStateClass(id, state string) {
 	}
 }
 
+// markWorkerReady records that the worker's domain loop is running. The boot
+// overlay reads these flags rather than scraping status text, so presentation
+// changes cannot break the gate.
+func markWorkerReady() {
+	js.Global().Get("document").Get("body").Call(
+		"setAttribute",
+		"data-worker-ready",
+		"true",
+	)
+}
+
 // markVerified records success on the document so the headless check does not
 // have to match presentation prose.
 func markVerified() {

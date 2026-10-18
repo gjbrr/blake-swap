@@ -7,7 +7,44 @@
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
-  <main>
+  <!--
+    Boot gate: covers the app until both wasm instances are running and the
+    channel has been proven. It is plain HTML so it paints before any script
+    runs; page.js drives it. Nothing in the app area is trusted until this
+    overlay is gone.
+  -->
+  <div id="boot" class="boot" role="status" aria-live="polite">
+    <div class="boot-card">
+      <div id="boot-spinner" class="spinner" aria-hidden="true"></div>
+      <h2 id="boot-title">starting blake-swap</h2>
+      <p id="boot-detail" class="boot-detail">loading the wasm runtime…</p>
+
+      <ol id="boot-steps" class="boot-steps">
+        <li class="step step-active" data-step="loader">
+          <span class="step-mark" aria-hidden="true"></span>
+          <span class="step-text">wasm loader</span>
+        </li>
+        <li class="step step-pending" data-step="page">
+          <span class="step-mark" aria-hidden="true"></span>
+          <span class="step-text">page module</span>
+        </li>
+        <li class="step step-pending" data-step="worker">
+          <span class="step-mark" aria-hidden="true"></span>
+          <span class="step-text">worker module</span>
+        </li>
+        <li class="step step-pending" data-step="link">
+          <span class="step-mark" aria-hidden="true"></span>
+          <span class="step-text">channel link</span>
+        </li>
+      </ol>
+
+      <button id="boot-continue" class="boot-continue" type="button" hidden>
+        show the app anyway
+      </button>
+    </div>
+  </div>
+
+  <main id="app" class="app">
     <header>
       <h1>blake-swap</h1>
       <p class="sub">page <span class="sep">↔</span> service worker, two wasm instances</p>

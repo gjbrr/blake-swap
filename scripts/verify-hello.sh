@@ -9,10 +9,14 @@
 #   * the worker status reads "verified";
 #   * the round trip sequence reached 3 (the opening hello plus two pings),
 #     which is only possible if the UI command channel and the link both work;
-#   * the document carries data-hello-verified="true".
+#   * the document carries data-hello-verified="true";
+#   * the boot gate cleared (data-boot-complete="true") and the overlay is
+#     hidden, so the app is only presented once it is actually running.
 #
-# A screenshot is written next to the app so the result can be looked at, not
-# only grepped.
+# Two screenshots are written next to the app so the result can be looked at,
+# not only grepped: the running app, and the boot overlay as a user sees it
+# during the wasm compile (captured from a script-free copy, because any
+# screenshot of the live app races the compile).
 #
 # Exit status: 0 pass, 1 fail, 77 skipped (no browser).
 
@@ -26,6 +30,7 @@ ADDR="127.0.0.1:${PORT}"
 URL="http://${ADDR}/?autoping=2"
 BUDGET="${VERIFY_BUDGET:-20000}"
 SHOT="$ROOT/web/hello-screenshot.png"
+BOOT_SHOT="$ROOT/web/boot-screenshot.png"
 
 BROWSER="${BROWSER:-}"
 
@@ -57,12 +62,15 @@ fi
 
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/blake-swap-verify-XXXXXX")"
 SERVER_PID=""
+STATIC_PID=""
 
 cleanup() {
-    if [[ -n "$SERVER_PID" ]] && kill -0 "$SERVER_PID" 2>/dev/null; then
-        kill "$SERVER_PID" 2>/dev/null || true
-        wait "$SERVER_PID" 2>/dev/null || true
-    fi
+    for pid in "$SERVER_PID" "$STATIC_PID"; do
+        if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+            kill "$pid" 2>/dev/null || true
+            wait "$pid" 2>/dev/null || true
+        fi
+    done
 
     if [[ "${VERIFY_KEEP:-0}" == "1" ]]; then
         echo "note: keeping $WORK for inspection" >&2
@@ -123,7 +131,9 @@ check_dom() {
     grep -q '>hello world<' "$1" \
         && grep -q 'id="worker-status" class="pill state-ok">verified<' "$1" \
         && grep -q 'seq 3' "$1" \
-        && grep -q 'data-hello-verified="true"' "$1"
+        && grep -q 'data-hello-verified="true"' "$1" \
+        && grep -q 'data-boot-complete="true"' "$1" \
+        && grep -q '<div id="boot"[^>]*hidden' "$1"
 }
 
 attempt=0
@@ -147,12 +157,47 @@ done
 
 "$BROWSER" "${common[@]}" --window-size=980,720 \
     --screenshot="$SHOT" "$URL" >/dev/null 2>>"$WORK/browser.log" \
-    || echo "note: screenshot failed (the DOM check is what gates this run)"
+    || echo "note: app screenshot failed (the DOM check is what gates this run)"
 
-echo "PASS: the page rendered the worker's greeting"
+#
+# Capture the boot overlay itself. The overlay is plain HTML and is driven by
+# page.js, so a copy of the app without its scripts shows exactly what a user
+# sees during the wasm compile. Taking the screenshot from the live app would
+# race the compile instead of showing it.
+#
+BOOT_ADDR="127.0.0.1:$((PORT + 1))"
+mkdir -p "$WORK/boot-static"
+cp web/index.html web/style.css "$WORK/boot-static/"
+
+"$WORK/server" -addr "$BOOT_ADDR" -dir "$WORK/boot-static" >"$WORK/boot-server.log" 2>&1 &
+STATIC_PID=$!
+
+for _ in $(seq 1 100); do
+    if curl -fsS "http://${BOOT_ADDR}/" >/dev/null 2>&1; then
+        break
+    fi
+    sleep 0.1
+done
+
+"$BROWSER" --headless=new --no-sandbox --disable-gpu --hide-scrollbars \
+    --user-data-dir="$WORK/profile-boot" --virtual-time-budget=1500 \
+    --window-size=980,720 --screenshot="$BOOT_SHOT" "http://${BOOT_ADDR}/" \
+    >/dev/null 2>>"$WORK/browser.log" \
+    || echo "note: boot screenshot failed (the DOM check is what gates this run)"
+
+kill "$STATIC_PID" 2>/dev/null || true
+wait "$STATIC_PID" 2>/dev/null || true
+STATIC_PID=""
+
+echo "PASS: the app opened, the greeting rendered, and the boot gate cleared"
 echo "      greeting: hello world"
 echo "      round trips: 3 (opening hello + two UI pings)"
+echo "      boot gate: cleared (data-boot-complete=true, overlay hidden)"
 
 if [[ -f "$SHOT" ]]; then
-    echo "      screenshot: $SHOT"
+    echo "      app screenshot:  $SHOT"
+fi
+
+if [[ -f "$BOOT_SHOT" ]]; then
+    echo "      boot screenshot: $BOOT_SHOT"
 fi

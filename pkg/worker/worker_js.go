@@ -30,12 +30,23 @@ const Greeting = "hello world"
 func Domain(_ struct{}, ch Chans) {
 	consoleLog("worker: domain started")
 
+	//
+	// Announce readiness before serving anything: the page's boot screen
+	// needs to know the module is running, and that is a different fact
+	// from the worker having answered a request.
+	//
+	ch.Link.Send(proto.Envelope{Kind: proto.WorkerReady})
+
 	for {
 		select {
 		case e := <-ch.Link.Recv():
 			switch e.Kind {
 			case proto.Hello:
 				answerHello(e, ch.Link)
+
+			case proto.WorkerReady:
+				// A peer that announces readiness twice is harmless;
+				// there is nothing to do with the second one.
 
 			default:
 				//

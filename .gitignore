@@ -58,3 +58,4 @@ web/page.wasm
 web/worker.wasm
 web/wasm_exec.js
 web/hello-screenshot.png
+web/boot-screenshot.png

@@ -235,10 +235,19 @@ make serve      # build, then serve at http://127.0.0.1:8787/
 make verify     # headless check: the page must render the worker's greeting
 ```
 
+A boot gate covers the app on first load. It lists the four things that have to
+be true — the wasm loader, the page module, the worker module, and the link —
+and it clears only when the worker's greeting has actually rendered, which
+implies all four. The flags it waits on (`data-worker-ready`,
+`data-hello-verified`) are set by the page domain from real protocol messages,
+not by timers, and a 20-second deadline turns a silent hang into a stated
+failure rather than an endless spinner.
+
 `make verify` drives a real browser, clicks the re-ping control twice, and
-asserts that the greeting rendered, the sequence reached three, and the document
-carries `data-hello-verified="true"`. It also writes
-`web/hello-screenshot.png` so the result can be looked at.
+asserts that the greeting rendered, the sequence reached three, the document
+carries `data-hello-verified="true"`, and the boot gate cleared with its overlay
+hidden. It writes `web/hello-screenshot.png` and `web/boot-screenshot.png` so
+both states can be looked at.
 
 The build is TinyGo-only; `go build ./...` on the host still works because the
 wasm entry points carry a native stub, and `make test` covers the packages that

@@ -105,3 +105,122 @@ footer {
   font-size: 0.8rem;
   text-align: center;
 }
+
+/* ------------------------------------------------------------- boot gate ---
+ *
+ * The overlay is plain HTML so it paints before any script runs, and it stays
+ * up until the channel has been proven. It is opaque: nothing behind it is
+ * presented as usable before the app is actually running.
+ */
+.boot {
+  position: fixed;
+  inset: 0;
+  z-index: 10;
+  display: grid;
+  place-items: center;
+  padding: 1.5rem;
+  background:
+    radial-gradient(900px 500px at 50% 0%, #18202b 0%, var(--bg) 70%);
+  opacity: 1;
+  transition: opacity 0.4s ease;
+}
+
+.boot[hidden] { display: none; }
+
+.boot-done {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.boot-card {
+  width: min(24rem, 100%);
+  display: grid;
+  justify-items: center;
+  gap: 0.55rem;
+  text-align: center;
+}
+
+.boot-card h2 {
+  margin: 0.35rem 0 0;
+  font-size: 1.05rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.boot-detail {
+  margin: 0;
+  min-height: 1.3em;
+  color: var(--dim);
+  font-size: 0.85rem;
+}
+
+.spinner {
+  width: 1.7rem;
+  height: 1.7rem;
+  border-radius: 50%;
+  border: 2px solid var(--line);
+  border-top-color: var(--ink);
+  animation: spin 0.9s linear infinite;
+}
+
+.boot-failed .spinner { display: none; }
+
+@keyframes spin { to { transform: rotate(360deg); } }
+
+.boot-steps {
+  margin: 1.1rem auto 0;
+  padding: 0;
+  list-style: none;
+  width: fit-content;
+  display: grid;
+  gap: 0.4rem;
+  font-size: 0.85rem;
+  text-align: left;
+}
+
+.step {
+  display: grid;
+  grid-template-columns: 1.2rem 1fr;
+  align-items: center;
+  gap: 0.5rem;
+  color: var(--dim);
+}
+
+.step-mark {
+  width: 0.95rem;
+  height: 0.95rem;
+  border-radius: 50%;
+  border: 1px solid currentColor;
+  display: grid;
+  place-items: center;
+  font-size: 0.65rem;
+  line-height: 1;
+}
+
+.step-pending { color: #55627340; }
+
+.step-active { color: var(--wait); }
+.step-active .step-mark { animation: pulse 1s ease-in-out infinite; }
+
+.step-done { color: var(--ok); }
+.step-done .step-mark::after { content: "✓"; }
+
+.step-failed { color: var(--bad); }
+.step-failed .step-mark::after { content: "✗"; }
+
+@keyframes pulse {
+  50% { opacity: 0.35; }
+}
+
+.boot-failed h2 { color: var(--bad); }
+
+.boot-continue {
+  margin-top: 0.9rem;
+  font-size: 0.8rem;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .spinner,
+  .step-active .step-mark { animation: none; }
+  .boot { transition: none; }
+}

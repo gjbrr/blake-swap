@@ -71,6 +71,14 @@ func Domain(_ struct{}, ch Chans) {
 		select {
 		case e := <-ch.Link.Recv():
 			switch e.Kind {
+			case proto.WorkerReady:
+				//
+				// The worker's loop is up. Say so without claiming it
+				// has answered: that is what the ack is for.
+				//
+				markWorkerReady()
+				setWorkerStatus("connected", "wait")
+
 			case proto.HelloAck:
 				renderAck(e)
 

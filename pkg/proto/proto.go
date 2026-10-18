@@ -29,6 +29,12 @@ const (
 	// HelloAck is the worker's answer. Its Body carries the greeting the
 	// page displays, which is the whole point of the skeleton.
 	HelloAck Kind = "hello-ack"
+
+	// WorkerReady is sent by the worker domain as soon as its loop is
+	// running, before any request arrives. It lets the page distinguish
+	// "the worker module is up" from "the worker answered", which are two
+	// different facts and two different boot states.
+	WorkerReady Kind = "worker-ready"
 )
 
 // Envelope is the single wire shape of the link.

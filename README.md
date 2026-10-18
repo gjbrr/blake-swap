@@ -325,6 +325,7 @@ silently omitting them.
 | `docs/ADAPTER_WIRE_PROTOCOL.md` | language-neutral JSON subprocess adapter protocol |
 | `docs/MOXIE_ADAPTER_HANDOFF.md` | Moxie cross-language implementation handoff and first milestone |
 | `docs/PYTHON_REFERENCE_RELEASE.md` | Python reference release-candidate baseline: package facts, the installed-wheel proof, and where the remaining conformance claims live |
+| `docs/GO_PORT_MAP.md` | analysis of the Python engine (control flow, types, state machine, decision table) and the Go/TinyGo package map that replaces it |
 | `tests/README.md` | test suite inventory, prerequisites, and node configuration |
 | `CONTRIBUTOR_ORIENTATION.md` | orientation for new contributors |
 

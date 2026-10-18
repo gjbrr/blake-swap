@@ -412,7 +412,10 @@ func DecodeContent(
 type Filter struct {
 	Kinds   []int
 	Authors []string
-	DTags   []string
+	// Ids selects specific events, which is how one event is fetched by id when the
+	// caller already knows which event it wants.
+	Ids   []string
+	DTags []string
 	// Topics selects the `#t` tags. A market read is selected this way: an offer,
 	// a cancellation and a match are all kind 1 and are told apart by their topic.
 	Topics []string
@@ -427,6 +430,10 @@ func (f Filter) request() map[string]any {
 
 	if len(f.Authors) > 0 {
 		object["authors"] = f.Authors
+	}
+
+	if len(f.Ids) > 0 {
+		object["ids"] = f.Ids
 	}
 
 	if len(f.DTags) > 0 {

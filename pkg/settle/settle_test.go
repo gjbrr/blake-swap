@@ -499,3 +499,54 @@ func mustHex(value string) []byte {
 
 	return decoded
 }
+
+// TestSettlementRateHonoursTheEnvironmentOverride: the settlement path reads the same
+// per-chain knob the funding path does, so a client that sets one rate pays it on
+// every leg it is responsible for.
+func TestSettlementRateHonoursTheEnvironmentOverride(t *testing.T) {
+	t.Setenv("BLAKE_SWAP_BTC_SPEND_FEE_RATE", "6")
+
+	rate, source, err := settlementRate(context.Background(), &fakeNode{feeRate: "0.00002000"}, chain.BTC, Options{})
+
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if rate.String() != "6" || source != "rate-override" {
+		t.Fatalf("rate = %s from %q, want 6 from the override", rate, source)
+	}
+}
+
+// TestSettlementRateExplicitBeatsTheEnvironment: the parameter outranks the host
+// default, which is the precedence the client asked for.
+func TestSettlementRateExplicitBeatsTheEnvironment(t *testing.T) {
+	t.Setenv("BLAKE_SWAP_BTC_SPEND_FEE_RATE", "6")
+
+	explicit := decimal.MustParse("8")
+
+	rate, source, err := settlementRate(context.Background(), &fakeNode{feeRate: "0.00002000"}, chain.BTC, Options{FeeRate: &explicit})
+
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if rate.String() != "8" || source != "--fee-rate" {
+		t.Fatalf("rate = %s from %q, want the explicit 8", rate, source)
+	}
+}
+
+// TestSettlementRateOverrideBelowTheFloorIsRefused: a rate the node will not accept is
+// refused before a transaction is built, naming the knob and the floor.
+func TestSettlementRateOverrideBelowTheFloorIsRefused(t *testing.T) {
+	t.Setenv("BLAKE_SWAP_BTC_SPEND_FEE_RATE", "0.5")
+
+	_, _, err := settlementRate(context.Background(), &fakeNode{feeRate: "0.00002000"}, chain.BTC, Options{})
+
+	if err == nil {
+		t.Fatal("a rate below the node floor was accepted")
+	}
+
+	if !strings.Contains(err.Error(), "BLAKE_SWAP_BTC_SPEND_FEE_RATE") {
+		t.Fatalf("error does not name the knob: %v", err)
+	}
+}

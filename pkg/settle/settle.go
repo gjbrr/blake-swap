@@ -234,6 +234,33 @@ func settlementRate(
 		return *opts.FeeRate, "--fee-rate", nil
 	}
 
+	// An environment override is the host's default, and the caller's explicit rate
+	// already won above. The node still supplies its floors: paying a rate it will not
+	// accept is a settlement that stalls, and a refusal here can name the knob.
+	if override, err := fees.OverrideFromEnv(string(ch)); err != nil {
+		return decimal.Dec{}, "", err
+	} else if override.Rate != nil {
+		mempool, err := node.MempoolInfo(ctx)
+
+		if err != nil {
+			return decimal.Dec{}, "", err
+		}
+
+		if floor, found := fees.NodeFloor(fees.FeeData{
+			MempoolMinFee: mempool.MempoolMinFee,
+			MinRelayTxFee: mempool.MinRelayTxFee,
+		}); found && override.Rate.Cmp(floor.Rate) < 0 {
+			return decimal.Dec{}, "", fmt.Errorf(
+				"%s is %s sat/vB, below the node's %s sat/vB %s; a transaction paying it "+
+					"would not be accepted. Raise the rate, or unset %s to use the node's estimator",
+				override.Source, override.Rate.String(), floor.Rate.String(), floor.Field,
+				override.Source,
+			)
+		}
+
+		return *override.Rate, "rate-override", nil
+	}
+
 	target := opts.FeeTargetBlocks
 
 	if target <= 0 {

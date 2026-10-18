@@ -221,3 +221,29 @@ func TestFetchManyRefusesAnEmptyFilterList(t *testing.T) {
 		t.Fatal("an empty filter list was accepted")
 	}
 }
+
+// TestFilterIdsRendersAsIds: a fetch by id must reach the relay as `ids`, or the relay
+// answers with everything it holds.
+func TestFilterIdsRendersAsIds(t *testing.T) {
+	offer := signedEvent(t, "11", event.TopicMarket, 1_700_000_000)
+	relay := &topicRelay{byTopic: map[string][]event.Event{event.TopicMarket: {offer}}}
+
+	client := &Client{Dialer: relay.dial, Relays: []string{"wss://a"}, Now: func() time.Time {
+		return time.Unix(1_700_000_100, 0)
+	}}
+
+	// The fake relay answers by topic, so the assertion is on the filter that arrived.
+	if _, err := client.Fetch(context.Background(), Filter{Kinds: []int{1}, Ids: []string{offer.ID}}); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(relay.requests) != 1 || len(relay.requests[0]) != 1 {
+		t.Fatalf("requests = %+v", relay.requests)
+	}
+
+	ids, ok := relay.requests[0][0]["ids"].([]any)
+
+	if !ok || len(ids) != 1 || ids[0] != offer.ID {
+		t.Fatalf("filter = %+v, want an ids filter", relay.requests[0][0])
+	}
+}

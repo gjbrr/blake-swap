@@ -326,6 +326,31 @@ func feeRate(
 		return *opts.FeeRate, "explicit", nil
 	}
 
+	// An environment override is the host's default; the caller's explicit rate
+	// already won above. The node is still asked for its floors, because a rate it
+	// will not accept is a funding that stalls and a refusal here can name the knob.
+	if override, err := fees.OverrideFromEnv(string(ch)); err != nil {
+		return decimal.Dec{}, "", err
+	} else if override.Rate != nil {
+		mempool, err := node.MempoolInfo(ctx)
+
+		if err != nil {
+			return decimal.Dec{}, "", err
+		}
+
+		if floor, found := fees.NodeFloor(mempoolFeeData(mempool)); found &&
+			override.Rate.Cmp(floor.Rate) < 0 {
+			return decimal.Dec{}, "", fmt.Errorf(
+				"%s is %s sat/vB, below the node's %s sat/vB %s; a transaction paying it "+
+					"would not be accepted. Raise the rate, or unset %s to use the node's estimator",
+				override.Source, override.Rate.String(), floor.Rate.String(), floor.Field,
+				override.Source,
+			)
+		}
+
+		return *override.Rate, "rate-override", nil
+	}
+
 	target := opts.FeeTargetBlocks
 
 	if target <= 0 {
@@ -378,6 +403,14 @@ func feeRate(
 	}
 
 	return rate, source, nil
+}
+
+// mempoolFeeData keeps the two node fields the fee floor is derived from.
+func mempoolFeeData(mempool *chain.MempoolInfo) fees.FeeData {
+	return fees.FeeData{
+		MempoolMinFee: mempool.MempoolMinFee,
+		MinRelayTxFee: mempool.MinRelayTxFee,
+	}
 }
 
 // mine mines blocks to the wallet's own address.

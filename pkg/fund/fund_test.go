@@ -857,3 +857,71 @@ func payInto(t *testing.T, node *fakeChain, wallet *fakeWallet, address string, 
 		Amount:   amount.Coin("-" + amount.Sats(baseUnits).Coin().String()),
 	})
 }
+
+// TestFeeRateHonoursTheEnvironmentOverride: the host's environment is the default a
+// client can set, and it outranks the node estimator.
+func TestFeeRateHonoursTheEnvironmentOverride(t *testing.T) {
+	t.Setenv("BLAKE_SWAP_BTC_SPEND_FEE_RATE", "7.5")
+
+	rate, source, err := feeRate(context.Background(), &fakeChain{feeRate: "0.00002000"}, chain.BTC, Options{})
+
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if rate.String() != "7.5" || source != "rate-override" {
+		t.Fatalf("rate = %s from %q, want 7.5 from the override", rate, source)
+	}
+}
+
+// TestFeeRateExplicitBeatsTheEnvironment is the precedence the client asked for:
+// a parameter outranks the environment.
+func TestFeeRateExplicitBeatsTheEnvironment(t *testing.T) {
+	t.Setenv("BLAKE_SWAP_BTC_SPEND_FEE_RATE", "7.5")
+
+	explicit := decimal.MustParse("11")
+
+	rate, source, err := feeRate(context.Background(), &fakeChain{feeRate: "0.00002000"}, chain.BTC, Options{FeeRate: &explicit})
+
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if rate.String() != "11" || source != "explicit" {
+		t.Fatalf("rate = %s from %q, want the explicit 11", rate, source)
+	}
+}
+
+// TestFeeRateOverrideBelowTheFloorIsRefused: an override the node will not accept is
+// refused here, naming the knob and the binding floor, instead of surfacing later as a
+// broadcast failure.
+func TestFeeRateOverrideBelowTheFloorIsRefused(t *testing.T) {
+	t.Setenv("BLAKE_SWAP_BTC_SPEND_FEE_RATE", "0.5")
+
+	_, _, err := feeRate(context.Background(), &fakeChain{feeRate: "0.00002000"}, chain.BTC, Options{})
+
+	if err == nil {
+		t.Fatal("a rate below the node floor was accepted")
+	}
+
+	for _, want := range []string{"BLAKE_SWAP_BTC_SPEND_FEE_RATE", "mempoolminfee", "would not be accepted"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error does not mention %q: %v", want, err)
+		}
+	}
+}
+
+// TestFeeRateForBlakeIgnoresTheBTCOverride: the knobs are per chain.
+func TestFeeRateForBlakeIgnoresTheBTCOverride(t *testing.T) {
+	t.Setenv("BLAKE_SWAP_BTC_SPEND_FEE_RATE", "9")
+
+	rate, source, err := feeRate(context.Background(), &fakeChain{feeRate: "0.00002000"}, chain.Blake, Options{})
+
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if source == "rate-override" || rate.String() == "9" {
+		t.Fatalf("the BLAKE leg read the BTC override: %s from %q", rate, source)
+	}
+}

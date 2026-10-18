@@ -25,9 +25,6 @@ importScripts("wasm_exec.js");
 const pending = [];
 let deliver = null;
 
-/* Raw trace lines, not envelopes: they let the page show worker lifecycle. */
-const trace = (text) => self.postMessage("TRACE: " + text);
-
 const drain = () => {
   while (pending.length > 0 && deliver) {
     deliver(pending.shift());
@@ -42,18 +39,34 @@ const drain = () => {
 setInterval(() => {
   if (!deliver && globalThis.__tinylink_deliver) {
     deliver = globalThis.__tinylink_deliver;
-    trace("deliver hook connected, pending=" + pending.length);
     drain();
   }
 }, 10);
 
 globalThis.__tinylink_post = (text) => self.postMessage(text);
 
+/*
+ * The transport is typed: an envelope is a JSON object. Anything else is
+ * bootstrap noise and must never reach the link, which would refuse to parse it
+ * and log a decode error that looks like a protocol bug.
+ */
+const isEnvelope = (data) => typeof data === "string" && data.startsWith("{");
+
 self.onmessage = (event) => {
+  if (!isEnvelope(event.data)) {
+    console.warn(
+      "worker: dropped a non-envelope message:",
+      String(event.data).slice(0, 80),
+    );
+    return;
+  }
+
   if (deliver) {
     deliver(event.data);
-  } else {
+  } else if (pending.length < 64) {
     pending.push(event.data);
+  } else {
+    console.warn("worker: early-message queue full, dropped one");
   }
 };
 
@@ -66,6 +79,5 @@ WebAssembly.instantiateStreaming(fetch("worker.wasm"), go.importObject)
     go.run(instance);
   })
   .catch((err) => {
-    trace("worker wasm failed: " + err);
     console.error("worker: worker.wasm failed to load:", err);
   });

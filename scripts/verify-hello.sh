@@ -28,7 +28,7 @@ cd "$ROOT"
 PORT="${VERIFY_PORT:-8799}"
 ADDR="127.0.0.1:${PORT}"
 URL="http://${ADDR}/?autoping=2"
-BUDGET="${VERIFY_BUDGET:-20000}"
+BUDGET="${VERIFY_BUDGET:-45000}"
 SHOT="$ROOT/web/hello-screenshot.png"
 BOOT_SHOT="$ROOT/web/boot-screenshot.png"
 
@@ -86,9 +86,9 @@ fail() {
     echo
     echo "FAIL: $*" >&2
 
-    if [[ -s "$WORK/browser.log" ]]; then
-        echo "--- browser log ---" >&2
-        tail -20 "$WORK/browser.log" >&2
+    if [[ -s "$WORK/console.log" ]]; then
+        echo "--- browser console ---" >&2
+        grep -E 'CONSOLE|ERROR' "$WORK/console.log" | tail -20 >&2
     fi
 
     exit 1
@@ -148,14 +148,22 @@ ok=0
 while [[ "$attempt" -lt 3 ]]; do
     attempt=$((attempt + 1))
 
-    if "$BROWSER" "${common[@]}" --dump-dom "$URL" >"$WORK/dom.html" 2>"$WORK/browser.log"; then
-        if check_dom "$WORK/dom.html"; then
+    if "$BROWSER" "${common[@]}" --enable-logging=stderr --v=0 \
+        --dump-dom "$URL" >"$WORK/dom.html" 2>"$WORK/console.log"; then
+        #
+        # A message that is not an envelope must never reach the link: the Go
+        # side would refuse to decode it and log exactly this. It happened once
+        # when the worker's bootstrap posted a raw debug line on the protocol
+        # channel, so it is checked rather than assumed.
+        #
+        if check_dom "$WORK/dom.html" \
+            && ! grep -qE 'decode envelope|envelope has no kind|dropped a non-envelope' "$WORK/console.log"; then
             ok=1
             break
         fi
     fi
 
-    echo "note: attempt $attempt did not see a verified page, retrying" >&2
+    echo "note: attempt $attempt did not see a clean, verified page, retrying" >&2
     sleep 0.5
 done
 

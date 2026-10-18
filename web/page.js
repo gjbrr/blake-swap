@@ -142,15 +142,28 @@
     return;
   }
 
+  /*
+   * The transport is typed: an envelope is a JSON object. Anything else on
+   * this channel is bootstrap noise, and handing it to the link makes Go log a
+   * decode error that looks exactly like a protocol bug. Drop it here instead.
+   */
+  const isEnvelope = (data) => typeof data === "string" && data.startsWith("{");
+
   worker.onmessage = (event) => {
-    if (String(event.data).startsWith("TRACE: ")) {
-      trace(String(event.data));
+    if (!isEnvelope(event.data)) {
+      const note = "page: dropped a non-envelope message: " + String(event.data).slice(0, 80);
+      trace(note);
+      console.warn(note);
+      return;
     }
 
     if (deliver) {
       deliver(event.data);
-    } else {
+    } else if (pending.length < 64) {
       pending.push(event.data);
+    } else {
+      trace("page: early-message queue full, dropped one");
+      console.warn("page: early-message queue full, dropped one");
     }
   };
 

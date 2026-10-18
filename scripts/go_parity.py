@@ -405,9 +405,10 @@ MODULES: list[Module] = [
         ["load_swap", "save_swap", "atomic_write_json"],
     ),
     Module(
-        "(new)", "pkg/platform", "pending",
-        "the JS seams: WebSocket, IndexedDB store, clock, console",
-        [], [],
+        "(new)", "pkg/platform", "ported",
+        "the browser seams: clock, console, IndexedDB-backed KV, a relay WebSocket, and a fetch transport for the node proxy; native implementations for tests and hosts",
+        ["KV", "Clock", "Console", "HTTP", "IndexedDB", "WebSocket", "Fetch", "MemoryKV"],
+        ["chain_dispatch", "nostr_publish_event_to_relay"],
     ),
 ]
 

@@ -399,8 +399,14 @@ MODULES: list[Module] = [
         [],
     ),
     Module(
+        "(new)", "pkg/worker", "partial",
+        "the browser worker's domains: the event loop, the encrypted-state domain, and the command dispatcher the page drives",
+        ["NewVaultDomain", "Domain", "Chans"],
+        [],
+    ),
+    Module(
         "(new)", "pkg/client", "partial",
-        "the browser client's encrypted state: a store.Store whose records are sealed with a passphrase-derived key before they reach IndexedDB",
+        "the browser client's encrypted state: a store.Store whose records are sealed with a passphrase-derived key before they reach IndexedDB, with a pluggable entropy source",
         ["Encrypted", "Create", "Open", "KV", "Memory"],
         ["load_swap", "save_swap", "atomic_write_json"],
     ),

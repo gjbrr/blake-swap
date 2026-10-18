@@ -97,6 +97,20 @@ func markVerified() {
 	)
 }
 
+// setVaultText renders the worker's command output.
+func setVaultText(text string) {
+	setText(ElementVault, text)
+}
+
+// markVaultVerified records that the encrypted round trip succeeded in this browser.
+func markVaultVerified() {
+	js.Global().Get("document").Get("body").Call(
+		"setAttribute",
+		VaultVerifiedAttribute,
+		"true",
+	)
+}
+
 func consoleLog(msg string) {
 	js.Global().Get("console").Call("log", msg)
 }

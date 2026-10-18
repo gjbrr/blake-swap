@@ -188,11 +188,36 @@
   });
 
   /*
+   * Every control that carries data-uicmd sends that command to the page
+   * domain. One listener rather than one per button, so a new panel is markup
+   * plus a Go case and nothing else.
+   */
+  document.addEventListener("click", (event) => {
+    const target = event.target.closest("[data-uicmd]");
+    if (!target || !globalThis.__tinylink_ui) return;
+    globalThis.__tinylink_ui(target.dataset.uicmd);
+  });
+
+  /*
    * ?autoping=N clicks the button N times shortly after the app opens. It
    * exists so the headless check can exercise the UI command channel and a
    * second round trip without a browser driver.
    */
   const autoping = Number(new URLSearchParams(location.search).get("autoping") || 0);
+
+  /*
+   * ?vaulttest=1 clicks the encrypted self-test once the app is running. The
+   * check asserts data-vault-verified afterwards, so a browser that cannot run
+   * the encrypted round trip fails loudly instead of showing an empty panel.
+   */
+  if (new URLSearchParams(location.search).get("vaulttest") === "1") {
+    const timer = setInterval(() => {
+      if (document.body.dataset.bootComplete !== "true") return;
+      clearInterval(timer);
+      const button = document.querySelector("[data-uicmd='vault-selftest']");
+      if (button) button.click();
+    }, 50);
+  }
 
   if (autoping > 0) {
     const timer = setInterval(() => {

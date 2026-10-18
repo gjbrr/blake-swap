@@ -3,10 +3,13 @@
 package worker
 
 import (
+	"context"
 	"syscall/js"
+	"time"
 
 	"git.smesh.lol/tiny-spawn"
 
+	"github.com/gjbrr/blake-swap/pkg/platform"
 	"github.com/gjbrr/blake-swap/pkg/proto"
 )
 
@@ -30,6 +33,12 @@ const Greeting = "hello world"
 func Domain(_ struct{}, ch Chans) {
 	consoleLog("worker: domain started")
 
+	// One vault per worker: the derived key lives here and nowhere else, and it dies
+	// with the instance.
+	vault := NewVaultDomain(platform.NewIndexedDB("blake-swap", "vault"), platform.Reader{})
+
+	ctx := context.Background()
+
 	//
 	// Announce readiness before serving anything: the page's boot screen
 	// needs to know the module is running, and that is a different fact
@@ -48,6 +57,36 @@ func Domain(_ struct{}, ch Chans) {
 				// A peer that announces readiness twice is harmless;
 				// there is nothing to do with the second one.
 
+			case proto.Command:
+				//
+				// Log the dispatch: a command that arrives and never answers is the
+				// hardest failure to see in a browser, and the two timestamps make it
+				// obvious whether the work started.
+				//
+				started := time.Now()
+
+				consoleLog("worker: command received (seq " + itoa(e.Seq) + ")")
+
+				result := handleCommand(ctx, vault, e.Body)
+
+				consoleLog("worker: command finished (ok=" + boolText(result.OK) +
+					", " + itoa(uint32(time.Since(started).Milliseconds())) + " ms)")
+
+				body, encodeErr := proto.EncodeResult(result)
+
+				if encodeErr != nil {
+					consoleLog("worker: could not encode a result: " + encodeErr.Error())
+
+					continue
+				}
+
+				ch.Link.Send(proto.Envelope{
+					Kind: proto.CommandResult,
+					Seq:  e.Seq,
+					Body: body,
+					AtMS: e.AtMS,
+				})
+
 			default:
 				//
 				// TODO: relay proxy, signature checks, Nostr subscription
@@ -65,6 +104,15 @@ func Domain(_ struct{}, ch Chans) {
 	}
 }
 
+// boolText renders a boolean for a log line.
+func boolText(value bool) string {
+	if value {
+		return "true"
+	}
+
+	return "false"
+}
+
 // answerHello replies with the greeting, echoing the caller's sequence and
 // timestamp so the page can meter the round trip with its own clock.
 func answerHello(e proto.Envelope, link tinyspawn.Duplex[proto.Envelope]) {
@@ -76,23 +124,6 @@ func answerHello(e proto.Envelope, link tinyspawn.Duplex[proto.Envelope]) {
 		Body: Greeting,
 		AtMS: e.AtMS,
 	})
-}
-
-func itoa(n uint32) string {
-	if n == 0 {
-		return "0"
-	}
-
-	var buf [10]byte
-	i := len(buf)
-
-	for n > 0 {
-		i--
-		buf[i] = byte('0' + n%10)
-		n /= 10
-	}
-
-	return string(buf[i:])
 }
 
 func consoleLog(msg string) {

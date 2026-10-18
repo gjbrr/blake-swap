@@ -5,10 +5,10 @@ package platform
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"fmt"
 	"io"
 	"net/http"
-	"sync"
 	"time"
 )
 
@@ -83,65 +83,5 @@ func (h *HTTP) Do(ctx context.Context, body []byte) ([]byte, error) {
 	return payload, nil
 }
 
-// MemoryKV is a KV in memory.
-//
-// It is used by tests and by a session-only vault: a client that has not yet been
-// unlocked for durable storage should still work, and losing that state on reload is
-// exactly the behaviour it asked for.
-type MemoryKV struct {
-	mu    sync.Mutex
-	items map[string][]byte
-}
-
-// NewMemoryKV returns an empty store.
-func NewMemoryKV() *MemoryKV { return &MemoryKV{items: map[string][]byte{}} }
-
-// Get implements KV.
-func (m *MemoryKV) Get(_ context.Context, key string) ([]byte, bool, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	value, found := m.items[key]
-
-	return value, found, nil
-}
-
-// Put implements KV.
-func (m *MemoryKV) Put(_ context.Context, key string, value []byte) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	copied := make([]byte, len(value))
-	copy(copied, value)
-	m.items[key] = copied
-
-	return nil
-}
-
-// Delete implements KV.
-func (m *MemoryKV) Delete(_ context.Context, key string) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	delete(m.items, key)
-
-	return nil
-}
-
-// Keys implements KV.
-func (m *MemoryKV) Keys(_ context.Context, prefix string) ([]string, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	keys := make([]string, 0, len(m.items))
-
-	for key := range m.items {
-		if len(key) >= len(prefix) && key[:len(prefix)] == prefix {
-			keys = append(keys, key)
-		}
-	}
-
-	sortStrings(keys)
-
-	return keys, nil
-}
+// readRandom fills p from the system entropy source.
+func readRandom(p []byte) (int, error) { return rand.Read(p) }

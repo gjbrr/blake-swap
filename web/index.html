@@ -59,6 +59,16 @@
 
       <pre id="hello" class="hello" aria-live="polite">…</pre>
 
+      <section class="panel">
+        <h2>Encrypted state</h2>
+        <p class="hint">
+          The worker seals swap records before they reach IndexedDB. This runs the
+          encrypted round trip inside the worker and reports what it did.
+        </p>
+        <button type="button" data-uicmd="vault-selftest">Run encrypted self-test</button>
+        <pre id="vault" aria-live="polite">not run</pre>
+      </section>
+
       <dl class="rows">
         <div class="row">
           <dt>page</dt>

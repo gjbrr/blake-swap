@@ -29,6 +29,13 @@ type UICmd = string
 // UICmdPing asks the domain to send another hello.
 const UICmdPing UICmd = "ping"
 
+// UICmdVaultTest asks the worker to run its encrypted-state self-test.
+//
+// It exists as a UI command rather than as a hidden boot step so the same button a
+// person can press is the one the headless check presses: a test-only code path would
+// prove something nobody runs.
+const UICmdVaultTest UICmd = "vault-selftest"
+
 // The element ids are part of the page contract: index.html renders them and
 // the headless check in scripts/verify-hello.sh reads them. Keeping them in
 // one place stops the three from drifting.
@@ -42,6 +49,13 @@ const (
 	// been rendered, so a test can assert the round trip without scraping
 	// presentation text.
 	VerifiedAttribute = "data-hello-verified"
+
+	// ElementVault is where the worker's command output is rendered.
+	ElementVault = "vault"
+
+	// VaultVerifiedAttribute marks the document once the worker's encrypted
+	// round trip has succeeded in this browser.
+	VaultVerifiedAttribute = "data-vault-verified"
 )
 
 // Domain is the page's event loop. It runs until Stop is closed.
@@ -82,6 +96,9 @@ func Domain(_ struct{}, ch Chans) {
 			case proto.HelloAck:
 				renderAck(e)
 
+			case proto.CommandResult:
+				renderResult(e)
+
 			default:
 				consoleLog("page: ignoring unexpected kind " + string(e.Kind))
 			}
@@ -92,6 +109,26 @@ func Domain(_ struct{}, ch Chans) {
 				setPageStatus("pinging the worker", "wait")
 				sendHello()
 
+			case UICmdVaultTest:
+				setVaultText("running the worker's encrypted self-test…")
+
+				body, err := proto.EncodeRequest(proto.Request{Command: "vault.selftest"})
+
+				if err != nil {
+					setVaultText("could not encode the request: " + err.Error())
+
+					continue
+				}
+
+				seq++
+
+				ch.Link.Send(proto.Envelope{
+					Kind: proto.Command,
+					Seq:  seq,
+					Body: body,
+					AtMS: time.Now().UnixMilli(),
+				})
+
 			default:
 				consoleLog("page: ignoring unknown UI command " + cmd)
 			}
@@ -100,6 +137,29 @@ func Domain(_ struct{}, ch Chans) {
 			return
 		}
 	}
+}
+
+// renderResult displays one command's result.
+//
+// A failed command is rendered as text and does not set the verified marker: the point
+// of the marker is that the encrypted round trip actually happened.
+func renderResult(e proto.Envelope) {
+	result, err := proto.DecodeResult(e.Body)
+
+	if err != nil {
+		setVaultText("the result could not be decoded: " + err.Error())
+
+		return
+	}
+
+	if !result.OK {
+		setVaultText(result.Command + " failed: " + result.Error)
+
+		return
+	}
+
+	setVaultText(result.Command + ": " + result.Text)
+	markVaultVerified()
 }
 
 // renderAck displays the worker's greeting. This is the visible proof the

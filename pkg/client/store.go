@@ -17,6 +17,7 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"fmt"
+	"io"
 	"sync"
 
 	"github.com/gjbrr/blake-swap/pkg/model"
@@ -46,6 +47,19 @@ type Encrypted struct {
 	key []byte
 	// header is the KDF parameters, stored so the vault can be reopened later.
 	header vault.Params
+	// random is the entropy source for salt and nonces. Nil means crypto/rand on a
+	// host; the browser passes WebCrypto, because a wasm build's own crypto/rand is
+	// not an entropy guarantee this code can make.
+	random io.Reader
+}
+
+// entropy returns the store's random source.
+func (e *Encrypted) entropy() io.Reader {
+	if e.random != nil {
+		return e.random
+	}
+
+	return rand.Reader
 }
 
 // Key layout. The prefixes keep the vault's own metadata out of the record and
@@ -63,11 +77,16 @@ const (
 // here, at unlock time, rather than later when the first record fails to decrypt and the
 // operator is left wondering which of their records is corrupt.
 func Create(ctx context.Context, kv KV, passphrase string) (*Encrypted, error) {
+	return CreateWith(ctx, kv, passphrase, rand.Reader)
+}
+
+// CreateWith is Create with an explicit entropy source.
+func CreateWith(ctx context.Context, kv KV, passphrase string, random io.Reader) (*Encrypted, error) {
 	if passphrase == "" {
 		return nil, fmt.Errorf("a vault needs a passphrase")
 	}
 
-	params, err := vault.NewParams(rand.Reader)
+	params, err := vault.NewParams(random)
 
 	if err != nil {
 		return nil, err
@@ -85,7 +104,7 @@ func Create(ctx context.Context, kv KV, passphrase string) (*Encrypted, error) {
 		return nil, err
 	}
 
-	verifier, err := vault.Seal(key, verifierKey, []byte("blake-swap vault v1"), rand.Reader)
+	verifier, err := vault.Seal(key, verifierKey, []byte("blake-swap vault v1"), random)
 
 	if err != nil {
 		return nil, err
@@ -104,6 +123,11 @@ func Create(ctx context.Context, kv KV, passphrase string) (*Encrypted, error) {
 
 // Open unlocks an existing encrypted store.
 func Open(ctx context.Context, kv KV, passphrase string) (*Encrypted, error) {
+	return OpenWith(ctx, kv, passphrase, rand.Reader)
+}
+
+// OpenWith is Open with an explicit entropy source, for later writes.
+func OpenWith(ctx context.Context, kv KV, passphrase string, random io.Reader) (*Encrypted, error) {
 	encodedHeader, found, err := kv.Get(ctx, headerKey)
 
 	if err != nil {
@@ -140,7 +164,7 @@ func Open(ctx context.Context, kv KV, passphrase string) (*Encrypted, error) {
 		return nil, fmt.Errorf("wrong passphrase (the vault verifier did not open)")
 	}
 
-	return &Encrypted{kv: kv, key: key, header: params}, nil
+	return &Encrypted{kv: kv, key: key, header: params, random: random}, nil
 }
 
 // Exists reports whether a vault is present in this store.
@@ -361,7 +385,7 @@ func (e *Encrypted) put(ctx context.Context, key string, plaintext []byte) error
 		return fmt.Errorf("the vault is locked")
 	}
 
-	sealed, err := vault.Seal(e.key, key, plaintext, rand.Reader)
+	sealed, err := vault.Seal(e.key, key, plaintext, e.entropy())
 
 	if err != nil {
 		return err

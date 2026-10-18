@@ -6,7 +6,7 @@ It records what replaces each part of the Python engine in Go, and what has not 
 
 Statuses: **ported** (behaviour and tests), **partial** (in progress), **pending** (not started).
 
-## Modules (25/30 ported)
+## Modules (25/31 ported)
 
 | Python | Go | Status | Contents |
 |---|---|---|---|
@@ -38,7 +38,8 @@ Statuses: **ported** (behaviour and tests), **partial** (in progress), **pending
 | `src/swap_v2.py (market flow)` | `pkg/marketflow` | partial | market events: offer, take, cancel and match are built, parsed and validated by the reference; state is derived from evidence the same way; the market commands remain |
 | `src/swap_v2.py (CLI)` | `cmd/blake-swap-cli (missing)` | partial | the drop-in CLI: the implemented commands with the reference's arguments and environment; the output text is not yet byte-identical |
 | `(new)` | `pkg/vault` | ported | passphrase KDF and record encryption with the NIP-44 primitives |
-| `(new)` | `pkg/client` | partial | the browser client's encrypted state: a store.Store whose records are sealed with a passphrase-derived key before they reach IndexedDB |
+| `(new)` | `pkg/worker` | partial | the browser worker's domains: the event loop, the encrypted-state domain, and the command dispatcher the page drives |
+| `(new)` | `pkg/client` | partial | the browser client's encrypted state: a store.Store whose records are sealed with a passphrase-derived key before they reach IndexedDB, with a pluggable entropy source |
 | `(new)` | `pkg/platform` | ported | the browser seams: clock, console, IndexedDB-backed KV, a relay WebSocket, and a fetch transport for the node proxy; native implementations for tests and hosts |
 
 ### Symbols
@@ -73,6 +74,7 @@ Statuses: **ported** (behaviour and tests), **partial** (in progress), **pending
 | `build_market_offer_v2_event`, `nostr_parse_market_offer_event`, `build_market_take_event`, `nostr_validate_market_take_event`, `build_market_cancel_event`, `build_market_match_event`, `validate_market_match_evidence`, `nostr_derive_market_offer_state`, `nostr_market_cancellation_applies` | `BuildOffer`, `ParseOffer`, `BuildTake`, `ParseTake`, `BuildCancel`, `ParseCancel`, `BuildMatch`, `ParseMatch`, `DeriveState`, `CancellationApplies` | `pkg/marketflow` |
 | `main` | — | `pkg/cmd/blake-swap-cli` |
 | — | `Seal`, `Open`, `DeriveKey` | `pkg/vault` |
+| — | `NewVaultDomain`, `Domain`, `Chans` | `pkg/worker` |
 | `load_swap`, `save_swap`, `atomic_write_json` | `Encrypted`, `Create`, `Open`, `KV`, `Memory` | `pkg/client` |
 | `chain_dispatch`, `nostr_publish_event_to_relay` | `KV`, `Clock`, `Console`, `HTTP`, `IndexedDB`, `WebSocket`, `Fetch`, `MemoryKV` | `pkg/platform` |
 

@@ -222,6 +222,13 @@ func pbkdf2SHA256(password, salt []byte, iterations, keyLen int) []byte {
 	for block := 1; block <= blocks; block++ {
 		binary.BigEndian.PutUint32(counter[:], uint32(block))
 
+		//
+		// One HMAC, reset per iteration. hmac.New precomputes the two keyed blocks of
+		// its own state, so constructing a fresh one 210,000 times per key re-hashes
+		// the password 210,000 times. Reset keeps that precomputation and is the
+		// difference between a derivation that finishes in a browser and one that does
+		// not.
+		//
 		mac := hmac.New(sha256.New, password)
 		mac.Write(salt)
 		mac.Write(counter[:])
@@ -231,9 +238,9 @@ func pbkdf2SHA256(password, salt []byte, iterations, keyLen int) []byte {
 		copy(t, u)
 
 		for i := 1; i < iterations; i++ {
-			mac = hmac.New(sha256.New, password)
+			mac.Reset()
 			mac.Write(u)
-			u = mac.Sum(nil)
+			u = mac.Sum(u[:0])
 
 			for j := range t {
 				t[j] ^= u[j]
@@ -252,8 +259,10 @@ func hkdfExpand(prk, info []byte, length int) []byte {
 
 	var previous []byte
 
+	mac := hmac.New(sha256.New, prk)
+
 	for counter := byte(1); len(out) < length; counter++ {
-		mac := hmac.New(sha256.New, prk)
+		mac.Reset()
 		mac.Write(previous)
 		mac.Write(info)
 		mac.Write([]byte{counter})

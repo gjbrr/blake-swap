@@ -434,3 +434,19 @@ func readFetchBody(response js.Value) ([]byte, error) {
 		return nil, err
 	}
 }
+
+// readRandom fills p from WebCrypto.
+//
+// A wasm build's crypto/rand is routed through the runtime's entropy source, which is
+// not a guarantee this code can make about the browser; WebCrypto is. The key that
+// protects a swap's secret is derived from a passphrase, but the nonces that make two
+// seals differ come from here.
+func readRandom(p []byte) (int, error) {
+	buffer := js.Global().Get("Uint8Array").New(len(p))
+
+	js.Global().Get("crypto").Call("getRandomValues", buffer)
+
+	js.CopyBytesToGo(p, buffer)
+
+	return len(p), nil
+}

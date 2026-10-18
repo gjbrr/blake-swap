@@ -33,6 +33,10 @@ type Node interface {
 	RawTx(ctx context.Context, txid, blockHash string) (*chain.Tx, error)
 	TxOut(ctx context.Context, txid string, vout int64) (*chain.TxOut, error)
 	WalletTx(ctx context.Context, txid string) (*chain.WalletTx, error)
+	// WalletTxIn reads a wallet transaction from a named wallet. Recovery needs
+	// the participant's wallet, not whichever wallet the connection happens to be
+	// bound to.
+	WalletTxIn(ctx context.Context, wallet, txid string) (*chain.WalletTx, error)
 	DecodeRaw(ctx context.Context, hexTx string) (*chain.Tx, error)
 	DescriptorInfo(ctx context.Context, body string) (*chain.DescriptorInfo, error)
 	DeriveAddresses(ctx context.Context, descriptor string) ([]string, error)

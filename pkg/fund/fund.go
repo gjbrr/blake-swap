@@ -358,9 +358,23 @@ func feeRate(
 
 	source := "dynamic"
 
-	if ch == chain.BTC && opts.MinFeeRate != nil && rate.Cmp(*opts.MinFeeRate) < 0 {
-		rate = *opts.MinFeeRate
-		source = "wallet-minimum"
+	if ch == chain.BTC {
+		//
+		// Bitcoin Core's wallet refuses to build a transaction below its own
+		// -mintxfee, which defaults to 1 sat/vB. Leaving that to a broadcast
+		// failure would report a fee-policy refusal as a funding failure, so the
+		// floor is applied here and named when it is what decided the rate.
+		//
+		floor := decimal.MustParse("1")
+
+		if opts.MinFeeRate != nil {
+			floor = *opts.MinFeeRate
+		}
+
+		if rate.Cmp(floor) < 0 {
+			rate = floor
+			source = "wallet-minimum"
+		}
 	}
 
 	return rate, source, nil

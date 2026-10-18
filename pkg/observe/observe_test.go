@@ -27,11 +27,12 @@ import (
 type fakeNode struct {
 	chain.Chain
 
-	height int64
-	blocks map[int64]string
-	txs    map[string]*chain.Tx
-	utxos  map[string]*chain.TxOut
-	wallet map[string]*chain.WalletTx
+	height  int64
+	blocks  map[int64]string
+	txs     map[string]*chain.Tx
+	utxos   map[string]*chain.TxOut
+	wallet  map[string]*chain.WalletTx
+	wallets map[string]bool
 	// failRaw makes RawTx fail for these txids, standing in for a node
 	// without txindex that no longer has the transaction.
 	failRaw map[string]bool
@@ -53,6 +54,7 @@ func newFakeNode() *fakeNode {
 		txs:     map[string]*chain.Tx{},
 		utxos:   map[string]*chain.TxOut{},
 		wallet:  map[string]*chain.WalletTx{},
+		wallets: map[string]bool{},
 		failRaw: map[string]bool{},
 	}
 }
@@ -150,6 +152,14 @@ func (f *fakeNode) WalletTx(_ context.Context, txid string) (*chain.WalletTx, er
 	}
 
 	return tx, nil
+}
+
+func (f *fakeNode) WalletTxIn(ctx context.Context, wallet, txid string) (*chain.WalletTx, error) {
+	if _, ok := f.wallets[wallet]; !ok {
+		return nil, fmt.Errorf("wallet %q is not loaded", wallet)
+	}
+
+	return f.WalletTx(ctx, txid)
 }
 
 func (f *fakeNode) DecodeRaw(_ context.Context, hexTx string) (*chain.Tx, error) {
@@ -798,7 +808,9 @@ func TestFindSpendRecoversThroughTheWallet(t *testing.T) {
 		BlockHash:     spend.BlockHash,
 	}
 
-	got, err := FindSpend(context.Background(), node, swap, chain.BTC, Config{})
+	node.wallets["bob"] = true
+
+	got, err := FindSpend(context.Background(), node, swap, chain.BTC, Config{Wallet: "bob"})
 
 	if err != nil {
 		t.Fatal(err)
@@ -806,6 +818,24 @@ func TestFindSpendRecoversThroughTheWallet(t *testing.T) {
 
 	if got == nil || got.TxID != txid || got.Branch != htlc.Claim {
 		t.Fatalf("got %+v", got)
+	}
+}
+
+// TestFindSpendRefusesWithoutARecoveryWallet: the wallet fallback is the only way
+// to read a wallet-created transaction on a node without txindex, so a caller that
+// configured no wallet must be told rather than silently failing to recover.
+func TestFindSpendRefusesWithoutARecoveryWallet(t *testing.T) {
+	node, swap, funding := fundedSwap(t, chain.BTC)
+	spend := node.spend(t, swap, funding, htlc.Claim, 1)
+
+	txid := spend.TxID
+	swap.BTCCLaimTxID = &txid
+	node.failRaw[txid] = true
+
+	_, err := FindSpend(context.Background(), node, swap, chain.BTC, Config{})
+
+	if err == nil || !strings.Contains(err.Error(), "no recovery wallet") {
+		t.Fatalf("err = %v", err)
 	}
 }
 

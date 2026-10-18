@@ -15,7 +15,7 @@ import (
 )
 
 // announcement is one settlement a peer announced.
-type announcement struct {
+type Announcement struct {
 	Kind      string
 	TxID      string
 	BlockHash string
@@ -112,7 +112,7 @@ func (e *Engine) ExtractSecret(ctx context.Context, swapID string) (string, erro
 
 // AnnounceBTCCLaimed publishes Alice's claim, which is the settlement that
 // reveals the preimage on Bitcoin.
-func (e *Engine) AnnounceBTCCLaimed(ctx context.Context, swapID string) (*announcement, error) {
+func (e *Engine) AnnounceBTCCLaimed(ctx context.Context, swapID string) (*Announcement, error) {
 	swap, err := e.load(ctx, swapID)
 
 	if err != nil {
@@ -149,7 +149,7 @@ func (e *Engine) AnnounceBTCCLaimed(ctx context.Context, swapID string) (*announ
 // The claim is verified on Bitcoin before it is recorded: the announced
 // transaction must still be on the active chain, spend this swap's HTLC, and use
 // the claim branch. Only then does Bob's own record advance.
-func (e *Engine) ReceiveBTCCLaimed(ctx context.Context, swapID string) (*announcement, error) {
+func (e *Engine) ReceiveBTCCLaimed(ctx context.Context, swapID string) (*Announcement, error) {
 	swap, err := e.load(ctx, swapID)
 
 	if err != nil {
@@ -170,7 +170,7 @@ func (e *Engine) ReceiveBTCCLaimed(ctx context.Context, swapID string) (*announc
 }
 
 // AnnounceBlakeClaimed publishes Bob's BLAKE claim.
-func (e *Engine) AnnounceBlakeClaimed(ctx context.Context, swapID string) (*announcement, error) {
+func (e *Engine) AnnounceBlakeClaimed(ctx context.Context, swapID string) (*Announcement, error) {
 	swap, err := e.load(ctx, swapID)
 
 	if err != nil {
@@ -203,7 +203,7 @@ func (e *Engine) AnnounceBlakeClaimed(ctx context.Context, swapID string) (*anno
 }
 
 // ReceiveBlakeClaimed consumes Bob's BLAKE claim as Alice.
-func (e *Engine) ReceiveBlakeClaimed(ctx context.Context, swapID string) (*announcement, error) {
+func (e *Engine) ReceiveBlakeClaimed(ctx context.Context, swapID string) (*Announcement, error) {
 	swap, err := e.load(ctx, swapID)
 
 	if err != nil {
@@ -220,7 +220,7 @@ func (e *Engine) ReceiveBlakeClaimed(ctx context.Context, swapID string) (*annou
 }
 
 // AnnounceBTCRefunded publishes Bob's Bitcoin refund.
-func (e *Engine) AnnounceBTCRefunded(ctx context.Context, swapID string) (*announcement, error) {
+func (e *Engine) AnnounceBTCRefunded(ctx context.Context, swapID string) (*Announcement, error) {
 	swap, err := e.load(ctx, swapID)
 
 	if err != nil {
@@ -253,7 +253,7 @@ func (e *Engine) AnnounceBTCRefunded(ctx context.Context, swapID string) (*annou
 }
 
 // ReceiveBTCRefunded consumes Bob's refund as Alice.
-func (e *Engine) ReceiveBTCRefunded(ctx context.Context, swapID string) (*announcement, error) {
+func (e *Engine) ReceiveBTCRefunded(ctx context.Context, swapID string) (*Announcement, error) {
 	swap, err := e.load(ctx, swapID)
 
 	if err != nil {
@@ -272,7 +272,7 @@ func (e *Engine) ReceiveBTCRefunded(ctx context.Context, swapID string) (*announ
 // announceSettlement sends one of the three settlement announcements.
 func (e *Engine) announceSettlement(
 	ctx context.Context, swap *model.Swap, kind string, body map[string]any, branch htlc.Branch,
-) (*announcement, error) {
+) (*Announcement, error) {
 	if _, present := body["secret_hex"]; present {
 		return nil, fmt.Errorf("SECURITY FAILURE: %s message contains secret_hex", kind)
 	}
@@ -283,7 +283,7 @@ func (e *Engine) announceSettlement(
 		return nil, err
 	}
 
-	return &announcement{
+	return &Announcement{
 		Kind: kind, TxID: settlementTxID(swap, chain.BTC, branch),
 		Branch: branch, Location: location, State: swap.State,
 	}, nil
@@ -297,7 +297,7 @@ func (e *Engine) receiveSettlement(
 	kind string,
 	branch htlc.Branch,
 	advance func(*model.Swap) error,
-) (*announcement, error) {
+) (*Announcement, error) {
 	if e.Transport == nil {
 		return nil, fmt.Errorf("the engine has no coordination transport")
 	}
@@ -376,7 +376,7 @@ func (e *Engine) receiveSettlement(
 		return nil, err
 	}
 
-	result := &announcement{
+	result := &Announcement{
 		Kind: kind, TxID: txid, BlockHash: blockHash, Branch: branch,
 		Sender: message.Sender, Location: message.Location, Duplicate: duplicate,
 		State: swap.State,

@@ -373,19 +373,36 @@ func integer(message map[string]any, field string) (int64, error) {
 		return 0, refuse("%s must be an integer", field)
 	}
 
-	number, ok := value.(json.Number)
+	//
+	// A decoded message carries json.Number, and a message the engine builds
+	// carries a Go integer. Both are the same wire value, so both are accepted —
+	// but a fractional number is not, because two implementations that disagreed
+	// about rounding would sign different events from the same intent.
+	//
+	switch typed := value.(type) {
+	case json.Number:
+		n, err := typed.Int64()
 
-	if !ok {
-		return 0, refuse("%s must be an integer", field)
+		if err != nil {
+			return 0, refuse("%s must be an integer", field)
+		}
+
+		return n, nil
+	case int:
+		return int64(typed), nil
+	case int32:
+		return int64(typed), nil
+	case int64:
+		return typed, nil
+	case float64:
+		if typed != float64(int64(typed)) {
+			return 0, refuse("%s must be an integer", field)
+		}
+
+		return int64(typed), nil
 	}
 
-	n, err := number.Int64()
-
-	if err != nil {
-		return 0, refuse("%s must be an integer", field)
-	}
-
-	return n, nil
+	return 0, refuse("%s must be an integer", field)
 }
 
 func requirePositiveInt(message map[string]any, field string) (int64, error) {

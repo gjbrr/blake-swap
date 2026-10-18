@@ -603,6 +603,14 @@ func (n *Node) WalletTx(ctx context.Context, txid string) (*WalletTx, error) {
 	return &tx, nil
 }
 
+// WalletTxIn reads a wallet transaction from a named wallet.
+//
+// The recovery paths hold a wallet *name*, not a node bound to a wallet, because
+// the participant wallet is a configuration fact rather than a connection.
+func (n *Node) WalletTxIn(ctx context.Context, wallet, txid string) (*WalletTx, error) {
+	return n.WithWallet(wallet).WalletTx(ctx, txid)
+}
+
 // NewAddress returns a fresh wallet address.
 func (n *Node) NewAddress(ctx context.Context) (string, error) {
 	raw, err := n.callWithWallet(ctx, "getnewaddress", "", "bech32")
@@ -807,7 +815,11 @@ func (n *Node) ListTransactions(ctx context.Context, count, skip int64) ([]Walle
 
 // AddressInfo is getaddressinfo's answer, reduced to the facts the engine uses.
 type AddressInfo struct {
-	Address      string `json:"address"`
+	Address string `json:"address"`
+	// Pubkey is the address's public key, when the wallet knows it. It is how the
+	// engine names a participant's contract key without a second key store: the
+	// wallet is what will sign the settlement, so the HTLC must name its key.
+	Pubkey       string `json:"pubkey"`
 	ScriptPubKey string `json:"scriptPubKey"`
 	IsMine       bool   `json:"ismine"`
 	IsWatchOnly  bool   `json:"iswatchonly"`

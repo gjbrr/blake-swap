@@ -17,11 +17,24 @@ import (
 
 // File is a Store in a directory, laid out the way the Python engine lays it out.
 type File struct {
-	base string
+	base     string
+	messages string
 }
 
 // NewFile opens the state tree under base, creating nothing until a write.
-func NewFile(base string) *File { return &File{base: base} }
+//
+// Records live at <base>/<id>.json and the message spool at <base>/messages/, which
+// is the reference engine's layout.
+func NewFile(base string) *File {
+	return &File{base: base, messages: filepath.Join(base, "messages")}
+}
+
+// SetMessageDirectory points the spool at the directory that holds message files.
+//
+// The reference engine allows the spool to be configured separately, and that is
+// what lets two participants on one host share a message directory while keeping
+// their records apart.
+func (f *File) SetMessageDirectory(dir string) { f.messages = dir }
 
 // Base returns the directory the store was opened on.
 func (f *File) Base() string { return f.base }
@@ -38,7 +51,7 @@ func (f *File) archivePath(swapID string) string {
 
 // messagePath is where one transport message lives.
 func (f *File) messagePath(swapID, kind string) string {
-	return filepath.Join(f.base, "messages", swapID+"."+kind+".json")
+	return filepath.Join(f.messages, swapID+"."+kind+".json")
 }
 
 // Save implements Store.
@@ -228,7 +241,7 @@ func (f *File) ListMessages(_ context.Context, swapID string) ([]string, error) 
 		return nil, err
 	}
 
-	entries, err := os.ReadDir(filepath.Join(f.base, "messages"))
+	entries, err := os.ReadDir(f.messages)
 
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, nil

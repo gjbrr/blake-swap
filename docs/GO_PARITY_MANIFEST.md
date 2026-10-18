@@ -33,10 +33,10 @@ Statuses: **ported** (behaviour and tests), **partial** (in progress), **pending
 | `src/swap_v2.py (coordination)` | `pkg/coord` | ported | one Transport interface: the local spool, or Nostr; validation and sender pinning on both |
 | `src/swap_v2.py (relays)` | `pkg/nostr` | ported | relay sessions over a platform connection, publish report, REQ/EOSE, event cache, the encryption policy |
 | `src/swap_v2.py (durable state)` | `pkg/store` | ported | workflow store: atomic swap records, the message spool, the archive |
-| `src/swap_v2.py (commands)` | `pkg/swap` | partial | the 58 commands as a Go API: inspection, state advance, funding, settlement, every announcement, and secret extraction are in; the offer handshake and market commands remain |
+| `src/swap_v2.py (commands)` | `pkg/swap` | partial | the 58 commands as a Go API: the full settlement lifecycle and the offer/accept handshake are in, and a Go participant completes real swaps against the Python reference in both directions; market commands remain |
 | `src/swap_agent.py` | `pkg/agent` | pending | the autonomous driver's step policy and budget |
 | `src/swap_v2.py (market flow)` | `pkg/marketflow` | pending | offer, take, match, cancel, accept, import as a flow |
-| `src/swap_v2.py (CLI)` | `pkg/cli + cmd/blake-swap-cli` | pending | the drop-in CLI: the same commands, arguments and output |
+| `src/swap_v2.py (CLI)` | `cmd/blake-swap-cli (missing)` | partial | the drop-in CLI: the implemented commands with the reference's arguments and environment; the output text is not yet byte-identical |
 | `(new)` | `pkg/vault` | ported | passphrase KDF and record encryption with the NIP-44 primitives |
 | `(new)` | `pkg/platform` | pending | the JS seams: WebSocket, IndexedDB store, clock, console |
 
@@ -67,10 +67,10 @@ Statuses: **ported** (behaviour and tests), **partial** (in progress), **pending
 | `file_send_message`, `send_message`, `receive_message`, `validate_transport_message` | `FileTransport`, `NostrTransport`, `Validate`, `Transport` | `pkg/coord` |
 | `nostr_send_message`, `nostr_receive_message`, `nostr_publish_event`, `decode_coordination_content` | `Client`, `BuildCoordinationEvent`, `DecodeContent`, `Cache` | `pkg/nostr` |
 | `atomic_write_json`, `load_local_swap`, `local_swap_paths`, `file_send_message`, `file_receive_message` | `File`, `Memory`, `SupersededPlaceholders`, `ArchiveSuperseded` | `pkg/store` |
-| `command_status`, `command_show`, `command_advance`, `command_list`, `command_fund_blake`, `command_fund_btc`, `command_claim_btc`, `command_claim_blake`, `command_refund_btc`, `command_refund_blake`, `command_complete`, `command_publish_blake_funded`, `command_receive_blake_funded`, `command_publish_btc_funded`, `command_receive_btc_funded`, `command_publish_btc_claimed`, `command_receive_btc_claimed`, `command_publish_blake_claimed`, `command_receive_blake_claimed`, `command_publish_btc_refunded`, `command_receive_btc_refunded`, `command_extract_secret` | `Engine`, `Status`, `Show`, `List`, `Advance`, `FundBlake`, `FundBTC`, `VerifyBlake`, `VerifyBTC`, `ClaimBTC`, `ClaimBlake`, `RefundBTC`, `RefundBlake`, `Complete`, `ExtractSecret`, `AnnounceBlakeFunding`, `ReceiveBlakeFunding`, `AnnounceBTCFunding`, `ReceiveBTCFunding`, `AnnounceBTCCLaimed`, `ReceiveBTCCLaimed`, `AnnounceBlakeClaimed`, `ReceiveBlakeClaimed`, `AnnounceBTCRefunded`, `ReceiveBTCRefunded` | `pkg/swap` |
+| `command_status`, `command_show`, `command_advance`, `command_list`, `command_fund_blake`, `command_fund_btc`, `command_claim_btc`, `command_claim_blake`, `command_refund_btc`, `command_refund_blake`, `command_complete`, `command_publish_blake_funded`, `command_receive_blake_funded`, `command_publish_btc_funded`, `command_receive_btc_funded`, `command_publish_btc_claimed`, `command_receive_btc_claimed`, `command_publish_blake_claimed`, `command_receive_blake_claimed`, `command_publish_btc_refunded`, `command_receive_btc_refunded`, `command_extract_secret`, `command_new`, `command_publish_offer`, `command_accept_offer`, `command_receive_accept` | `Engine`, `Status`, `Show`, `List`, `Advance`, `FundBlake`, `FundBTC`, `VerifyBlake`, `VerifyBTC`, `ClaimBTC`, `ClaimBlake`, `RefundBTC`, `RefundBlake`, `Complete`, `ExtractSecret`, `AnnounceBlakeFunding`, `ReceiveBlakeFunding`, `AnnounceBTCFunding`, `ReceiveBTCFunding`, `AnnounceBTCCLaimed`, `ReceiveBTCCLaimed`, `AnnounceBlakeClaimed`, `ReceiveBlakeClaimed`, `AnnounceBTCRefunded`, `ReceiveBTCRefunded`, `New`, `PublishOffer`, `AcceptOffer`, `ReceiveAccept` | `pkg/swap` |
 | `AgentPolicy` | — | `pkg/agent` |
 | `command_publish_market_offer`, `command_accept_market_match` | — | `pkg/marketflow` |
-| `build_parser`, `main` | — | `pkg/cli` |
+| `main` | — | `pkg/cmd/blake-swap-cli` |
 | — | `Seal`, `Open`, `DeriveKey` | `pkg/vault` |
 | — | — | `pkg/platform` |
 

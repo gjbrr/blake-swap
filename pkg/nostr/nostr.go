@@ -110,6 +110,10 @@ type Key struct {
 	Public string
 }
 
+// PublicKey returns the x-only public key, so a Key satisfies the engine's identity
+// interface without an adapter.
+func (k *Key) PublicKey() string { return k.Public }
+
 // NewKey derives the identity from a private key.
 func NewKey(secretHex string) (*Key, error) {
 	secret, err := keys.FromSecretHex(secretHex)

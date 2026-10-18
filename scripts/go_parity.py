@@ -355,17 +355,18 @@ MODULES: list[Module] = [
     ),
     Module(
         "src/swap_v2.py (commands)", "pkg/swap", "partial",
-        "the 58 commands as a Go API: inspection, state advance, funding, settlement, every announcement, and secret extraction are in; the offer handshake and market commands remain",
+        "the 58 commands as a Go API: the full settlement lifecycle and the offer/accept handshake are in, and a Go participant completes real swaps against the Python reference in both directions; market commands remain",
         ["Engine", "Status", "Show", "List", "Advance", "FundBlake", "FundBTC", "VerifyBlake", "VerifyBTC",
          "ClaimBTC", "ClaimBlake", "RefundBTC", "RefundBlake", "Complete", "ExtractSecret",
          "AnnounceBlakeFunding", "ReceiveBlakeFunding", "AnnounceBTCFunding", "ReceiveBTCFunding",
          "AnnounceBTCCLaimed", "ReceiveBTCCLaimed", "AnnounceBlakeClaimed", "ReceiveBlakeClaimed",
-         "AnnounceBTCRefunded", "ReceiveBTCRefunded"],
+         "AnnounceBTCRefunded", "ReceiveBTCRefunded", "New", "PublishOffer", "AcceptOffer", "ReceiveAccept"],
         ["command_status", "command_show", "command_advance", "command_list", "command_fund_blake", "command_fund_btc",
          "command_claim_btc", "command_claim_blake", "command_refund_btc", "command_refund_blake", "command_complete",
          "command_publish_blake_funded", "command_receive_blake_funded", "command_publish_btc_funded", "command_receive_btc_funded",
          "command_publish_btc_claimed", "command_receive_btc_claimed", "command_publish_blake_claimed", "command_receive_blake_claimed",
-         "command_publish_btc_refunded", "command_receive_btc_refunded", "command_extract_secret"],
+         "command_publish_btc_refunded", "command_receive_btc_refunded", "command_extract_secret",
+         "command_new", "command_publish_offer", "command_accept_offer", "command_receive_accept"],
     ),
     Module(
         "src/swap_agent.py", "pkg/agent", "pending",
@@ -378,9 +379,9 @@ MODULES: list[Module] = [
         [], ["command_publish_market_offer", "command_accept_market_match"],
     ),
     Module(
-        "src/swap_v2.py (CLI)", "pkg/cli + cmd/blake-swap-cli", "pending",
-        "the drop-in CLI: the same commands, arguments and output",
-        [], ["build_parser", "main"],
+        "src/swap_v2.py (CLI)", "cmd/blake-swap-cli", "partial",
+        "the drop-in CLI: the implemented commands with the reference's arguments and environment; the output text is not yet byte-identical",
+        [], ["main"],
     ),
     Module(
         "(new)", "pkg/vault", "ported",
@@ -432,6 +433,27 @@ def suite_rows() -> list[Suite]:
 # --------------------------------------------------------------------------
 # Rendering and checking
 # --------------------------------------------------------------------------
+
+
+def commandPath(go: str) -> str:
+    """The directory a mapping points at, for a package or a command."""
+    target = go.split(" ")[0]
+
+    if target.startswith("cmd/"):
+        return target
+
+    return "pkg/" + target.removeprefix("pkg/")
+
+
+def moduleExists(go: str) -> bool:
+    """Whether a mapping's Go target exists in the tree."""
+    target = go.split(" ")[0].removeprefix("pkg/")
+    path = ROOT / (go.split(" ")[0] if go.startswith("cmd/") else "pkg/" + target)
+
+    if go.startswith("cmd/"):
+        return path.is_dir()
+
+    return target in go_packages()
 
 
 def render() -> str:
@@ -540,12 +562,18 @@ def check() -> int:
         if module.status == "pending":
             continue
 
-        if package not in packages:
-            problems.append(f"{module.python}: Go package pkg/{package} does not exist")
+        if not moduleExists(module.go):
+            problems.append(
+                f"{module.python}: Go target {commandPath(module.go)} does not exist"
+            )
+
             continue
 
         for symbol in module.symbols:
-            if symbol and symbol not in symbols[package]:
+            if symbol == "" or module.go.startswith("cmd/"):
+                continue
+
+            if symbol not in symbols[package]:
                 problems.append(
                     f"{module.python}: pkg/{package} has no exported {symbol}"
                 )

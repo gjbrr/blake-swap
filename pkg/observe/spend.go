@@ -68,7 +68,7 @@ func FindSpend(
 	}
 
 	if len(populated) == 1 {
-		return verifyRecordedSpend(ctx, node, swap, ch, anchored{
+		return verifyRecordedSpend(ctx, node, swap, ch, cfg, anchored{
 			txID: txid, vout: vout,
 		}, populated[0])
 	}
@@ -191,6 +191,7 @@ func verifyRecordedSpend(
 	node Node,
 	swap *model.Swap,
 	ch chain.Chain,
+	cfg Config,
 	funding anchored,
 	known knownSpender,
 ) (*Spend, error) {
@@ -216,7 +217,14 @@ func verifyRecordedSpend(
 			// left the mempool. This participant created it, so recover it from
 			// the local wallet and decode the raw hex instead.
 			//
-			walletTx, walletErr := node.WalletTx(ctx, settlementTxID)
+			if cfg.Wallet == "" {
+				return nil, rejectf(
+					"durable state records %s %s txid but no recovery wallet is "+
+						"configured", chainName(ch), known.branch,
+				)
+			}
+
+			walletTx, walletErr := node.WalletTxIn(ctx, cfg.Wallet, settlementTxID)
 
 			if walletErr != nil {
 				return nil, rejectf(

@@ -94,6 +94,10 @@ func fundContract(t *testing.T, node *mempoolNode, swap *model.Swap, ch chain.Ch
 	txid := hex.EncodeToString(sum[:])
 	vout := int64(0)
 
+	// Each funding gets its own block, so two legs in one fake node do not overwrite
+	// each other's block contents — a scan reads blocks, not the UTXO map.
+	node.height++
+
 	blockHash := fmtHash(node.height)
 
 	tx := &chain.Tx{

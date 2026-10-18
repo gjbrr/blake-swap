@@ -88,6 +88,8 @@ commands:
   resume SWAP_ID
   watch-htlc SWAP_ID
   recovery-plan SWAP_ID
+  sync-funding SWAP_ID
+  sync-settlement SWAP_ID
   dashboard
   resume-all
 `)
@@ -162,6 +164,10 @@ func run(ctx context.Context, engine *swap.Engine, command string, args []string
 		return runWatchHTLC(ctx, engine, args)
 	case "recovery-plan":
 		return runRecoveryPlan(ctx, engine, args)
+	case "sync-funding":
+		return runSync(ctx, engine, args, engine.SyncFunding, "FUNDING")
+	case "sync-settlement":
+		return runSync(ctx, engine, args, engine.SyncSettlement, "SETTLEMENT")
 	case "dashboard":
 		return runDashboard(ctx, engine)
 	case "resume-all":
@@ -963,6 +969,39 @@ func runRecoveryPlan(ctx context.Context, engine *swap.Engine, args []string) er
 	}
 
 	fmt.Println()
+
+	return nil
+}
+
+// runSync reconciles one swap's state against confirmed chain history.
+func runSync(
+	ctx context.Context,
+	engine *swap.Engine,
+	args []string,
+	call func(context.Context, string) (*swap.SyncResult, error),
+	label string,
+) error {
+	if len(args) < 1 {
+		return fmt.Errorf("%s reconciliation requires a swap id", strings.ToLower(label))
+	}
+
+	result, err := call(ctx, args[0])
+
+	if err != nil {
+		return err
+	}
+
+	fmt.Println(label, "CHAIN RECONCILIATION")
+	fmt.Println("=====================")
+	fmt.Println("swap id:", result.SwapID)
+	fmt.Println("start:  ", result.Start)
+	fmt.Println("end:    ", result.End)
+
+	if len(result.Recovered) == 0 {
+		fmt.Println("recovered: nothing")
+	} else {
+		fmt.Println("recovered:", strings.Join(result.Recovered, ", "))
+	}
 
 	return nil
 }

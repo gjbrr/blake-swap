@@ -29,16 +29,21 @@ type mempoolNode struct {
 	txs     map[string]*chain.Tx
 	blocks  map[string]*chain.VerboseBlock
 	utxos   map[string]*chain.TxOut
+
+	// walletEntries and walletTxs are what any bound wallet reports.
+	walletEntries []chain.WalletEntry
+	walletTxs     map[string]*chain.WalletTx
 }
 
 func newMempoolNode() *mempoolNode {
 	return &mempoolNode{
-		Node:    nil,
-		height:  100,
-		mempool: map[string]bool{},
-		txs:     map[string]*chain.Tx{},
-		blocks:  map[string]*chain.VerboseBlock{},
-		utxos:   map[string]*chain.TxOut{},
+		Node:      nil,
+		height:    100,
+		mempool:   map[string]bool{},
+		txs:       map[string]*chain.Tx{},
+		blocks:    map[string]*chain.VerboseBlock{},
+		utxos:     map[string]*chain.TxOut{},
+		walletTxs: map[string]*chain.WalletTx{},
 	}
 }
 
@@ -46,24 +51,54 @@ func (m *mempoolNode) Height(context.Context) (int64, error) { return m.height, 
 
 // Bind answers with a wallet that can see the HTLC, which is all the recovery plan
 // asks about.
-func (m *mempoolNode) Bind(name string) chain.Wallet { return &stubWallet{name: name} }
+func (m *mempoolNode) Bind(name string) chain.Wallet {
+	if m.walletEntries == nil {
+		m.walletEntries = nil
+	}
+
+	if m.walletTxs == nil {
+		m.walletTxs = map[string]*chain.WalletTx{}
+	}
+
+	return &stubWallet{name: name, node: m}
+}
 
 // ListWallets reports the two participants.
 func (m *mempoolNode) ListWallets(context.Context) ([]string, error) {
 	return []string{"alice", "bob"}, nil
 }
 
-// stubWallet is a wallet with no signing ability, only address knowledge.
+// stubWallet is a wallet with no signing ability: it knows addresses and the
+// transactions the node recorded, which is all the recovery paths read from it.
 type stubWallet struct {
 	chain.Wallet
 
 	name string
+	node *mempoolNode
 }
 
 func (w *stubWallet) Name() string { return w.name }
 
 func (w *stubWallet) AddressInfo(_ context.Context, address string) (*chain.AddressInfo, error) {
 	return &chain.AddressInfo{Address: address, Solvable: true}, nil
+}
+
+func (w *stubWallet) ListTransactions(context.Context, int64, int64) ([]chain.WalletEntry, error) {
+	return w.node.walletEntries, nil
+}
+
+func (w *stubWallet) Decode(ctx context.Context, hexTx string) (*chain.Tx, error) {
+	return w.node.DecodeRaw(ctx, hexTx)
+}
+
+func (w *stubWallet) Tx(_ context.Context, txid string) (*chain.WalletTx, error) {
+	tx, ok := w.node.walletTxs[txid]
+
+	if !ok {
+		return nil, fmt.Errorf("Invalid or non-wallet transaction id")
+	}
+
+	return tx, nil
 }
 
 func (m *mempoolNode) BlockHash(_ context.Context, height int64) (string, error) {

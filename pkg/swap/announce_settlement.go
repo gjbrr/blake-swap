@@ -47,6 +47,25 @@ func (e *Engine) ExtractSecret(ctx context.Context, swapID string) (string, erro
 		return "", fmt.Errorf("extract-secret requires state BTC_CLAIMED")
 	}
 
+	secret, err := e.extractSecretInto(ctx, swap)
+
+	if err != nil {
+		return "", err
+	}
+
+	if err := e.save(ctx, swap); err != nil {
+		return "", err
+	}
+
+	return secret, nil
+}
+
+// extractSecretInto reads the preimage into the given record without saving it.
+//
+// It is what a caller that is already mid-transition uses: re-loading the record there
+// would read the state as it was before the transition, and the check below would
+// refuse a claim that has just been applied.
+func (e *Engine) extractSecretInto(ctx context.Context, swap *model.Swap) (string, error) {
 	if swap.BTCCLaimTxID == nil || *swap.BTCCLaimTxID == "" {
 		return "", fmt.Errorf("swap has no Bitcoin claim txid")
 	}
@@ -98,10 +117,6 @@ func (e *Engine) ExtractSecret(ctx context.Context, swapID string) (string, erro
 		if hex.EncodeToString(sum[:]) == swap.SecretHash {
 			revealed := item
 			swap.RevealedSecretHex = &revealed
-
-			if err := e.save(ctx, swap); err != nil {
-				return "", err
-			}
 
 			return revealed, nil
 		}

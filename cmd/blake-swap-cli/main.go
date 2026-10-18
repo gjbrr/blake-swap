@@ -9,6 +9,7 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -25,6 +26,7 @@ import (
 	"github.com/gjbrr/blake-swap/pkg/fund"
 	"github.com/gjbrr/blake-swap/pkg/model"
 	"github.com/gjbrr/blake-swap/pkg/nostr"
+	"github.com/gjbrr/blake-swap/pkg/reconcile"
 	"github.com/gjbrr/blake-swap/pkg/store"
 	"github.com/gjbrr/blake-swap/pkg/swap"
 )
@@ -81,6 +83,10 @@ commands:
   publish-blake-claimed SWAP_ID | receive-blake-claimed SWAP_ID
   publish-btc-refunded SWAP_ID | receive-btc-refunded SWAP_ID
   complete SWAP_ID
+  reconcile SWAP_ID [--json]
+  next SWAP_ID
+  resume SWAP_ID
+  watch-htlc SWAP_ID
 `)
 }
 
@@ -143,6 +149,14 @@ func run(ctx context.Context, engine *swap.Engine, command string, args []string
 		return runSettlement(ctx, engine, args, engine.ReceiveBTCRefunded, "btc-refunded")
 	case "complete":
 		return runComplete(ctx, engine, args)
+	case "reconcile":
+		return runReconcile(ctx, engine, args)
+	case "next":
+		return runNext(ctx, engine, args)
+	case "resume":
+		return runResume(ctx, engine, args)
+	case "watch-htlc":
+		return runWatchHTLC(ctx, engine, args)
 	}
 
 	return fmt.Errorf("unknown command: %s", command)
@@ -598,6 +612,283 @@ func runComplete(ctx context.Context, engine *swap.Engine, args []string) error 
 
 	return nil
 }
+
+// runReconcile prints the protocol report, as JSON or as text.
+func runReconcile(ctx context.Context, engine *swap.Engine, args []string) error {
+	flags := flag.NewFlagSet("reconcile", flag.ContinueOnError)
+
+	asJSON := flags.Bool("json", false, "machine-readable report")
+
+	positional, err := parsePositional(flags, args, 1)
+
+	if err != nil {
+		return err
+	}
+
+	if len(positional) != 1 {
+		return errors.New("reconcile requires a swap id")
+	}
+
+	report, err := engine.Reconcile(ctx, positional[0])
+
+	if err != nil {
+		return err
+	}
+
+	if *asJSON {
+		encoded, err := json.MarshalIndent(reportJSON(report), "", "  ")
+
+		if err != nil {
+			return err
+		}
+
+		fmt.Println(string(encoded))
+
+		return nil
+	}
+
+	printReconcile(report)
+
+	return nil
+}
+
+// runNext prints the recommended action.
+func runNext(ctx context.Context, engine *swap.Engine, args []string) error {
+	if len(args) < 1 {
+		return errors.New("next requires a swap id")
+	}
+
+	action, class, reason, err := engine.Next(ctx, args[0])
+
+	if err != nil {
+		return err
+	}
+
+	fmt.Println("swap id:", args[0])
+	fmt.Println("next action:", action)
+	fmt.Println("class:", class)
+	fmt.Println("reason:", reason)
+
+	return nil
+}
+
+// runResume performs the recommended action once.
+func runResume(ctx context.Context, engine *swap.Engine, args []string) error {
+	if len(args) < 1 {
+		return errors.New("resume requires a swap id")
+	}
+
+	result, err := engine.Resume(ctx, args[0])
+
+	if err != nil {
+		return err
+	}
+
+	fmt.Println("swap id:", result.SwapID)
+	fmt.Println("next action:", result.Action)
+	fmt.Println("class:", result.Class)
+	fmt.Println("reason:", result.Reason)
+
+	if result.Performed {
+		fmt.Println("performed: yes")
+		fmt.Println("txid:", result.TxID)
+		fmt.Println("state:", result.State)
+	} else {
+		fmt.Println("performed: no")
+	}
+
+	return nil
+}
+
+// runWatchHTLC records the HTLC in the watch-only wallet.
+func runWatchHTLC(ctx context.Context, engine *swap.Engine, args []string) error {
+	if len(args) < 1 {
+		return errors.New("watch-htlc requires a swap id")
+	}
+
+	status, err := engine.WatchHTLC(ctx, args[0])
+
+	if err != nil {
+		return err
+	}
+
+	fmt.Println("WATCH-ONLY HTLC")
+	fmt.Println("===============")
+	fmt.Println("chain:  ", resultChainLabel(status.Chain))
+	fmt.Println("wallet: ", status.Wallet)
+	fmt.Println("address:", status.Address)
+
+	if status.Imported {
+		fmt.Println("PASS: descriptor imported; this HTLC stays solvable without the signing wallet")
+	} else {
+		fmt.Println("WARNING: the HTLC was NOT recorded in a watch-only wallet:", status.Reason)
+	}
+
+	return nil
+}
+
+// reportJSON renders the report with the reference's key names, so a Python
+// dashboard and a Go one read the same document.
+func reportJSON(report *reconcile.Report) map[string]any {
+	observation := func(observation reconcile.Observation) map[string]any {
+		out := map[string]any{
+			"status": string(observation.Status),
+		}
+
+		if observation.Branch != reconcile.BranchNone {
+			out["branch"] = string(observation.Branch)
+		}
+
+		if observation.TxID != "" {
+			out["txid"] = observation.TxID
+			out["vout"] = observation.Vout
+		}
+
+		if observation.BlockHash != "" {
+			out["blockhash"] = observation.BlockHash
+		}
+
+		if observation.Confirmations > 0 {
+			out["confirmations"] = observation.Confirmations
+		}
+
+		if observation.Reason != "" {
+			out["reason"] = observation.Reason
+		}
+
+		return out
+	}
+
+	readiness := map[string]any{
+		"checked": report.Readiness.Checked,
+		"action":  string(report.Readiness.Action),
+	}
+
+	if report.Readiness.Ready != nil {
+		readiness["ready"] = *report.Readiness.Ready
+	}
+
+	if report.Readiness.Wallet != "" {
+		readiness["wallet"] = report.Readiness.Wallet
+	}
+
+	if report.Readiness.Trusted != nil {
+		readiness["trusted_balance"] = report.Readiness.Trusted.String()
+	}
+
+	if report.Readiness.Required != nil {
+		readiness["required_balance"] = report.Readiness.Required.String()
+	}
+
+	if len(report.Readiness.Reasons) > 0 {
+		readiness["reasons"] = report.Readiness.Reasons
+	}
+
+	return map[string]any{
+		"swap_id":             report.SwapID,
+		"participant_pubkey":  report.ParticipantPubkey,
+		"protocol_role":       string(report.ProtocolRole),
+		"counterparty_pubkey": report.Counterparty,
+		"checkpoint_state":    string(report.CheckpointState),
+		"decision_class":      string(report.DecisionClass),
+		"negotiation_status":  report.NegotiationStatus,
+		"negotiation_reason":  report.NegotiationReason,
+		"secret": map[string]any{
+			"known":        report.Secret.Known,
+			"source":       report.Secret.Source,
+			"hash_matches": report.Secret.HashMatches,
+		},
+		"heights": map[string]any{
+			"blake": report.Heights.Blake,
+			"btc":   report.Heights.BTC,
+		},
+		"timeouts": map[string]any{
+			"blake":                  report.Timeouts.BlakeTimeout,
+			"btc":                    report.Timeouts.BTCTimeout,
+			"blake_blocks_remaining": report.Timeouts.BlakeBlocksRemaining,
+			"btc_blocks_remaining":   report.Timeouts.BTCBlocksRemaining,
+		},
+		"blake":       observation(report.Blake),
+		"btc":         observation(report.BTC),
+		"next_action": string(report.NextAction),
+		"reason":      report.Reason,
+		"readiness":   readiness,
+	}
+}
+
+// printReconcile is the human form of the report.
+func printReconcile(report *reconcile.Report) {
+	fmt.Println()
+	fmt.Println("BLAKE SWAP RECONCILIATION")
+	fmt.Println("=========================")
+	fmt.Println("swap id:          ", report.SwapID)
+	fmt.Println("participant:      ", report.ParticipantPubkey)
+	fmt.Println("protocol role:    ", report.ProtocolRole)
+	fmt.Println("counterparty:     ", report.Counterparty)
+	fmt.Println("checkpoint state: ", report.CheckpointState)
+	fmt.Println()
+	fmt.Println("CHAIN REALITY")
+	fmt.Println("-------------")
+	fmt.Println("BLAKE:", chainObservation(report.Blake))
+	fmt.Println("BTC:  ", chainObservation(report.BTC))
+	fmt.Println()
+	fmt.Println("SECRET")
+	fmt.Println("------")
+	fmt.Println("known: ", yesNo(report.Secret.Known))
+	fmt.Println("source:", report.Secret.Source)
+	fmt.Println()
+	fmt.Println("TIMEOUT DISTANCE")
+	fmt.Println("----------------")
+	fmt.Println("BTC blocks:  ", report.Timeouts.BTCBlocksRemaining)
+	fmt.Println("BLAKE blocks:", report.Timeouts.BlakeBlocksRemaining)
+	fmt.Println()
+	fmt.Println("DECISION")
+	fmt.Println("--------")
+	fmt.Println("class:      ", report.DecisionClass)
+	fmt.Println("next action:", report.NextAction)
+	fmt.Println("reason:     ", report.Reason)
+
+	if report.Readiness.Checked {
+		fmt.Println()
+		fmt.Println("EXECUTION READINESS")
+		fmt.Println("-------------------")
+
+		if report.Readiness.Ready != nil {
+			fmt.Println("ready:", yesNo(*report.Readiness.Ready))
+		}
+
+		fmt.Println("wallet:", report.Readiness.Wallet)
+
+		for _, reason := range report.Readiness.Reasons {
+			fmt.Println("reason:", reason)
+		}
+	}
+
+	fmt.Println()
+}
+
+// chainObservation renders one chain's answer.
+func chainObservation(observation reconcile.Observation) string {
+	text := string(observation.Status)
+
+	if observation.Branch != reconcile.BranchNone {
+		text += " / " + string(observation.Branch)
+	}
+
+	return text
+}
+
+// yesNo renders a boolean the way the reference does.
+func yesNo(value bool) string {
+	if value {
+		return "yes"
+	}
+
+	return "no"
+}
+
+// resultChainLabel is a chain's display name.
+func resultChainLabel(ch chain.Chain) string { return chainLabel(ch) }
 
 // ---------------------------------------------------------------- helpers
 

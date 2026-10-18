@@ -110,8 +110,69 @@ func loadRig(t *testing.T) *rig {
 	}
 
 	ensureWallets(t, r)
+	ensureCapital(t, r)
 
 	return r
+}
+
+// ensureCapital gives both participants enough on both chains to swap.
+//
+// A fresh rig mines its coinbase into one wallet and has nothing else. The Python
+// suites bootstrap capital in their own setup; an interop test has to do the same,
+// and doing it here also leaves the rig in the state the suites expect.
+func ensureCapital(t *testing.T, r *rig) {
+	t.Helper()
+
+	// Bitcoin can always be minted.
+	for _, wallet := range []string{"alice", "bob"} {
+		if balanceOf(t, r.btcCLI, r.btcDatadir, wallet) >= 10 {
+			continue
+		}
+
+		address := strings.TrimSpace(cliOutput(t, r.btcCLI, r.btcDatadir,
+			"-rpcwallet="+wallet, "getnewaddress"))
+
+		cliOutput(t, r.btcCLI, r.btcDatadir, "-rpcwallet="+wallet,
+			"generatetoaddress", "101", address)
+	}
+
+	// BLAKE issuance is finite: the rig's mining wallet is the only source on a new
+	// chain, so it is swept once into Alice and recycled from there.
+	if balanceOf(t, r.blakeCLI, r.blakeDatadir, "alice") >= 0.05 {
+		return
+	}
+
+	aliceAddress := strings.TrimSpace(cliOutput(t, r.blakeCLI, r.blakeDatadir,
+		"-rpcwallet=alice", "getnewaddress"))
+
+	wallets := cliOutput(t, r.blakeCLI, r.blakeDatadir, "listwallets")
+
+	if !strings.Contains(wallets, `"rig"`) {
+		return
+	}
+
+	if balanceOf(t, r.blakeCLI, r.blakeDatadir, "rig") <= 0 {
+		return
+	}
+
+	cliOutput(t, r.blakeCLI, r.blakeDatadir, "-rpcwallet=rig", "sendall", aliceAddress)
+	cliOutput(t, r.blakeCLI, r.blakeDatadir, "generatetoaddress", "1", aliceAddress)
+}
+
+// balanceOf reads one wallet's trusted balance.
+func balanceOf(t *testing.T, cli, datadir, wallet string) float64 {
+	t.Helper()
+
+	output := strings.TrimSpace(cliOutput(t, cli, datadir,
+		"-rpcwallet="+wallet, "getbalance", "*", "1"))
+
+	value, err := strconv.ParseFloat(output, 64)
+
+	if err != nil {
+		return 0
+	}
+
+	return value
 }
 
 // ensureWallets makes sure both participant wallets exist on both chains.
@@ -281,6 +342,8 @@ func TestCrossImplHandshakeAndSettlement(t *testing.T) {
 
 			fundBothLegs(t, r, alice, bob, messages, id)
 
+			assertReconcileAgrees(t, r, alice, bob, messages, id)
+
 			run(t, r, alice, messages, "claim-btc", id)
 			run(t, r, alice, messages, "publish-btc-claimed", id)
 
@@ -330,6 +393,92 @@ func TestCrossImplRefundBothLegs(t *testing.T) {
 			assertState(t, r, bob, messages, id, "BTC_REFUNDED")
 		})
 	}
+}
+
+// assertReconcileAgrees compares the two implementations' protocol reports.
+//
+// Each side reports on its own record, but the *facts* about the chains and the
+// checkpoint must agree — that is the whole point of a shared protocol. The
+// recommended action is role-specific, so it is checked against what the role can
+// legitimately do rather than against the other side.
+func assertReconcileAgrees(t *testing.T, r *rig, alice, bob *side, messages, id string) {
+	t.Helper()
+
+	aliceReport := reconcileJSON(t, r, alice, messages, id)
+	bobReport := reconcileJSON(t, r, bob, messages, id)
+
+	// The checkpoint and the chains are role-independent facts, so the two
+	// implementations must agree about them.
+	if aliceReport["checkpoint_state"] != bobReport["checkpoint_state"] {
+		t.Fatalf(
+			"the two implementations disagree about the checkpoint: go=%v python=%v",
+			aliceReport["checkpoint_state"], bobReport["checkpoint_state"],
+		)
+	}
+
+	if aliceReport["checkpoint_state"] != "BTC_FUNDED" {
+		t.Fatalf("the checkpoint is %v, want BTC_FUNDED", aliceReport["checkpoint_state"])
+	}
+
+	for _, leg := range []string{"blake", "btc"} {
+		aliceLeg, _ := aliceReport[leg].(map[string]any)
+		bobLeg, _ := bobReport[leg].(map[string]any)
+
+		if aliceLeg["status"] != bobLeg["status"] {
+			t.Fatalf(
+				"the two implementations disagree about %s: go=%v python=%v",
+				leg, aliceLeg["status"], bobLeg["status"],
+			)
+		}
+
+		if aliceLeg["status"] != "funded" {
+			t.Fatalf("%s is %v, want funded at this point", leg, aliceLeg["status"])
+		}
+	}
+
+	aliceHeights, _ := aliceReport["heights"].(map[string]any)
+	bobHeights, _ := bobReport["heights"].(map[string]any)
+
+	if aliceHeights["blake"] != bobHeights["blake"] || aliceHeights["btc"] != bobHeights["btc"] {
+		t.Fatalf("heights disagree: go=%v python=%v", aliceHeights, bobHeights)
+	}
+
+	// The recommendation is role-specific, so it is checked against what each role
+	// may legitimately do rather than against the other side: Alice claims Bitcoin,
+	// and Bob waits for her to.
+	aliceAction, _ := aliceReport["next_action"].(string)
+	aliceClass, _ := aliceReport["decision_class"].(string)
+	bobAction, _ := bobReport["next_action"].(string)
+	bobClass, _ := bobReport["decision_class"].(string)
+
+	if aliceAction != "claim-btc" || aliceClass != "actionable" {
+		t.Fatalf("alice: action %q class %q, want claim-btc/actionable", aliceAction, aliceClass)
+	}
+
+	if bobAction != "wait" || bobClass != "waiting" {
+		t.Fatalf("bob: action %q class %q, want wait/waiting", bobAction, bobClass)
+	}
+}
+
+// reconcileJSON runs `reconcile --json` on whichever implementation this side uses.
+func reconcileJSON(t *testing.T, r *rig, s *side, messages, id string) map[string]any {
+	t.Helper()
+
+	output := run(t, r, s, messages, "reconcile", id, "--json")
+
+	start := strings.Index(output, "{")
+
+	if start < 0 {
+		t.Fatalf("no report in output:\n%s", output)
+	}
+
+	var report map[string]any
+
+	if err := json.Unmarshal([]byte(output[start:]), &report); err != nil {
+		t.Fatalf("report is not valid JSON: %v\n%s", err, output)
+	}
+
+	return report
 }
 
 // directions is the two participant arrangements.

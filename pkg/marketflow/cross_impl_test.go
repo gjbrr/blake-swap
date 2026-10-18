@@ -197,3 +197,113 @@ print(json.dumps(event))
 		t.Fatalf("roles = %s/%s", offer.MakerRole, offer.TakerRole)
 	}
 }
+
+// TestGoTakeAndCancelAreReadableByPython builds a take and a cancel in Go and has
+// the reference validate them against the offer they belong to.
+func TestGoTakeAndCancelAreReadableByPython(t *testing.T) {
+	keyPath, secret := keyFile(t)
+
+	makerKey, err := nostr.NewKey(secret)
+
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	offerEvent, _, err := marketflow.BuildOffer(makerKey, marketflow.BuildOfferOptions{
+		BlakeAmount: amount.Blake(100_000),
+		BTCSats:     25_000,
+		Minutes:     30,
+		Direction:   market.BTCForBlake,
+		CreatedAt:   time.Now().Unix(),
+	})
+
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The taker is a second participant; the reference needs its key to sign the
+	// take it validates, and it must be the same identity the Go side used.
+	takerSecret := strings.Repeat("22", 32)
+	takerKey, err := nostr.NewKey(takerSecret)
+
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	offer, err := marketflow.ParseOffer(offerEvent, time.Now())
+
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	takeEvent, _, err := marketflow.BuildTake(takerKey, marketflow.BuildTakeOptions{
+		Offer: *offer, CreatedAt: time.Now().Unix(),
+	})
+
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cancelEvent, _, err := marketflow.BuildCancel(makerKey, marketflow.BuildCancelOptions{
+		OfferID: offer.EventID, CreatedAt: time.Now().Unix(),
+	})
+
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	offerJSON, err := json.Marshal(offerEvent)
+
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	takeJSON, err := json.Marshal(takeEvent)
+
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cancelJSON, err := json.Marshal(cancelEvent)
+
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	script := fmt.Sprintf(`
+import json, sys
+sys.path.insert(0, %q)
+import swap_v2
+
+offer_event = json.loads(%q)
+take_event = json.loads(%q)
+cancel_event = json.loads(%q)
+
+offer_message, _ = swap_v2.nostr_parse_market_offer_event(offer_event)
+message = swap_v2.nostr_validate_market_take_event(
+    take_event, offer_event, offer_message, offer_event["id"],
+)
+print("take ok", message["direction"], message["maker_role"], message["taker_role"])
+
+# A cancel is checked against the offer's author.
+if cancel_event["pubkey"] != offer_event["pubkey"]:
+    raise SystemExit("cancel author mismatch")
+parsed_cancel = json.loads(cancel_event["content"])
+if parsed_cancel["offer_id"] != offer_event["id"]:
+    raise SystemExit("cancel does not reference the offer")
+print("cancel ok", parsed_cancel["offer_id"][:8])
+`, filepath.Join(repoRoot(t), "src"), string(offerJSON), string(takeJSON), string(cancelJSON))
+
+	output := runPython(t, script, []string{
+		"BLAKE_SWAP_PARTICIPANT_KEY_FILE=" + keyPath,
+		"BLAKE_SWAP_ROLE=bob",
+	})
+
+	if !strings.Contains(output, "take ok btc-for-blake bob alice") {
+		t.Fatalf("the reference did not accept the Go take:\n%s", output)
+	}
+
+	if !strings.Contains(output, "cancel ok") {
+		t.Fatalf("the reference did not accept the Go cancel:\n%s", output)
+	}
+}

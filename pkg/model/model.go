@@ -226,12 +226,12 @@ func IsSwapID(s string) bool {
 		return false
 	}
 
+	// Lowercase only. The wire schema owns this rule and spells it
+	// `^[0-9a-f]{12}$`; accepting uppercase here would let this port name a
+	// swap in a file that no message could ever refer to, and the two
+	// implementations would disagree about which records are canonical.
 	for _, r := range s {
-		isDigit := r >= '0' && r <= '9'
-		isLower := r >= 'a' && r <= 'f'
-		isUpper := r >= 'A' && r <= 'F'
-
-		if !isDigit && !isLower && !isUpper {
+		if !(r >= '0' && r <= '9') && !(r >= 'a' && r <= 'f') {
 			return false
 		}
 	}

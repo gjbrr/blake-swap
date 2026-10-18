@@ -344,9 +344,10 @@ MODULES: list[Module] = [
         [], ["nostr_send_message", "nostr_receive_message", "nostr_cached_market_events"],
     ),
     Module(
-        "src/swap_v2.py (durable state)", "pkg/store", "pending",
+        "src/swap_v2.py (durable state)", "pkg/store", "ported",
         "workflow store: atomic swap records, the message spool, the archive",
-        [], ["atomic_write_json", "load_local_swap", "local_swap_paths"],
+        ["File", "Memory", "SupersededPlaceholders", "ArchiveSuperseded"],
+        ["atomic_write_json", "load_local_swap", "local_swap_paths", "file_send_message", "file_receive_message"],
     ),
     Module(
         "src/swap_v2.py (commands)", "pkg/swap", "pending",

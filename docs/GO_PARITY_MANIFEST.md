@@ -6,7 +6,7 @@ It records what replaces each part of the Python engine in Go, and what has not 
 
 Statuses: **ported** (behaviour and tests), **partial** (in progress), **pending** (not started).
 
-## Modules (21/29 ported)
+## Modules (22/29 ported)
 
 | Python | Go | Status | Contents |
 |---|---|---|---|
@@ -32,7 +32,7 @@ Statuses: **ported** (behaviour and tests), **partial** (in progress), **pending
 | `src/swap_v2.py (settlement)` | `pkg/settle` | ported | the PSBT pipeline, fee/vsize convergence, broadcast and rebroadcast |
 | `src/swap_v2.py (coordination)` | `pkg/coord` | pending | one Transport interface: the encrypted store spool, or Nostr |
 | `src/swap_v2.py (relays)` | `pkg/nostr` | pending | relay sessions over a JS WebSocket bridge, publish report, REQ/EOSE, cache |
-| `src/swap_v2.py (durable state)` | `pkg/store` | pending | workflow store: atomic swap records, the message spool, the archive |
+| `src/swap_v2.py (durable state)` | `pkg/store` | ported | workflow store: atomic swap records, the message spool, the archive |
 | `src/swap_v2.py (commands)` | `pkg/swap` | pending | the 58 commands as a Go API, one function per command |
 | `src/swap_agent.py` | `pkg/agent` | pending | the autonomous driver's step policy and budget |
 | `src/swap_v2.py (market flow)` | `pkg/marketflow` | pending | offer, take, match, cancel, accept, import as a flow |
@@ -66,7 +66,7 @@ Statuses: **ported** (behaviour and tests), **partial** (in progress), **pending
 | `build_dynamic_settlement_spend`, `_decoded_spend_fee_sats`, `_decoded_tx_vsize` | `Build`, `Claim`, `Refund`, `Broadcast`, `SpendFee` | `pkg/settle` |
 | `file_send_message`, `file_receive_message`, `send_message` | — | `pkg/coord` |
 | `nostr_send_message`, `nostr_receive_message`, `nostr_cached_market_events` | — | `pkg/nostr` |
-| `atomic_write_json`, `load_local_swap`, `local_swap_paths` | — | `pkg/store` |
+| `atomic_write_json`, `load_local_swap`, `local_swap_paths`, `file_send_message`, `file_receive_message` | `File`, `Memory`, `SupersededPlaceholders`, `ArchiveSuperseded` | `pkg/store` |
 | `command_new`, `command_show`, `command_advance` | — | `pkg/swap` |
 | `AgentPolicy` | — | `pkg/agent` |
 | `command_publish_market_offer`, `command_accept_market_match` | — | `pkg/marketflow` |

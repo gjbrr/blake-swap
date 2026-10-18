@@ -1,0 +1,119 @@
+package marketflow
+
+import (
+	"sort"
+	"time"
+
+	"github.com/gjbrr/blake-swap/pkg/event"
+)
+
+// Entry is one advertisement with the state the evidence supports.
+//
+// The point of an entry is that a client never derives state itself: OPEN, MATCHED,
+// CANCELLED and EXPIRED are decided here, from authenticated events, and a UI renders
+// what it is told. Two clients that each re-derived the rules would eventually
+// disagree about whether an offer was still takeable.
+type Entry struct {
+	// Offer is the parsed, authenticated advertisement.
+	Offer ListedOffer
+	// State is what the evidence makes true.
+	State OfferState
+	// CancelID and MatchID name the event that settled the offer, when one did.
+	CancelID string
+	MatchID  string
+}
+
+// EventID is the offer event's id.
+func (e Entry) EventID() string { return e.Offer.EventID }
+
+// Open reports whether the offer can still be taken.
+func (e Entry) Open() bool { return e.State == StateOpen }
+
+// Book derives canonical state for every valid offer in a set of market events.
+//
+// events may be any mixture of offers, takes, matches and cancellations, from any
+// number of relays and from local storage, in any order: duplicates are dropped by
+// event id, and an event that does not verify is not evidence of anything. That is
+// why the caller can simply concatenate a relay's recent read with the local cache —
+// a relay read is a discovery window, not the protocol's history, and the cache is
+// what makes a cancellation seen yesterday still count today.
+//
+// Invalid offers are skipped rather than failing the scan: a marketplace is a stream
+// from strangers, and one malformed advertisement must not blind a client to the rest.
+func Book(events []event.Event, now time.Time) ([]Entry, error) {
+	if now.IsZero() {
+		now = time.Now()
+	}
+
+	verified := make([]event.Event, 0, len(events))
+	seen := make(map[string]bool, len(events))
+
+	for _, e := range events {
+		if e.ID == "" || seen[e.ID] {
+			continue
+		}
+
+		if err := event.Verify(e, now); err != nil {
+			continue
+		}
+
+		seen[e.ID] = true
+		verified = append(verified, e)
+	}
+
+	entries := make([]Entry, 0, len(verified))
+
+	for _, e := range verified {
+		//
+		// Only a canonical, protocol-valid offer becomes a candidate. Everything
+		// else in the set is evidence *about* offers, not an offer itself.
+		//
+		if _, err := ParseOffer(e, now); err != nil {
+			continue
+		}
+
+		derived, err := DeriveState(e, verified, now.Unix())
+
+		if err != nil {
+			continue
+		}
+
+		entries = append(entries, Entry{
+			Offer:    derived.Offer,
+			State:    derived.State,
+			CancelID: derived.CancelID,
+			MatchID:  derived.MatchID,
+		})
+	}
+
+	// Newest first, and by id within the same second, so two clients listing the same
+	// evidence produce the same order.
+	sort.SliceStable(entries, func(i, j int) bool {
+		left, right := entries[i].Offer, entries[j].Offer
+
+		if left.CreatedAt != right.CreatedAt {
+			return left.CreatedAt > right.CreatedAt
+		}
+
+		return left.EventID > right.EventID
+	})
+
+	return entries, nil
+}
+
+// OpenOffers returns the entries that are open now, in book order.
+//
+// This is the older, human-facing view of the market: expired offers and valid
+// cancellations are hidden, because somebody looking for a trade is not helped by
+// either.
+func OpenOffers(entries []Entry) []Entry {
+	open := make([]Entry, 0, len(entries))
+
+	for _, entry := range entries {
+		if entry.Open() {
+			open = append(open, entry)
+		}
+	}
+
+	return open
+}

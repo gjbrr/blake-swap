@@ -377,10 +377,11 @@ MODULES: list[Module] = [
     ),
     Module(
         "src/swap_v2.py (market flow)", "pkg/marketflow", "partial",
-        "market events: offer, take and cancel are built, parsed, and exchanged with the reference; match and state derivation remain",
-        ["BuildOffer", "ParseOffer", "BuildTake", "ParseTake", "BuildCancel", "ParseCancel"],
+        "market events: offer, take, cancel and match are built, parsed, and validated by the reference; state derivation and the market commands remain",
+        ["BuildOffer", "ParseOffer", "BuildTake", "ParseTake", "BuildCancel", "ParseCancel", "BuildMatch", "ParseMatch"],
         ["build_market_offer_v2_event", "nostr_parse_market_offer_event", "build_market_take_event",
-         "nostr_validate_market_take_event", "build_market_cancel_event"],
+         "nostr_validate_market_take_event", "build_market_cancel_event", "build_market_match_event",
+         "validate_market_match_evidence"],
     ),
     Module(
         "src/swap_v2.py (CLI)", "cmd/blake-swap-cli", "partial",

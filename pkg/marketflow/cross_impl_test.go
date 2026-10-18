@@ -198,6 +198,215 @@ print(json.dumps(event))
 	}
 }
 
+// rigEnv returns the environment the reference needs to reach the local rig.
+func rigEnv(t *testing.T, extra ...string) []string {
+	t.Helper()
+
+	root := os.Getenv("BLAKE_SWAP_TEST_ROOT")
+
+	if root == "" {
+		home, err := os.UserHomeDir()
+
+		if err != nil {
+			t.Skip("no home directory")
+		}
+
+		root = filepath.Join(home, ".blake-swap-test")
+	}
+
+	data, err := os.ReadFile(filepath.Join(root, "rig-env.json"))
+
+	if err != nil {
+		t.Skipf("no test rig at %s", root)
+	}
+
+	var env struct {
+		BTCDatadir   string `json:"btc_datadir"`
+		BlakeDatadir string `json:"blake_datadir"`
+		BTCCLI       string `json:"btc_cli"`
+		BlakeCLI     string `json:"blake_cli"`
+	}
+
+	if err := json.Unmarshal(data, &env); err != nil {
+		t.Skipf("rig-env.json is unreadable: %v", err)
+	}
+
+	return append([]string{
+		"BLAKE_SWAP_BTC_DATADIR=" + env.BTCDatadir,
+		"BLAKE_SWAP_BLAKE_DATADIR=" + env.BlakeDatadir,
+		"BLAKE_SWAP_BTC_CLI=" + env.BTCCLI,
+		"BLAKE_SWAP_BLAKE_CLI=" + env.BlakeCLI,
+	}, extra...)
+}
+
+// TestGoMatchIsReadableByPython has the reference validate a Go-built match against
+// the exact offer and take it references.
+func TestGoMatchIsReadableByPython(t *testing.T) {
+	keyPath, secret := keyFile(t)
+
+	makerKey, err := nostr.NewKey(secret)
+
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	takerKey, err := nostr.NewKey(strings.Repeat("22", 32))
+
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	offerEvent, _, err := marketflow.BuildOffer(makerKey, marketflow.BuildOfferOptions{
+		BlakeAmount: amount.Blake(100_000),
+		BTCSats:     25_000,
+		Minutes:     30,
+		Direction:   market.BlakeForBTC,
+		CreatedAt:   time.Now().Unix(),
+	})
+
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	offer, err := marketflow.ParseOffer(offerEvent, time.Now())
+
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	takeEvent, take, err := marketflow.BuildTake(takerKey, marketflow.BuildTakeOptions{
+		Offer: *offer, CreatedAt: time.Now().Unix(),
+	})
+
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	matchEvent, _, err := marketflow.BuildMatch(makerKey, marketflow.BuildMatchOptions{
+		Offer:       *offer,
+		OfferEvent:  offerEvent,
+		TakeEvent:   takeEvent,
+		Taker:       &take,
+		SwapID:      "aaaa00000001",
+		BlakeAmount: offer.BlakeAmount,
+		BTCSats:     offer.BTCSats,
+		CreatedAt:   time.Now().Unix(),
+	})
+
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	offerJSON, _ := json.Marshal(offerEvent)
+	takeJSON, _ := json.Marshal(takeEvent)
+	matchJSON, _ := json.Marshal(matchEvent)
+
+	script := fmt.Sprintf(`
+import json, sys
+sys.path.insert(0, %q)
+import swap_v2
+
+offer_event = json.loads(%q)
+take_event = json.loads(%q)
+match_event = json.loads(%q)
+
+message = swap_v2.validate_market_match_evidence(match_event, offer_event, take_event)
+print("match ok", message["direction"], message["maker_role"], message["taker_role"], message["swap_id"])
+`, filepath.Join(repoRoot(t), "src"), string(offerJSON), string(takeJSON), string(matchJSON))
+
+	output := runPython(t, script, []string{
+		"BLAKE_SWAP_PARTICIPANT_KEY_FILE=" + keyPath,
+		"BLAKE_SWAP_ROLE=alice",
+	})
+
+	if !strings.Contains(output, "match ok blake-for-btc alice bob aaaa00000001") {
+		t.Fatalf("the reference did not accept the Go match:\n%s", output)
+	}
+}
+
+// TestPythonMatchIsReadableByGo builds an offer, take and match with the reference
+// and parses all three here.
+func TestPythonMatchIsReadableByGo(t *testing.T) {
+	keyPath, secret := keyFile(t)
+
+	script := fmt.Sprintf(`
+import json, sys, time
+sys.path.insert(0, %q)
+import swap_v2
+
+offer_event, offer_message = swap_v2.build_market_offer_v2_event(0.001, 25000, 30, "blake-for-btc")
+take_event, take_message = swap_v2.build_market_take_event(offer_event, offer_message)
+swap = swap_v2.make_swap(0.001, 25000, 500, 400)
+match_event, match_message = swap_v2.build_market_match_event(offer_event, take_event, swap)
+
+print(json.dumps({"offer": offer_event, "take": take_event, "match": match_event}))
+`, filepath.Join(repoRoot(t), "src"))
+
+	output := runPython(t, script, rigEnv(t,
+		"BLAKE_SWAP_PARTICIPANT_KEY_FILE="+keyPath,
+		"BLAKE_SWAP_ROLE=alice",
+		"BLAKE_SWAP_BLAKE_WALLET=alice",
+		"BLAKE_SWAP_BTC_WALLET=alice",
+	))
+
+	start := strings.Index(output, "{")
+	end := strings.LastIndex(output, "}")
+
+	if start < 0 || end <= start {
+		t.Fatalf("no events in Python output:\n%s", output)
+	}
+
+	var bundle struct {
+		Offer event.Event `json:"offer"`
+		Take  event.Event `json:"take"`
+		Match event.Event `json:"match"`
+	}
+
+	if err := json.Unmarshal([]byte(output[start:end+1]), &bundle); err != nil {
+		t.Fatalf("Python events are not decodable: %v\n%s", err, output)
+	}
+
+	key, err := nostr.NewKey(secret)
+
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if bundle.Offer.Pubkey != key.Public {
+		t.Fatalf("the reference signed as %s, the key is %s", bundle.Offer.Pubkey, key.Public)
+	}
+
+	offer, err := marketflow.ParseOffer(bundle.Offer, time.Now())
+
+	if err != nil {
+		t.Fatalf("the Go parser refused a reference offer: %v", err)
+	}
+
+	take, err := marketflow.ParseTake(bundle.Take, time.Now())
+
+	if err != nil {
+		t.Fatalf("the Go parser refused a reference take: %v", err)
+	}
+
+	match, err := marketflow.ParseMatch(bundle.Match, bundle.Offer, bundle.Take, time.Now())
+
+	if err != nil {
+		t.Fatalf("the Go parser refused a reference match: %v", err)
+	}
+
+	if match.OfferID != offer.EventID || match.TakeID != take.OfferID && take.OfferID != offer.EventID {
+		t.Fatalf("match does not bind the events: %+v", match)
+	}
+
+	if match.Direction != offer.Direction {
+		t.Fatalf("direction = %q", match.Direction)
+	}
+
+	if match.MakerRole != offer.MakerRole || match.TakerRole != offer.TakerRole {
+		t.Fatalf("roles = %s/%s", match.MakerRole, match.TakerRole)
+	}
+}
+
 // TestGoTakeAndCancelAreReadableByPython builds a take and a cancel in Go and has
 // the reference validate them against the offer they belong to.
 func TestGoTakeAndCancelAreReadableByPython(t *testing.T) {

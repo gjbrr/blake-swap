@@ -32,7 +32,7 @@ const (
 // demands a datadir for those would be a worse tool for no reason.
 func isIdentityOnlyCommand(command string) bool {
 	switch command {
-	case "cancel-market-offer", "inspect-market-take", "market-takes":
+	case "cancel-market-offer", "inspect-market-take", "market-takes", "rebroadcast-nostr-event":
 		return true
 	}
 
@@ -170,8 +170,13 @@ func marketClient() *nostr.Client {
 	return &nostr.Client{
 		Dialer: dialRelay,
 		Relays: relayList(),
-		Cache:  dirCache{dir: filepath.Join(stateDirectory(), "nostr-cache")},
+		Cache:  dirCache{dir: cacheDirectory()},
 	}
+}
+
+// cacheDirectory is where verified relay events are kept between runs.
+func cacheDirectory() string {
+	return filepath.Join(stateDirectory(), "nostr-cache")
 }
 
 // stateDirectory is where the reference keeps its records, and where this keeps its

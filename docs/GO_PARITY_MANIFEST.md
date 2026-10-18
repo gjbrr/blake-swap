@@ -82,7 +82,7 @@ Statuses: **ported** (behaviour and tests), **partial** (in progress), **pending
 
 ## CLI commands (58)
 
-The Go CLI dispatches 45 of these 58. Implemented means the command exists with the reference's arguments and environment; it does not by itself mean the output text is identical, which is tracked per command in the module table above.
+The Go CLI dispatches 46 of these 58. Implemented means the command exists with the reference's arguments and environment; it does not by itself mean the output text is identical, which is tracked per command in the module table above.
 
 | Command | Go | Status |
 |---|---|---|
@@ -131,7 +131,7 @@ The Go CLI dispatches 45 of these 58. Implemented means the command exists with 
 | `complete` | `run` | implemented |
 | `publish-btc-refunded` | `run` | implemented |
 | `receive-btc-refunded` | `run` | implemented |
-| `rebroadcast-nostr-event` | — | pending |
+| `rebroadcast-nostr-event` | `run` | implemented |
 | `sync-settlement` | `run` | implemented |
 | `sync-funding` | `run` | implemented |
 | `watch-htlc` | `run` | implemented |

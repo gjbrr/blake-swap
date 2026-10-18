@@ -115,6 +115,8 @@ func run(ctx context.Context, engine *swap.Engine, command string, args []string
 		return runPublishMarketOffer(ctx, engine, args)
 	case "cancel-market-offer":
 		return runCancelMarketOffer(ctx, engine, args)
+	case "inspect-market-take":
+		return runInspectMarketTake(ctx, engine, args)
 	case "new":
 		return runNew(ctx, engine, args)
 	case "show":

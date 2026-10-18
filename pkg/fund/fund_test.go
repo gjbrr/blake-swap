@@ -271,6 +271,11 @@ func (w *fakeWallet) Decode(ctx context.Context, hexTx string) (*chain.Tx, error
 	return w.chain.DecodeRaw(ctx, hexTx)
 }
 
+// ProcessPSBT is part of the wallet surface; funding never signs a PSBT.
+func (w *fakeWallet) ProcessPSBT(context.Context, string, string) (*chain.ProcessPSBTResult, error) {
+	return nil, fmt.Errorf("funding does not sign PSBTs")
+}
+
 // testSwap is a swap whose HTLC the fake node can derive.
 func testSwap() *model.Swap {
 	str := func(s string) *string { return &s }

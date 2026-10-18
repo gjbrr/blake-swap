@@ -6,7 +6,7 @@ It records what replaces each part of the Python engine in Go, and what has not 
 
 Statuses: **ported** (behaviour and tests), **partial** (in progress), **pending** (not started).
 
-## Modules (20/29 ported)
+## Modules (21/29 ported)
 
 | Python | Go | Status | Contents |
 |---|---|---|---|
@@ -29,7 +29,7 @@ Statuses: **ported** (behaviour and tests), **partial** (in progress), **pending
 | `src/swap_v2.py (HTLC contract)` | `pkg/contract` | ported | the node-compiled descriptor, its derived address and expected amount |
 | `src/swap_v2.py (_reconcile_observe_htlc)` | `pkg/observe` | ported | observation statuses, the funded scan and the hardened spender search |
 | `src/swap_v2.py (funding)` | `pkg/fund` | ported | funding one leg, the crash-window intent, watch-only import and solvability |
-| `src/swap_v2.py (settlement)` | `pkg/settle` | pending | the PSBT pipeline, fee/vsize convergence, broadcast and rebroadcast |
+| `src/swap_v2.py (settlement)` | `pkg/settle` | ported | the PSBT pipeline, fee/vsize convergence, broadcast and rebroadcast |
 | `src/swap_v2.py (coordination)` | `pkg/coord` | pending | one Transport interface: the encrypted store spool, or Nostr |
 | `src/swap_v2.py (relays)` | `pkg/nostr` | pending | relay sessions over a JS WebSocket bridge, publish report, REQ/EOSE, cache |
 | `src/swap_v2.py (durable state)` | `pkg/store` | pending | workflow store: atomic swap records, the message spool, the archive |
@@ -63,7 +63,7 @@ Statuses: **ported** (behaviour and tests), **partial** (in progress), **pending
 | `htlc_contract`, `get_blake_contract_descriptor`, `derive_btc_contract_address` | `Derive`, `VerifyFunding`, `CheckOutput` | `pkg/contract` |
 | `_reconcile_observe_htlc`, `scan_chain_for_expected_funding`, `find_confirmed_htlc_spend` | `Observe`, `ScanFunding`, `FindSpend` | `pkg/observe` |
 | `command_fund_blake`, `write_funding_intent`, `reconcile_funding_intent` | `Fund`, `ResolveIntent`, `ImportWatchOnly`, `VerifyAnchor` | `pkg/fund` |
-| `build_dynamic_settlement_spend`, `_decoded_spend_fee_sats` | — | `pkg/settle` |
+| `build_dynamic_settlement_spend`, `_decoded_spend_fee_sats`, `_decoded_tx_vsize` | `Build`, `Claim`, `Refund`, `Broadcast`, `SpendFee` | `pkg/settle` |
 | `file_send_message`, `file_receive_message`, `send_message` | — | `pkg/coord` |
 | `nostr_send_message`, `nostr_receive_message`, `nostr_cached_market_events` | — | `pkg/nostr` |
 | `atomic_write_json`, `load_local_swap`, `local_swap_paths` | — | `pkg/store` |

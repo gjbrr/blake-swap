@@ -442,8 +442,14 @@ func (n *Node) LoadWallet(ctx context.Context, wallet string) error {
 }
 
 // CreateWallet creates and loads a wallet, optionally watch-only.
+//
+// Both flags matter, and one of them is not the one it looks like. A watch-only
+// wallet needs disable_private_keys (so it can hold a public descriptor at all),
+// and *every* wallet the engine creates needs descriptors=true: a legacy wallet
+// cannot import a descriptor, and the HTLC is a descriptor, so a wallet created
+// without it would fail at the first watch-only import.
 func (n *Node) CreateWallet(ctx context.Context, wallet string, watchOnly bool) error {
-	_, err := n.call(ctx, "createwallet", wallet, true, true, "", false, watchOnly)
+	_, err := n.call(ctx, "createwallet", wallet, watchOnly, true, "", false, true)
 
 	return err
 }
@@ -693,6 +699,8 @@ type Wallet interface {
 	// wallet-scoped, and it lives here so recovery code that holds a wallet can
 	// verify what that wallet claims without also holding the node.
 	Decode(ctx context.Context, hexTx string) (*Tx, error)
+	// ProcessPSBT signs a PSBT with this wallet's keys.
+	ProcessPSBT(ctx context.Context, psbt, sighash string) (*ProcessPSBTResult, error)
 }
 
 // Bind returns this node's wallet-scoped surface for one wallet name.
@@ -741,6 +749,12 @@ func (w *walletNode) NewAddress(ctx context.Context) (string, error) {
 
 func (w *walletNode) Decode(ctx context.Context, hexTx string) (*Tx, error) {
 	return w.node.DecodeRaw(ctx, hexTx)
+}
+
+func (w *walletNode) ProcessPSBT(
+	ctx context.Context, psbt, sighash string,
+) (*ProcessPSBTResult, error) {
+	return w.node.ProcessPSBT(ctx, psbt, sighash)
 }
 
 // WalletEntry is one listtransactions entry, reduced to what the engine reads.
@@ -912,6 +926,148 @@ func (n *Node) SendToAddress(ctx context.Context, address string, sats amount.Sa
 	}
 
 	return txid, nil
+}
+
+// Outpoint names one transaction output.
+type Outpoint struct {
+	TxID string `json:"txid"`
+	Vout int64  `json:"vout"`
+}
+
+// CreateRawTransaction builds an unsigned transaction.
+//
+// Amounts are rendered from exact decimals, never from floats: the node would
+// happily accept 0.1 as the nearest double, and the resulting transaction would
+// pay a different amount than the swap's record says it should.
+func (n *Node) CreateRawTransaction(
+	ctx context.Context, inputs []Outpoint, outputs map[string]decimal.Dec,
+) (string, error) {
+	encodedOutputs := make(map[string]json.RawMessage, len(outputs))
+
+	if len(inputs) == 0 {
+		return "", fmt.Errorf("createrawtransaction: no inputs")
+	}
+
+	if len(outputs) == 0 {
+		return "", fmt.Errorf("createrawtransaction: no outputs")
+	}
+
+	for address, amount := range outputs {
+		if amount.Sign() <= 0 {
+			return "", fmt.Errorf("createrawtransaction: amount must be positive")
+		}
+
+		encodedOutputs[address] = json.RawMessage(amount.String())
+	}
+
+	raw, err := n.call(ctx, "createrawtransaction", inputs, encodedOutputs)
+
+	if err != nil {
+		return "", err
+	}
+
+	var hexTx string
+
+	if err := decode(raw, &hexTx); err != nil {
+		return "", fmt.Errorf("%s: createrawtransaction: %w", n.Chain, err)
+	}
+
+	return hexTx, nil
+}
+
+// ConvertToPSBT turns an unsigned transaction into a PSBT.
+//
+// The node is asked rather than the engine because the PSBT is the node's
+// serialization, and a hand-built one that disagrees with the finalizer would
+// fail at the worst possible moment.
+func (n *Node) ConvertToPSBT(ctx context.Context, hexTx string) (string, error) {
+	raw, err := n.call(ctx, "converttopsbt", hexTx)
+
+	if err != nil {
+		return "", err
+	}
+
+	var psbt string
+
+	if err := decode(raw, &psbt); err != nil {
+		return "", fmt.Errorf("%s: converttopsbt: %w", n.Chain, err)
+	}
+
+	return psbt, nil
+}
+
+// UtxoUpdatePSBT fills in the UTXO and descriptor facts a witness needs.
+//
+// Without this the wallet can sign the input but the finalizer cannot build the
+// witness script for an HTLC the wallet only knows from a descriptor.
+func (n *Node) UtxoUpdatePSBT(
+	ctx context.Context, psbt string, descriptors []string,
+) (string, error) {
+	raw, err := n.call(ctx, "utxoupdatepsbt", psbt, descriptors)
+
+	if err != nil {
+		return "", err
+	}
+
+	var updated string
+
+	if err := decode(raw, &updated); err != nil {
+		return "", fmt.Errorf("%s: utxoupdatepsbt: %w", n.Chain, err)
+	}
+
+	return updated, nil
+}
+
+// FinalizeResult is finalizepsbt's answer.
+type FinalizeResult struct {
+	Hex      string `json:"hex"`
+	Complete bool   `json:"complete"`
+}
+
+// FinalizePSBT assembles the witnesses and returns the raw transaction.
+func (n *Node) FinalizePSBT(ctx context.Context, psbt string) (*FinalizeResult, error) {
+	raw, err := n.call(ctx, "finalizepsbt", psbt)
+
+	if err != nil {
+		return nil, err
+	}
+
+	var result FinalizeResult
+
+	if err := decode(raw, &result); err != nil {
+		return nil, fmt.Errorf("%s: finalizepsbt: %w", n.Chain, err)
+	}
+
+	return &result, nil
+}
+
+// ProcessPSBTResult is walletprocesspsbt's answer.
+type ProcessPSBTResult struct {
+	PSBT     string `json:"psbt"`
+	Complete bool   `json:"complete"`
+}
+
+// ProcessPSBT asks the bound wallet to sign a PSBT.
+//
+// Finalization is left to FinalizePSBT: the claim branch needs a preimage
+// injected between signing and finalizing, and a wallet that finalized early
+// would refuse the injected field.
+func (n *Node) ProcessPSBT(
+	ctx context.Context, psbt, sighash string,
+) (*ProcessPSBTResult, error) {
+	raw, err := n.callWithWallet(ctx, "walletprocesspsbt", psbt, true, sighash, true, false)
+
+	if err != nil {
+		return nil, err
+	}
+
+	var result ProcessPSBTResult
+
+	if err := decode(raw, &result); err != nil {
+		return nil, fmt.Errorf("%s: walletprocesspsbt: %w", n.Chain, err)
+	}
+
+	return &result, nil
 }
 
 // SendRaw broadcasts a finalized transaction.

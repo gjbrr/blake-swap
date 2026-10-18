@@ -328,9 +328,10 @@ MODULES: list[Module] = [
         ["command_fund_blake", "write_funding_intent", "reconcile_funding_intent"],
     ),
     Module(
-        "src/swap_v2.py (settlement)", "pkg/settle", "pending",
+        "src/swap_v2.py (settlement)", "pkg/settle", "ported",
         "the PSBT pipeline, fee/vsize convergence, broadcast and rebroadcast",
-        [], ["build_dynamic_settlement_spend", "_decoded_spend_fee_sats"],
+        ["Build", "Claim", "Refund", "Broadcast", "SpendFee"],
+        ["build_dynamic_settlement_spend", "_decoded_spend_fee_sats", "_decoded_tx_vsize"],
     ),
     Module(
         "src/swap_v2.py (coordination)", "pkg/coord", "pending",

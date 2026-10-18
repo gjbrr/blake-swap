@@ -36,6 +36,7 @@ func Domain(_ struct{}, ch Chans) {
 	// One vault per worker: the derived key lives here and nowhere else, and it dies
 	// with the instance.
 	vault := NewVaultDomain(platform.NewIndexedDB("blake-swap", "vault"), platform.Reader{})
+	engine := newEngineDomain(vault)
 
 	ctx := context.Background()
 
@@ -67,7 +68,7 @@ func Domain(_ struct{}, ch Chans) {
 
 				consoleLog("worker: command received (seq " + itoa(e.Seq) + ")")
 
-				result := handleCommand(ctx, vault, e.Body)
+				result := handleCommand(ctx, vault, engine, e.Body)
 
 				consoleLog("worker: command finished (ok=" + boolText(result.OK) +
 					", " + itoa(uint32(time.Since(started).Milliseconds())) + " ms)")

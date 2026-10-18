@@ -379,6 +379,49 @@ func (e *Encrypted) ListMessages(ctx context.Context, swapID string) ([]string, 
 // archivePrefix holds retired records.
 const archivePrefix = "archive/"
 
+// PutSecret seals an arbitrary named value.
+//
+// It exists for the two things the vault must hold besides swaps: the participant's
+// Nostr key and the proxy address. Both are secrets of a sort — one is a signing key,
+// the other reveals which node a participant uses — and both belong under the same
+// passphrase.
+func (e *Encrypted) PutSecret(ctx context.Context, name string, value []byte) error {
+	if name == "" {
+		return fmt.Errorf("a secret needs a name")
+	}
+
+	return e.put(ctx, secretPrefix+name, value)
+}
+
+// GetSecret reads a sealed named value.
+func (e *Encrypted) GetSecret(ctx context.Context, name string) ([]byte, bool, error) {
+	if name == "" {
+		return nil, false, fmt.Errorf("a secret needs a name")
+	}
+
+	return e.get(ctx, secretPrefix+name)
+}
+
+// SecretNames lists the stored secret names.
+func (e *Encrypted) SecretNames(ctx context.Context) ([]string, error) {
+	keys, err := e.kv.Keys(ctx, secretPrefix)
+
+	if err != nil {
+		return nil, err
+	}
+
+	names := make([]string, 0, len(keys))
+
+	for _, key := range keys {
+		names = append(names, key[len(secretPrefix):])
+	}
+
+	return names, nil
+}
+
+// secretPrefix holds named sealed values.
+const secretPrefix = "secret/"
+
 // put seals a value and stores it.
 func (e *Encrypted) put(ctx context.Context, key string, plaintext []byte) error {
 	if e.key == nil {

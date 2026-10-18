@@ -158,7 +158,7 @@ func TestDispatchEncodesAndDecodes(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	result := handleCommand(context.Background(), d, body)
+	result := handleCommand(context.Background(), d, newEngineDomain(d), body)
 
 	if !result.OK || result.Command != "vault.create" {
 		t.Fatalf("result = %+v", result)
@@ -190,7 +190,9 @@ func TestUnknownCommandIsRefused(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	result := handleCommand(context.Background(), domain(), body)
+	domain := domain()
+
+	result := handleCommand(context.Background(), domain, newEngineDomain(domain), body)
 
 	if result.OK || !strings.Contains(result.Error, "unsupported command") {
 		t.Fatalf("result = %+v", result)

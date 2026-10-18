@@ -9,6 +9,7 @@ import (
 
 	"github.com/gjbrr/blake-swap/pkg/client"
 	"github.com/gjbrr/blake-swap/pkg/model"
+	"github.com/gjbrr/blake-swap/pkg/nostr"
 	"github.com/gjbrr/blake-swap/pkg/platform"
 	"github.com/gjbrr/blake-swap/pkg/proto"
 	"github.com/gjbrr/blake-swap/pkg/store"
@@ -184,6 +185,78 @@ func (d *vaultDomain) handle(ctx context.Context, request proto.Request) proto.R
 		//
 		return vaultSelfTest()
 
+	case "identity.set":
+		secret := strings.TrimSpace(request.Args["secret"])
+
+		if secret == "" {
+			return proto.Result{Command: request.Command, Error: "a participant secret is required"}
+		}
+
+		key, err := nostr.NewKey(secret)
+
+		if err != nil {
+			return failed(request.Command, err)
+		}
+
+		if err := d.writeSecret(ctx, SecretIdentity, key.Secret); err != nil {
+			return failed(request.Command, err)
+		}
+
+		return proto.Result{
+			Command: request.Command, OK: true, Text: "identity set: " + key.Public,
+		}
+
+	case "identity.status":
+		secret, err := d.readSecret(ctx, SecretIdentity)
+
+		if err != nil {
+			return failed(request.Command, err)
+		}
+
+		if secret == "" {
+			return proto.Result{Command: request.Command, OK: true, Text: "identity: absent"}
+		}
+
+		key, err := nostr.NewKey(secret)
+
+		if err != nil {
+			return failed(request.Command, err)
+		}
+
+		return proto.Result{
+			Command: request.Command, OK: true, Text: "identity: " + key.Public,
+		}
+
+	case "proxy.set":
+		value := strings.TrimRight(strings.TrimSpace(request.Args["url"]), "/")
+
+		if value == "" {
+			return proto.Result{Command: request.Command, Error: "a proxy URL is required"}
+		}
+
+		if err := d.writeSecret(ctx, SecretProxy, value); err != nil {
+			return failed(request.Command, err)
+		}
+
+		return proto.Result{
+			Command: request.Command, OK: true, Text: "proxy set: " + value,
+		}
+
+	case "proxy.status":
+		value, err := d.readSecret(ctx, SecretProxy)
+
+		if err != nil {
+			return failed(request.Command, err)
+		}
+
+		if value == "" {
+			return proto.Result{Command: request.Command, OK: true, Text: "proxy: absent"}
+		}
+
+		return proto.Result{
+			Command: request.Command, OK: true, Text: "proxy: " + value,
+		}
+
 	case "state.list":
 		if d.store == nil {
 			return proto.Result{Command: request.Command, Error: "the vault is locked"}
@@ -286,6 +359,34 @@ type randomReader struct{}
 // Read fills p from the platform's cryptographic random source.
 func (randomReader) Read(p []byte) (int, error) { return platform.ReadRandom(p) }
 
+// readSecret reads a named sealed value from the vault.
+func (d *vaultDomain) readSecret(ctx context.Context, name string) (string, error) {
+	if d.store == nil {
+		return "", fmt.Errorf("the vault is locked")
+	}
+
+	value, found, err := d.store.GetSecret(ctx, name)
+
+	if err != nil {
+		return "", err
+	}
+
+	if !found {
+		return "", nil
+	}
+
+	return string(value), nil
+}
+
+// writeSecret stores a named sealed value.
+func (d *vaultDomain) writeSecret(ctx context.Context, name, value string) error {
+	if d.store == nil {
+		return fmt.Errorf("the vault is locked")
+	}
+
+	return d.store.PutSecret(ctx, name, []byte(value))
+}
+
 // itoa renders an unsigned integer without pulling in formatting paths.
 func itoa(value uint32) string {
 	if value == 0 {
@@ -324,7 +425,7 @@ func decodeSwap(encoded string) (*model.Swap, error) {
 // It exists so the worker's loop has one place that knows how a command becomes a
 // result, and so a new domain is a case in a dispatch rather than a second protocol.
 func handleCommand(
-	ctx context.Context, vault *vaultDomain, body string,
+	ctx context.Context, vault *vaultDomain, engine *engineDomain, body string,
 ) proto.Result {
 	request, err := proto.DecodeRequest(body)
 
@@ -332,8 +433,14 @@ func handleCommand(
 		return proto.Result{Command: "", Error: err.Error()}
 	}
 
-	if strings.HasPrefix(request.Command, "vault.") || strings.HasPrefix(request.Command, "state.") {
+	switch {
+	case strings.HasPrefix(request.Command, "vault."),
+		strings.HasPrefix(request.Command, "state."),
+		strings.HasPrefix(request.Command, "identity."),
+		strings.HasPrefix(request.Command, "proxy."):
 		return vault.handle(ctx, request)
+	case strings.HasPrefix(request.Command, "engine."):
+		return engine.Handle(ctx, request)
 	}
 
 	return proto.Result{

@@ -91,6 +91,7 @@ class CleanInstall:
         self.engine = None
         self.agent = None
         self.wheel = None
+        self.source = None
 
     def __enter__(self):
         self.tmp = tempfile.TemporaryDirectory(
@@ -105,6 +106,27 @@ class CleanInstall:
         self.dist.mkdir()
         self.home.mkdir()
 
+        #
+        # Build from a copy, not from the checkout.
+        #
+        # `pip wheel <checkout>` runs setuptools in place, which leaves
+        # `build/lib/` and `src/*.egg-info/` behind: a byte-identical
+        # copy of every engine module that a later `git add -A` will
+        # happily commit. Building a copy keeps the working tree exactly
+        # as the operator left it.
+        #
+        self.source = self.root / "source"
+        self.source.mkdir()
+
+        for name in ("pyproject.toml", "README.md", "LICENSE"):
+            shutil.copy2(ROOT / name, self.source / name)
+
+        shutil.copytree(
+            ROOT / "src",
+            self.source / "src",
+            ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "*.egg-info"),
+        )
+
         run(
             (
                 sys.executable,
@@ -116,7 +138,7 @@ class CleanInstall:
                 "--no-deps",
                 "--wheel-dir",
                 self.dist,
-                ROOT,
+                self.source,
             ),
             cwd=self.root,
             env=self.env(),

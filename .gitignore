@@ -41,3 +41,13 @@ blake-ui
 .coverage.*
 htmlcov/
 coverage.xml
+
+# Setuptools products of a local packaging build or of the installed-wheel
+# suite. They are generated, they duplicate src/, and a stray `git add -A`
+# must not be able to turn a 617 KB copy of the engine into a tracked file.
+build/
+dist/
+*.egg-info/
+
+# Coverage HTML report
+htmlcov/

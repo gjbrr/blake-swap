@@ -1,8 +1,0 @@
-coincurve==21.0.0
-websockets==17.1
-
-[crypto]
-cryptography==50.0.1
-
-[dev]
-PyYAML>=6.0

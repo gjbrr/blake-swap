@@ -6,7 +6,7 @@ It records what replaces each part of the Python engine in Go, and what has not 
 
 Statuses: **ported** (behaviour and tests), **partial** (in progress), **pending** (not started).
 
-## Modules (22/29 ported)
+## Modules (23/29 ported)
 
 | Python | Go | Status | Contents |
 |---|---|---|---|
@@ -31,7 +31,7 @@ Statuses: **ported** (behaviour and tests), **partial** (in progress), **pending
 | `src/swap_v2.py (funding)` | `pkg/fund` | ported | funding one leg, the crash-window intent, watch-only import and solvability |
 | `src/swap_v2.py (settlement)` | `pkg/settle` | ported | the PSBT pipeline, fee/vsize convergence, broadcast and rebroadcast |
 | `src/swap_v2.py (coordination)` | `pkg/coord` | pending | one Transport interface: the encrypted store spool, or Nostr |
-| `src/swap_v2.py (relays)` | `pkg/nostr` | pending | relay sessions over a JS WebSocket bridge, publish report, REQ/EOSE, cache |
+| `src/swap_v2.py (relays)` | `pkg/nostr` | ported | relay sessions over a platform connection, publish report, REQ/EOSE, event cache, the encryption policy |
 | `src/swap_v2.py (durable state)` | `pkg/store` | ported | workflow store: atomic swap records, the message spool, the archive |
 | `src/swap_v2.py (commands)` | `pkg/swap` | pending | the 58 commands as a Go API, one function per command |
 | `src/swap_agent.py` | `pkg/agent` | pending | the autonomous driver's step policy and budget |
@@ -65,7 +65,7 @@ Statuses: **ported** (behaviour and tests), **partial** (in progress), **pending
 | `command_fund_blake`, `write_funding_intent`, `reconcile_funding_intent` | `Fund`, `ResolveIntent`, `ImportWatchOnly`, `VerifyAnchor` | `pkg/fund` |
 | `build_dynamic_settlement_spend`, `_decoded_spend_fee_sats`, `_decoded_tx_vsize` | `Build`, `Claim`, `Refund`, `Broadcast`, `SpendFee` | `pkg/settle` |
 | `file_send_message`, `file_receive_message`, `send_message` | — | `pkg/coord` |
-| `nostr_send_message`, `nostr_receive_message`, `nostr_cached_market_events` | — | `pkg/nostr` |
+| `nostr_send_message`, `nostr_receive_message`, `nostr_publish_event`, `decode_coordination_content` | `Client`, `BuildCoordinationEvent`, `DecodeContent`, `Cache` | `pkg/nostr` |
 | `atomic_write_json`, `load_local_swap`, `local_swap_paths`, `file_send_message`, `file_receive_message` | `File`, `Memory`, `SupersededPlaceholders`, `ArchiveSuperseded` | `pkg/store` |
 | `command_new`, `command_show`, `command_advance` | — | `pkg/swap` |
 | `AgentPolicy` | — | `pkg/agent` |

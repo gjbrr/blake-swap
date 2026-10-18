@@ -42,7 +42,9 @@ def python_defs(path: Path) -> set[str]:
     names: set[str] = set()
 
     for line in path.read_text().splitlines():
-        match = re.match(r"^(?:def|class)\s+([A-Za-z_][A-Za-z0-9_]*)", line)
+        match = re.match(
+            r"^(?:async\s+)?(?:def|class)\s+([A-Za-z_][A-Za-z0-9_]*)", line,
+        )
 
         if match:
             names.add(match.group(1))
@@ -339,9 +341,10 @@ MODULES: list[Module] = [
         [], ["file_send_message", "file_receive_message", "send_message"],
     ),
     Module(
-        "src/swap_v2.py (relays)", "pkg/nostr", "pending",
-        "relay sessions over a JS WebSocket bridge, publish report, REQ/EOSE, cache",
-        [], ["nostr_send_message", "nostr_receive_message", "nostr_cached_market_events"],
+        "src/swap_v2.py (relays)", "pkg/nostr", "ported",
+        "relay sessions over a platform connection, publish report, REQ/EOSE, event cache, the encryption policy",
+        ["Client", "BuildCoordinationEvent", "DecodeContent", "Cache"],
+        ["nostr_send_message", "nostr_receive_message", "nostr_publish_event", "decode_coordination_content"],
     ),
     Module(
         "src/swap_v2.py (durable state)", "pkg/store", "ported",

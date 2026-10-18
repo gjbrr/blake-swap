@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -98,7 +99,7 @@ func loadRig(t *testing.T) *rig {
 		t.Fatalf("building the Go CLI failed: %v\n%s", err, output)
 	}
 
-	return &rig{
+	r := &rig{
 		btcDatadir:   env.BTCDatadir,
 		blakeDatadir: env.BlakeDatadir,
 		btcCLI:       env.BTCCLI,
@@ -106,6 +107,45 @@ func loadRig(t *testing.T) *rig {
 		repo:         repo,
 		python:       python,
 		cli:          cli,
+	}
+
+	ensureWallets(t, r)
+
+	return r
+}
+
+// ensureWallets makes sure both participant wallets exist on both chains.
+//
+// A fresh rig has only its mining wallet. The Python suites create these wallets
+// themselves; an interop test has to do the same, or it fails on a runner before it
+// has tested anything.
+func ensureWallets(t *testing.T, r *rig) {
+	t.Helper()
+
+	for _, chain := range []struct {
+		cli     string
+		datadir string
+	}{
+		{r.btcCLI, r.btcDatadir},
+		{r.blakeCLI, r.blakeDatadir},
+	} {
+		loaded := cliOutput(t, chain.cli, chain.datadir, "listwallets")
+
+		for _, wallet := range []string{"alice", "bob"} {
+			if strings.Contains(loaded, `"`+wallet+`"`) {
+				continue
+			}
+
+			if _, err := exec.Command(chain.cli, "-datadir="+chain.datadir,
+				"loadwallet", wallet).CombinedOutput(); err == nil {
+				continue
+			}
+
+			// A descriptor wallet, because the HTLC is a descriptor and a legacy
+			// wallet cannot import one.
+			cliOutput(t, chain.cli, chain.datadir, "createwallet",
+				wallet, "false", "false", "", "false", "true")
+		}
 	}
 }
 
@@ -235,130 +275,210 @@ func swapID(t *testing.T, output string) string {
 func TestCrossImplHandshakeAndSettlement(t *testing.T) {
 	r := loadRig(t)
 
-	t.Run("go is alice", func(t *testing.T) {
-		r.runDirection(t, direction{name: "go-alice", goRole: "alice", pyRole: "bob"})
-	})
+	for _, dir := range directions() {
+		t.Run(dir.name, func(t *testing.T) {
+			alice, bob, messages, id := setupSwap(t, r, dir)
 
-	t.Run("go is bob", func(t *testing.T) {
-		r.runDirection(t, direction{name: "go-bob", goRole: "bob", pyRole: "alice"})
-	})
+			fundBothLegs(t, r, alice, bob, messages, id)
+
+			run(t, r, alice, messages, "claim-btc", id)
+			run(t, r, alice, messages, "publish-btc-claimed", id)
+
+			run(t, r, bob, messages, "receive-btc-claimed", id)
+			run(t, r, bob, messages, "extract-secret", id)
+			run(t, r, bob, messages, "claim-blake", id)
+			run(t, r, bob, messages, "publish-blake-claimed", id)
+
+			run(t, r, alice, messages, "receive-blake-claimed", id)
+			run(t, r, alice, messages, "complete", id)
+
+			assertState(t, r, alice, messages, id, "COMPLETE")
+			assertState(t, r, bob, messages, id, "BLAKE_CLAIMED")
+		})
+	}
 }
 
-// runDirection runs one full swap with the roles arranged as requested.
-func (r *rig) runDirection(t *testing.T, dir direction) {
-	t.Helper()
+// TestCrossImplRefundBothLegs runs the abortive path in both directions: Bob
+// refunds Bitcoin once its timelock is reached, and Alice refunds BLAKE once hers
+// is. This is the path that matters when the secret never moves, so it is the one
+// where a message-shape disagreement would strand real money.
+func TestCrossImplRefundBothLegs(t *testing.T) {
+	r := loadRig(t)
 
-	messages := t.TempDir()
+	for _, dir := range directions() {
+		t.Run(dir.name, func(t *testing.T) {
+			alice, bob, messages, id := setupSwap(t, r, dir)
+
+			fundBothLegs(t, r, alice, bob, messages, id)
+
+			// Bob can only refund once Bitcoin's CLTV is reached, and the node
+			// refuses a non-final transaction rather than reporting a protocol
+			// error — so the test mines to the deadline the way an operator would.
+			btcTimeout := fieldInt(t, r, alice, messages, id, "btc_timeout")
+			mineTo(t, r, "btc", bob.role, btcTimeout)
+
+			run(t, r, bob, messages, "refund-btc", id)
+			run(t, r, bob, messages, "publish-btc-refunded", id)
+			run(t, r, alice, messages, "receive-btc-refunded", id)
+
+			blakeTimeout := fieldInt(t, r, alice, messages, id, "blake_timeout")
+			mineTo(t, r, "blake", alice.role, blakeTimeout)
+
+			run(t, r, alice, messages, "refund-blake", id)
+
+			assertState(t, r, alice, messages, id, "BLAKE_REFUNDED")
+			assertState(t, r, bob, messages, id, "BTC_REFUNDED")
+		})
+	}
+}
+
+// directions is the two participant arrangements.
+func directions() []direction {
+	return []direction{
+		{name: "go is alice", goRole: "alice", pyRole: "bob"},
+		{name: "go is bob", goRole: "bob", pyRole: "alice"},
+	}
+}
+
+// sides maps a direction onto Alice's and Bob's configurations.
+func sides(t *testing.T, dir direction) (*side, *side) {
+	t.Helper()
 
 	goSide := newSide(t, "go", dir.goRole)
 	pySide := newSide(t, "python", dir.pyRole)
 
-	alice := goSide
-	bob := pySide
-
-	if dir.goRole == "bob" {
-		alice = pySide
-		bob = goSide
+	if dir.goRole == "alice" {
+		return goSide, pySide
 	}
 
-	// Alice creates the swap.
-	var createOutput string
+	return pySide, goSide
+}
 
-	if alice == goSide {
-		createOutput = r.runGo(t, alice, messages, "new", "--blake", "0.001", "--sats", "25000")
-	} else {
-		createOutput = r.runPy(t, alice, messages, "new", "--blake", "0.001", "--sats", "25000")
+// setupSwap runs the handshake and returns both sides, the shared spool and the
+// swap id.
+func setupSwap(t *testing.T, r *rig, dir direction) (*side, *side, string, string) {
+	t.Helper()
+
+	messages := t.TempDir()
+
+	alice, bob := sides(t, dir)
+
+	output := run(t, r, alice, messages, "new", "--blake", "0.001", "--sats", "25000")
+	id := swapID(t, output)
+
+	run(t, r, alice, messages, "publish-offer", id)
+	run(t, r, bob, messages, "accept-offer", id, "--expected-alice-pub", alice.public)
+	run(t, r, alice, messages, "receive-accept", id)
+
+	return alice, bob, messages, id
+}
+
+// fundBothLegs funds and announces both legs.
+func fundBothLegs(t *testing.T, r *rig, alice, bob *side, messages, id string) {
+	t.Helper()
+
+	run(t, r, alice, messages, "fund-blake", id)
+	run(t, r, alice, messages, "publish-blake-funded", id)
+	run(t, r, bob, messages, "receive-blake-funded", id)
+
+	run(t, r, bob, messages, "fund-btc", id)
+	run(t, r, bob, messages, "publish-btc-funded", id)
+	run(t, r, alice, messages, "receive-btc-funded", id)
+}
+
+// run invokes one command on whichever implementation this participant uses.
+func run(t *testing.T, r *rig, s *side, messages string, args ...string) string {
+	t.Helper()
+
+	if s.name == "go" {
+		return r.runGo(t, s, messages, args...)
 	}
 
-	id := swapID(t, createOutput)
-
-	// Alice publishes the offer.
-	if alice == goSide {
-		r.runGo(t, alice, messages, "publish-offer", id)
-	} else {
-		r.runPy(t, alice, messages, "publish-offer", id)
+	// The reference CLI requires --role on the commands that mutate a record from
+	// either side; the Go CLI derives it from the environment like the rest.
+	switch args[0] {
+	case "complete":
+		return r.runPy(t, s, messages, append([]string{args[0], "--role", s.role}, args[1:]...)...)
 	}
 
-	// Bob accepts it, pinned to Alice's identity.
-	if bob == goSide {
-		r.runGo(t, bob, messages, "accept-offer", id, "--expected-alice-pub", alice.public)
-	} else {
-		r.runPy(t, bob, messages, "accept-offer", id, "--expected-alice-pub", alice.public)
+	return r.runPy(t, s, messages, args...)
+}
+
+// fieldInt reads an integer field from one participant's record.
+func fieldInt(t *testing.T, r *rig, s *side, messages, id, field string) int64 {
+	t.Helper()
+
+	output := run(t, r, s, messages, "show", id)
+
+	label := regexp.QuoteMeta(strings.ReplaceAll(field, "_", " "))
+	pattern := regexp.MustCompile("(?i)" + label + `:\s+(\d+)`)
+	match := pattern.FindStringSubmatch(output)
+
+	if len(match) != 2 {
+		t.Fatalf("no %s in record output:\n%s", field, output)
 	}
 
-	// Alice receives Bob's acceptance.
-	if alice == goSide {
-		r.runGo(t, alice, messages, "receive-accept", id)
-	} else {
-		r.runPy(t, alice, messages, "receive-accept", id)
+	value, err := strconv.ParseInt(match[1], 10, 64)
+
+	if err != nil {
+		t.Fatal(err)
 	}
 
-	// Alice funds BLAKE and announces it.
-	if alice == goSide {
-		r.runGo(t, alice, messages, "fund-blake", id)
-		r.runGo(t, alice, messages, "publish-blake-funded", id)
-	} else {
-		r.runPy(t, alice, messages, "fund-blake", id)
-		r.runPy(t, alice, messages, "publish-blake-funded", id)
+	return value
+}
+
+// mineTo mines one chain up to a height, to the given wallet's address.
+func mineTo(t *testing.T, r *rig, which, wallet string, height int64) {
+	t.Helper()
+
+	cli := r.btcCLI
+	datadir := r.btcDatadir
+
+	if which == "blake" {
+		cli = r.blakeCLI
+		datadir = r.blakeDatadir
 	}
 
-	// Bob verifies and records it.
-	if bob == goSide {
-		r.runGo(t, bob, messages, "receive-blake-funded", id)
-	} else {
-		r.runPy(t, bob, messages, "receive-blake-funded", id)
+	tip := heightOf(t, cli, datadir)
+
+	if tip >= height {
+		return
 	}
 
-	// Bob funds Bitcoin and announces it.
-	if bob == goSide {
-		r.runGo(t, bob, messages, "fund-btc", id)
-		r.runGo(t, bob, messages, "publish-btc-funded", id)
-	} else {
-		r.runPy(t, bob, messages, "fund-btc", id)
-		r.runPy(t, bob, messages, "publish-btc-funded", id)
+	address := cliOutput(t, cli, datadir, "-rpcwallet="+wallet, "getnewaddress")
+
+	cliOutput(t, cli, datadir, "-rpcwallet="+wallet, "generatetoaddress",
+		strconv.FormatInt(height-tip, 10), strings.TrimSpace(address))
+}
+
+// heightOf returns one chain's tip.
+func heightOf(t *testing.T, cli, datadir string) int64 {
+	t.Helper()
+
+	output := cliOutput(t, cli, datadir, "getblockcount")
+
+	value, err := strconv.ParseInt(strings.TrimSpace(output), 10, 64)
+
+	if err != nil {
+		t.Fatalf("getblockcount: %v", err)
 	}
 
-	// Alice verifies and records it.
-	if alice == goSide {
-		r.runGo(t, alice, messages, "receive-btc-funded", id)
-	} else {
-		r.runPy(t, alice, messages, "receive-btc-funded", id)
+	return value
+}
+
+// cliOutput runs a node CLI and returns its output.
+func cliOutput(t *testing.T, cli, datadir string, args ...string) string {
+	t.Helper()
+
+	command := exec.Command(cli, append([]string{"-datadir=" + datadir}, args...)...)
+
+	output, err := command.CombinedOutput()
+
+	if err != nil {
+		t.Fatalf("%s %v failed: %v\n%s", filepath.Base(cli), args, err, output)
 	}
 
-	// Alice claims Bitcoin, which reveals the preimage on-chain.
-	if alice == goSide {
-		r.runGo(t, alice, messages, "claim-btc", id)
-		r.runGo(t, alice, messages, "publish-btc-claimed", id)
-	} else {
-		r.runPy(t, alice, messages, "claim-btc", id)
-		r.runPy(t, alice, messages, "publish-btc-claimed", id)
-	}
-
-	// Bob records the claim, extracts the secret from the chain, and claims BLAKE.
-	if bob == goSide {
-		r.runGo(t, bob, messages, "receive-btc-claimed", id)
-		r.runGo(t, bob, messages, "extract-secret", id)
-		r.runGo(t, bob, messages, "claim-blake", id)
-		r.runGo(t, bob, messages, "publish-blake-claimed", id)
-	} else {
-		r.runPy(t, bob, messages, "receive-btc-claimed", id)
-		r.runPy(t, bob, messages, "extract-secret", id)
-		r.runPy(t, bob, messages, "claim-blake", id)
-		r.runPy(t, bob, messages, "publish-blake-claimed", id)
-	}
-
-	// Alice records Bob's claim and completes the swap.
-	if alice == goSide {
-		r.runGo(t, alice, messages, "receive-blake-claimed", id)
-		r.runGo(t, alice, messages, "complete", id)
-	} else {
-		r.runPy(t, alice, messages, "receive-blake-claimed", id)
-		r.runPy(t, alice, messages, "complete", "--role", alice.role, id)
-	}
-
-	// Both records must agree about the outcome, whichever engine wrote them.
-	assertState(t, r, alice, messages, id, "COMPLETE")
-	assertState(t, r, bob, messages, id, "BLAKE_CLAIMED")
+	return string(output)
 }
 
 // assertState checks one participant's record state.

@@ -961,13 +961,25 @@ type Outpoint struct {
 	Vout int64  `json:"vout"`
 }
 
-// CreateRawTransaction builds an unsigned transaction.
+// CreateRawTransaction builds an unsigned transaction with no locktime.
+func (n *Node) CreateRawTransaction(
+	ctx context.Context, inputs []Outpoint, outputs map[string]decimal.Dec,
+) (string, error) {
+	return n.CreateRawTransactionAt(ctx, inputs, outputs, 0)
+}
+
+// CreateRawTransactionAt builds an unsigned transaction with an explicit nLockTime.
+//
+// The locktime is not decoration: a timelock (CLTV) branch is only spendable by a
+// transaction whose nLockTime has reached the contract's height, and the node's
+// finalizer refuses to complete one that has not. A refund built without it looks
+// perfectly correct and then fails to finalize.
 //
 // Amounts are rendered from exact decimals, never from floats: the node would
 // happily accept 0.1 as the nearest double, and the resulting transaction would
 // pay a different amount than the swap's record says it should.
-func (n *Node) CreateRawTransaction(
-	ctx context.Context, inputs []Outpoint, outputs map[string]decimal.Dec,
+func (n *Node) CreateRawTransactionAt(
+	ctx context.Context, inputs []Outpoint, outputs map[string]decimal.Dec, lockTime int64,
 ) (string, error) {
 	encodedOutputs := make(map[string]json.RawMessage, len(outputs))
 
@@ -987,7 +999,13 @@ func (n *Node) CreateRawTransaction(
 		encodedOutputs[address] = json.RawMessage(amount.String())
 	}
 
-	raw, err := n.call(ctx, "createrawtransaction", inputs, encodedOutputs)
+	params := []any{inputs, encodedOutputs}
+
+	if lockTime > 0 {
+		params = append(params, lockTime)
+	}
+
+	raw, err := n.call(ctx, "createrawtransaction", params...)
 
 	if err != nil {
 		return "", err

@@ -197,6 +197,7 @@ func (e *Engine) RefundBTC(ctx context.Context, swapID string) (*SettlementResul
 			Descriptor:  derived.Descriptor,
 			InputSats:   swap.BTCSats,
 			Wallet:      e.BTCWallet,
+			LockTime:    swap.BTCTimeout,
 		}, e.settlementOptions())
 	}, func(swap *model.Swap) error {
 		return swap.Transition(state.BTCRefunded)
@@ -260,6 +261,7 @@ func (e *Engine) RefundBlake(ctx context.Context, swapID string) (*SettlementRes
 			Descriptor:  derived.Descriptor,
 			InputSats:   swap.BlakeAmountBaseUnits,
 			Wallet:      e.BlakeWallet,
+			LockTime:    swap.BlakeTimeout,
 		}, e.settlementOptions())
 	}, func(swap *model.Swap) error {
 		return swap.Transition(state.BlakeRefunded)

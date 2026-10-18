@@ -355,7 +355,7 @@ MODULES: list[Module] = [
     ),
     Module(
         "src/swap_v2.py (commands)", "pkg/swap", "partial",
-        "the 58 commands as a Go API: the full settlement lifecycle and the offer/accept handshake are in, and a Go participant completes real swaps against the Python reference in both directions; market commands remain",
+        "the 58 commands as a Go API: the full settlement lifecycle, refunds and the offer/accept handshake are in; a Go participant completes real swaps and real refunds against the Python reference in both directions; market commands remain",
         ["Engine", "Status", "Show", "List", "Advance", "FundBlake", "FundBTC", "VerifyBlake", "VerifyBTC",
          "ClaimBTC", "ClaimBlake", "RefundBTC", "RefundBlake", "Complete", "ExtractSecret",
          "AnnounceBlakeFunding", "ReceiveBlakeFunding", "AnnounceBTCFunding", "ReceiveBTCFunding",

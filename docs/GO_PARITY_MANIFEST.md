@@ -33,7 +33,7 @@ Statuses: **ported** (behaviour and tests), **partial** (in progress), **pending
 | `src/swap_v2.py (coordination)` | `pkg/coord` | ported | one Transport interface: the local spool, or Nostr; validation and sender pinning on both |
 | `src/swap_v2.py (relays)` | `pkg/nostr` | ported | relay sessions over a platform connection, publish report, REQ/EOSE, event cache, the encryption policy |
 | `src/swap_v2.py (durable state)` | `pkg/store` | ported | workflow store: atomic swap records, the message spool, the archive |
-| `src/swap_v2.py (commands)` | `pkg/swap` | partial | the 58 commands as a Go API: the full settlement lifecycle and the offer/accept handshake are in, and a Go participant completes real swaps against the Python reference in both directions; market commands remain |
+| `src/swap_v2.py (commands)` | `pkg/swap` | partial | the 58 commands as a Go API: the full settlement lifecycle, refunds and the offer/accept handshake are in; a Go participant completes real swaps and real refunds against the Python reference in both directions; market commands remain |
 | `src/swap_agent.py` | `pkg/agent` | pending | the autonomous driver's step policy and budget |
 | `src/swap_v2.py (market flow)` | `pkg/marketflow` | pending | offer, take, match, cancel, accept, import as a flow |
 | `src/swap_v2.py (CLI)` | `cmd/blake-swap-cli (missing)` | partial | the drop-in CLI: the implemented commands with the reference's arguments and environment; the output text is not yet byte-identical |

@@ -32,7 +32,8 @@ type fakeNode struct {
 	inputSats int64
 	vsizeFor  func(feeSats int64) int64
 
-	feeRate string
+	feeRate  string
+	lockTime int64
 
 	currentFee int64
 
@@ -72,6 +73,14 @@ func (f *fakeNode) CreateRawTransaction(
 	}
 
 	return fmt.Sprintf("raw:%d", f.currentFee), nil
+}
+
+func (f *fakeNode) CreateRawTransactionAt(
+	ctx context.Context, inputs []chain.Outpoint, outputs map[string]decimal.Dec, lockTime int64,
+) (string, error) {
+	f.lockTime = lockTime
+
+	return f.CreateRawTransaction(ctx, inputs, outputs)
 }
 
 func (f *fakeNode) ConvertToPSBT(_ context.Context, hexTx string) (string, error) {

@@ -33,6 +33,7 @@ const MaxAttempts = 8
 type Node interface {
 	Bind(wallet string) chain.Wallet
 	CreateRawTransaction(ctx context.Context, inputs []chain.Outpoint, outputs map[string]decimal.Dec) (string, error)
+	CreateRawTransactionAt(ctx context.Context, inputs []chain.Outpoint, outputs map[string]decimal.Dec, lockTime int64) (string, error)
 	ConvertToPSBT(ctx context.Context, hexTx string) (string, error)
 	UtxoUpdatePSBT(ctx context.Context, psbt string, descriptors []string) (string, error)
 	FinalizePSBT(ctx context.Context, psbt string) (*chain.FinalizeResult, error)
@@ -328,6 +329,9 @@ type Request struct {
 	Preimage   string
 	// Wallet is the signing wallet.
 	Wallet string
+	// LockTime is the contract's timelock height, for a refund. A claim needs no
+	// locktime; a refund cannot be finalized without one.
+	LockTime int64
 }
 
 // Claim builds and finalizes a claim of the HTLC.
@@ -403,12 +407,13 @@ func Refund(ctx context.Context, node Node, req Request, opts Options) (*Plan, e
 
 		outputSats := req.InputSats - feeSats
 
-		raw, err := node.CreateRawTransaction(
+		raw, err := node.CreateRawTransactionAt(
 			ctx,
 			[]chain.Outpoint{req.Funding},
 			map[string]decimal.Dec{
 				req.Destination: amount.Sats(outputSats).Coin(),
 			},
+			req.LockTime,
 		)
 
 		if err != nil {

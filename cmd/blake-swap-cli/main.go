@@ -88,6 +88,7 @@ commands:
   resume SWAP_ID
   watch-htlc SWAP_ID
   recovery-plan SWAP_ID
+  refresh-timeouts SWAP_ID [--clear-stale-intent]
   sync-funding SWAP_ID
   sync-settlement SWAP_ID
   dashboard
@@ -164,6 +165,8 @@ func run(ctx context.Context, engine *swap.Engine, command string, args []string
 		return runWatchHTLC(ctx, engine, args)
 	case "recovery-plan":
 		return runRecoveryPlan(ctx, engine, args)
+	case "refresh-timeouts":
+		return runRefreshTimeouts(ctx, engine, args)
 	case "sync-funding":
 		return runSync(ctx, engine, args, engine.SyncFunding, "FUNDING")
 	case "sync-settlement":
@@ -969,6 +972,47 @@ func runRecoveryPlan(ctx context.Context, engine *swap.Engine, args []string) er
 	}
 
 	fmt.Println()
+
+	return nil
+}
+
+// runRefreshTimeouts recomputes an unfunded offer's deadlines.
+func runRefreshTimeouts(ctx context.Context, engine *swap.Engine, args []string) error {
+	flags := flag.NewFlagSet("refresh-timeouts", flag.ContinueOnError)
+
+	clearStale := flags.Bool("clear-stale-intent", false, "clear a stale funding intent")
+
+	positional, err := parsePositional(flags, args, 1)
+
+	if err != nil {
+		return err
+	}
+
+	if len(positional) != 1 {
+		return errors.New("refresh-timeouts requires a swap id")
+	}
+
+	result, err := engine.RefreshTimeouts(ctx, positional[0], *clearStale)
+
+	if err != nil {
+		return err
+	}
+
+	for _, cleared := range result.ClearedIntents {
+		fmt.Println("CLEARED STALE FUNDING INTENT:", cleared)
+	}
+
+	fmt.Println()
+	fmt.Println("TIMEOUTS REFRESHED")
+	fmt.Println("==================")
+	fmt.Println("swap id:          ", result.SwapID)
+	fmt.Println("Bitcoin height:   ", result.BTCHeight)
+	fmt.Println("BLAKE height:     ", result.BlakeHeight)
+	fmt.Println()
+	fmt.Println("old BTC timeout:  ", result.OldBTCTimeout)
+	fmt.Println("new BTC timeout:  ", result.NewBTCTimeout)
+	fmt.Println("old BLAKE timeout:", result.OldBlakeTimeout)
+	fmt.Println("new BLAKE timeout:", result.NewBlakeTimeout)
 
 	return nil
 }

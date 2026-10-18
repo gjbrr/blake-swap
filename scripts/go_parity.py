@@ -362,7 +362,7 @@ MODULES: list[Module] = [
          "AnnounceBTCCLaimed", "ReceiveBTCCLaimed", "AnnounceBlakeClaimed", "ReceiveBlakeClaimed",
          "AnnounceBTCRefunded", "ReceiveBTCRefunded", "New", "PublishOffer", "AcceptOffer", "ReceiveAccept",
          "Reconcile", "Next", "Resume", "WatchHTLC", "RecoveryPlan", "Dashboard", "ResumeAll",
-         "SyncFunding", "SyncSettlement"],
+         "SyncFunding", "SyncSettlement", "RefreshTimeouts"],
         ["command_status", "command_show", "command_advance", "command_list", "command_fund_blake", "command_fund_btc",
          "command_claim_btc", "command_claim_blake", "command_refund_btc", "command_refund_blake", "command_complete",
          "command_publish_blake_funded", "command_receive_blake_funded", "command_publish_btc_funded", "command_receive_btc_funded",
@@ -371,7 +371,7 @@ MODULES: list[Module] = [
          "command_new", "command_publish_offer", "command_accept_offer", "command_receive_accept",
          "command_reconcile", "command_next", "command_resume", "command_watch_htlc",
          "command_recovery_plan", "command_dashboard", "command_resume_all",
-         "command_sync_funding", "command_sync_settlement"],
+         "command_sync_funding", "command_sync_settlement", "command_refresh_timeouts"],
     ),
     Module(
         "src/swap_agent.py", "pkg/agent", "pending",

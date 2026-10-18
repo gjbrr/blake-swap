@@ -4,10 +4,11 @@
 # would only get in their way); this file owns the wasm side only.
 #
 #   make          build both wasm instances and copy the loader
-#   make serve    build, then run the development server
+#   make server   build the development server binary (also TinyGo)
+#   make serve    build everything, then run the server
 #   make verify   build, then prove the worker's greeting reaches the page
 #   make test     native Go tests (packages that are not wasm-only)
-#   make clean    remove generated wasm and the copied loader
+#   make clean    remove generated wasm, the server binary and the loader
 
 TINYGO   ?= tinygo
 GO       ?= go
@@ -15,6 +16,8 @@ TINYGOROOT := $(shell $(TINYGO) env TINYGOROOT)
 
 WEB    := web
 LOADER := $(WEB)/wasm_exec.js
+BIN    := bin
+SERVER := $(BIN)/blake-swap-app
 
 # Everything the wasm modules are built from.
 SOURCES := $(shell find pkg cmd -name '*.go' -not -name native_stub.go) go.mod go.sum
@@ -22,7 +25,7 @@ SOURCES := $(shell find pkg cmd -name '*.go' -not -name native_stub.go) go.mod g
 # Packages that build for the host: proto is pure Go, server is native.
 NATIVE_PKGS := ./pkg/proto ./cmd/server
 
-.PHONY: all wasm serve verify test fmt vet clean
+.PHONY: all wasm server serve verify test fmt vet clean
 
 all: wasm
 
@@ -40,8 +43,16 @@ $(WEB)/page.wasm: $(SOURCES) $(LOADER)
 $(WEB)/worker.wasm: $(SOURCES) $(LOADER)
 	$(TINYGO) build -target=wasm -o $@ ./cmd/webworker
 
-serve: wasm
-	$(GO) run ./cmd/server
+# The server is TinyGo too: one toolchain builds the whole app, and the
+# binary starts instantly instead of compiling on first request.
+server: $(SERVER)
+
+$(SERVER): $(SOURCES) $(LOADER)
+	@mkdir -p $(BIN)
+	$(TINYGO) build -o $@ ./cmd/server
+
+serve: wasm server
+	$(SERVER) -addr 127.0.0.1:8787 -dir $(WEB)
 
 verify: wasm
 	./scripts/verify-hello.sh
@@ -57,3 +68,4 @@ vet:
 
 clean:
 	rm -f $(WEB)/page.wasm $(WEB)/worker.wasm $(LOADER)
+	rm -rf $(BIN)

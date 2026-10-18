@@ -231,9 +231,14 @@ hook names.
 
 ```bash
 make            # build both wasm instances and copy the TinyGo loader
-make serve      # build, then serve at http://127.0.0.1:8787/
+make server     # build the server binary with TinyGo
+make serve      # build everything, then serve at http://127.0.0.1:8787/
 make verify     # headless check: the page must render the worker's greeting
 ```
+
+Everything is TinyGo: the two wasm modules and the server binary
+(`bin/blake-swap-app`). The server serves `web/` with `application/wasm` and
+`no-store`, so a rebuild is a refresh, and `-open` launches a browser.
 
 A boot gate covers the app on first load. It lists the four things that have to
 be true — the wasm loader, the page module, the worker module, and the link —

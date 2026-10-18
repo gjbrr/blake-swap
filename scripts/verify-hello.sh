@@ -94,9 +94,15 @@ fail() {
     exit 1
 }
 
-GO="${GO:-go}"
+# The server is built with TinyGo like the wasm modules; Go is the fallback if
+# someone only has the wasm toolchain half-installed.
+TINYGO="${TINYGO:-tinygo}"
 
-"$GO" build -o "$WORK/server" ./cmd/server
+if command -v "$TINYGO" >/dev/null 2>&1; then
+    "$TINYGO" build -o "$WORK/server" ./cmd/server
+else
+    "${GO:-go}" build -o "$WORK/server" ./cmd/server
+fi
 
 "$WORK/server" -addr "$ADDR" -dir web >"$WORK/server.log" 2>&1 &
 SERVER_PID=$!

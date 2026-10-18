@@ -63,7 +63,7 @@ func (e *Engine) AnnounceBlakeFunding(ctx context.Context, swapID string) (*Mess
 		"blake_funding_vout": int64(*swap.BlakeFundingVout),
 	}
 
-	location, err := e.send(ctx, swap, chain.Blake, "blake-funded", body)
+	location, err := e.send(ctx, swap, "blake-funded", body)
 
 	if err != nil {
 		return nil, err
@@ -158,7 +158,7 @@ func (e *Engine) AnnounceBTCFunding(ctx context.Context, swapID string) (*Messag
 		"btc_funding_vout": int64(*swap.BTCFundingVout),
 	}
 
-	location, err := e.send(ctx, swap, chain.BTC, "btc-funded", body)
+	location, err := e.send(ctx, swap, "btc-funded", body)
 
 	if err != nil {
 		return nil, err
@@ -234,7 +234,11 @@ func (e *Engine) receiveFunding(
 
 	node := e.nodeFor(ch)
 
-	peer := e.peerFor(swap, ch)
+	peer, err := e.peerFor(swap)
+
+	if err != nil {
+		return nil, err
+	}
 
 	message, err := e.Transport.Receive(ctx, swap.SwapID, kind, coord.ReceiveOptions{
 		ExpectedPubkey: peer,
@@ -387,7 +391,7 @@ func (e *Engine) verifyAnchor(
 
 // send delivers one coordination message as the sender's role.
 func (e *Engine) send(
-	ctx context.Context, swap *model.Swap, ch chain.Chain, kind string, body map[string]any,
+	ctx context.Context, swap *model.Swap, kind string, body map[string]any,
 ) (string, error) {
 	if e.Transport == nil {
 		return "", fmt.Errorf("the engine has no coordination transport")
@@ -412,21 +416,20 @@ func (e *Engine) send(
 	})
 }
 
-// peerFor is the pinned counterparty identity for one chain's announcement.
-func (e *Engine) peerFor(swap *model.Swap, ch chain.Chain) string {
-	if ch == chain.Blake {
-		if swap.NostrAlicePub != nil {
-			return *swap.NostrAlicePub
-		}
-
-		return ""
+// peerFor is the pinned counterparty identity.
+//
+// It follows the local role, not the chain: whichever message arrives, it comes
+// from the other participant. Deriving it from the chain would be right for the
+// funding announcements and wrong for the settlement ones — exactly the kind of
+// asymmetry that turns a pin into a hole.
+func (e *Engine) peerFor(swap *model.Swap) (string, error) {
+	if e.Identity == nil {
+		return "", fmt.Errorf("no local Nostr identity is configured")
 	}
 
-	if swap.NostrBobPub != nil {
-		return *swap.NostrBobPub
-	}
+	_, peer, err := LocalRole(swap, e.Identity.PublicKey())
 
-	return ""
+	return peer, err
 }
 
 // checkReceived is the part of a received announcement every type shares.

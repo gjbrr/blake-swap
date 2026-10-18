@@ -289,28 +289,29 @@ func settlementFields(swap *model.Swap, ch chain.Chain, branch htlc.Branch) sett
 }
 
 // setSettlement records one settlement on the swap.
+//
+// The signed hex and the block hash are only written when they are known. An
+// announcement carries no hex: blanking the field would discard rebroadcast
+// material a crash window depends on, and an empty string is not valid hex for the
+// record's own validation.
 func setSettlement(swap *model.Swap, ch chain.Chain, branch htlc.Branch, txid, blockHash, hex string) {
 	if ch == chain.Blake {
 		if branch == htlc.Claim {
 			swap.BlakeClaimTxID = &txid
-			swap.BlakeClaimHex = &hex
+			swap.BlakeClaimBlockHash = blockOrNil(blockHash, swap.BlakeClaimBlockHash)
 
-			if blockHash != "" {
-				swap.BlakeClaimBlockHash = &blockHash
-			} else {
-				swap.BlakeClaimBlockHash = nil
+			if hex != "" {
+				swap.BlakeClaimHex = &hex
 			}
 
 			return
 		}
 
 		swap.BlakeRefundTxID = &txid
-		swap.BlakeRefundHex = &hex
+		swap.BlakeRefundBlockHash = blockOrNil(blockHash, swap.BlakeRefundBlockHash)
 
-		if blockHash != "" {
-			swap.BlakeRefundBlockHash = &blockHash
-		} else {
-			swap.BlakeRefundBlockHash = nil
+		if hex != "" {
+			swap.BlakeRefundHex = &hex
 		}
 
 		return
@@ -318,25 +319,32 @@ func setSettlement(swap *model.Swap, ch chain.Chain, branch htlc.Branch, txid, b
 
 	if branch == htlc.Claim {
 		swap.BTCCLaimTxID = &txid
-		swap.BTCCLaimHex = &hex
+		swap.BTCCLaimBlockHash = blockOrNil(blockHash, swap.BTCCLaimBlockHash)
 
-		if blockHash != "" {
-			swap.BTCCLaimBlockHash = &blockHash
-		} else {
-			swap.BTCCLaimBlockHash = nil
+		if hex != "" {
+			swap.BTCCLaimHex = &hex
 		}
 
 		return
 	}
 
 	swap.BTCRefundTxID = &txid
-	swap.BTCRefundHex = &hex
+	swap.BTCRefundBlockHash = blockOrNil(blockHash, swap.BTCRefundBlockHash)
 
-	if blockHash != "" {
-		swap.BTCRefundBlockHash = &blockHash
-	} else {
-		swap.BTCRefundBlockHash = nil
+	if hex != "" {
+		swap.BTCRefundHex = &hex
 	}
+}
+
+// blockOrNil returns the announced block hash, or the existing value when the
+// caller does not know it. A pending settlement has no block hash yet, and writing
+// an empty one would look like a confirmed settlement whose block was lost.
+func blockOrNil(blockHash string, existing *string) *string {
+	if blockHash != "" {
+		return &blockHash
+	}
+
+	return existing
 }
 
 // classifyTx asks the HTLC classifier which branch a transaction used.

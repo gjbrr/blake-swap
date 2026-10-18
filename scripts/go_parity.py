@@ -399,6 +399,12 @@ MODULES: list[Module] = [
         [],
     ),
     Module(
+        "(new)", "pkg/client", "partial",
+        "the browser client's encrypted state: a store.Store whose records are sealed with a passphrase-derived key before they reach IndexedDB",
+        ["Encrypted", "Create", "Open", "KV", "Memory"],
+        ["load_swap", "save_swap", "atomic_write_json"],
+    ),
+    Module(
         "(new)", "pkg/platform", "pending",
         "the JS seams: WebSocket, IndexedDB store, clock, console",
         [], [],

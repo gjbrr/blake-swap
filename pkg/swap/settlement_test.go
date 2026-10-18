@@ -44,6 +44,28 @@ func newMempoolNode() *mempoolNode {
 
 func (m *mempoolNode) Height(context.Context) (int64, error) { return m.height, nil }
 
+// Bind answers with a wallet that can see the HTLC, which is all the recovery plan
+// asks about.
+func (m *mempoolNode) Bind(name string) chain.Wallet { return &stubWallet{name: name} }
+
+// ListWallets reports the two participants.
+func (m *mempoolNode) ListWallets(context.Context) ([]string, error) {
+	return []string{"alice", "bob"}, nil
+}
+
+// stubWallet is a wallet with no signing ability, only address knowledge.
+type stubWallet struct {
+	chain.Wallet
+
+	name string
+}
+
+func (w *stubWallet) Name() string { return w.name }
+
+func (w *stubWallet) AddressInfo(_ context.Context, address string) (*chain.AddressInfo, error) {
+	return &chain.AddressInfo{Address: address, Solvable: true}, nil
+}
+
 func (m *mempoolNode) BlockHash(_ context.Context, height int64) (string, error) {
 	return fmt.Sprintf("%064x", height), nil
 }

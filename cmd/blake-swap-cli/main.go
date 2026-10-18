@@ -87,6 +87,9 @@ commands:
   next SWAP_ID
   resume SWAP_ID
   watch-htlc SWAP_ID
+  recovery-plan SWAP_ID
+  dashboard
+  resume-all
 `)
 }
 
@@ -157,6 +160,12 @@ func run(ctx context.Context, engine *swap.Engine, command string, args []string
 		return runResume(ctx, engine, args)
 	case "watch-htlc":
 		return runWatchHTLC(ctx, engine, args)
+	case "recovery-plan":
+		return runRecoveryPlan(ctx, engine, args)
+	case "dashboard":
+		return runDashboard(ctx, engine)
+	case "resume-all":
+		return runResumeAll(ctx, engine)
 	}
 
 	return fmt.Errorf("unknown command: %s", command)
@@ -889,6 +898,133 @@ func yesNo(value bool) string {
 
 // resultChainLabel is a chain's display name.
 func resultChainLabel(ch chain.Chain) string { return chainLabel(ch) }
+
+// runRecoveryPlan prints how to recover an HTLC whose keys are gone.
+func runRecoveryPlan(ctx context.Context, engine *swap.Engine, args []string) error {
+	if len(args) < 1 {
+		return errors.New("recovery-plan requires a swap id")
+	}
+
+	plan, err := engine.RecoveryPlan(ctx, args[0])
+
+	if err != nil {
+		return err
+	}
+
+	fmt.Println()
+	fmt.Println("HTLC RECOVERY PLAN")
+	fmt.Println("==================")
+	fmt.Println("swap:  ", plan.SwapID)
+	fmt.Println("state: ", plan.State)
+	fmt.Println("role:  ", plan.Role)
+	fmt.Println()
+	fmt.Println("Read-only. Nothing is imported, signed, funded or broadcast by this command.")
+
+	for _, leg := range plan.Legs {
+		label := chainLabel(leg.Chain)
+
+		fmt.Println()
+		fmt.Println(strings.ToUpper(label))
+		fmt.Println(strings.Repeat("-", len(label)))
+
+		if leg.Descriptor == "" {
+			fmt.Println("not derivable:", leg.Reason)
+
+			continue
+		}
+
+		fmt.Println("descriptor:  ", leg.Descriptor)
+		fmt.Println("address:     ", leg.Address)
+		fmt.Println("amount:      ", leg.Amount)
+		fmt.Println("timeout:     ", leg.Timeout)
+
+		if leg.FundingTxID != "" {
+			fmt.Println("funding:     ", leg.FundingTxID)
+		}
+
+		if leg.OurClaimKey != "" {
+			fmt.Println("claim key:   ", leg.OurClaimKey)
+		}
+
+		if leg.OurRefundKey != "" {
+			fmt.Println("refund key:  ", leg.OurRefundKey)
+		}
+
+		switch {
+		case leg.Solvable == nil:
+			fmt.Println("solvable:     unknown", leg.Reason)
+		case *leg.Solvable:
+			fmt.Println("solvable:     yes, via wallet", leg.SolvableWallet)
+		default:
+			fmt.Println("solvable:     NO")
+			fmt.Println("warning:      no loaded wallet can spend this HTLC")
+			fmt.Println("              import the descriptor with `watch-htlc`, or substitute your key")
+		}
+	}
+
+	fmt.Println()
+
+	return nil
+}
+
+// runDashboard summarises every local swap.
+func runDashboard(ctx context.Context, engine *swap.Engine) error {
+	entries, err := engine.Dashboard(ctx)
+
+	if err != nil {
+		return err
+	}
+
+	fmt.Println()
+	fmt.Println("SWAP DASHBOARD")
+	fmt.Println("==============")
+
+	if len(entries) == 0 {
+		fmt.Println("No swaps.")
+
+		return nil
+	}
+
+	for _, entry := range entries {
+		fmt.Printf("%s  %-14s %-22s %s\n",
+			entry.SwapID, entry.State, entry.Outcome, entry.Action)
+	}
+
+	return nil
+}
+
+// runResumeAll resumes every swap that has an action.
+func runResumeAll(ctx context.Context, engine *swap.Engine) error {
+	results, err := engine.ResumeAll(ctx)
+
+	if err != nil {
+		return err
+	}
+
+	fmt.Println()
+	fmt.Println("RESUME ALL")
+	fmt.Println("==========")
+
+	performed := 0
+
+	for _, result := range results {
+		if result.Performed {
+			performed++
+
+			fmt.Printf("%s  performed %-12s txid=%s\n",
+				result.SwapID, result.Action, result.TxID)
+
+			continue
+		}
+
+		fmt.Printf("%s  no action (%s)\n", result.SwapID, result.Action)
+	}
+
+	fmt.Println()
+	fmt.Println("actions performed:", performed)
+
+	return nil
+}
 
 // ---------------------------------------------------------------- helpers
 

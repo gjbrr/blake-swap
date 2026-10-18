@@ -2,6 +2,8 @@ package swap
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"strings"
 	"testing"
@@ -83,12 +85,14 @@ func fundContract(t *testing.T, node *mempoolNode, swap *model.Swap, ch chain.Ch
 		t.Fatal(err)
 	}
 
-	txid := strings.Repeat("11", 32)
+	//
+	// The outpoint is derived from the swap and the chain, so two swaps in one test
+	// never share a funding output — a shared output makes a claim in one swap look
+	// like a spend in the other.
+	//
+	sum := sha256.Sum256([]byte(string(ch) + ":" + swap.SwapID))
+	txid := hex.EncodeToString(sum[:])
 	vout := int64(0)
-
-	if ch == chain.BTC {
-		txid = strings.Repeat("12", 32)
-	}
 
 	blockHash := fmtHash(node.height)
 

@@ -24,11 +24,15 @@ scripts/participant-live-env
 *.cookie
 *.wallet
 .env.*
-state/
-swaps/
-messages/
-nostr/
-wallets/
+#
+# Anchored to the repository root on purpose: these are runtime directories an
+# operator may point BLAKE_SWAP_STATE_DIR at, and an unanchored `state/` also
+# matched `pkg/state/`, which silently kept the Go package out of the tree.
+/state/
+/swaps/
+/messages/
+/nostr/
+/wallets/
 
 # Local UI/install scratch copies
 install_blake_web_ui_v1.sh

@@ -43,6 +43,11 @@ jobs:
         with:
           python-version: "3.12"
 
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.3"
+          cache: true
+
       - name: Create the virtual environment
         run: |
           set -euo pipefail
@@ -139,6 +144,20 @@ jobs:
           set -euo pipefail
           PYTHONPATH="$PWD/src:$PWD/tests" \
             .venv/bin/python tests/docs_alignment_tests.py
+
+      - name: Go packages under the two-chain rig
+        run: |
+          set -euo pipefail
+          #
+          # The Go port is built and tested against the same rig the Python
+          # suites use. Without this step a package could be absent from the
+          # tree -- or fail to compile -- and every job here would still pass,
+          # which is exactly what happened once: .gitignore's unanchored
+          # `state/` kept pkg/state out of the repository unnoticed.
+          #
+          go build ./...
+          go vet ./pkg/...
+          go test ./pkg/...
 
       - name: Parity manifest
         run: |

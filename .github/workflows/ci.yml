@@ -140,6 +140,15 @@ jobs:
           PYTHONPATH="$PWD/src:$PWD/tests" \
             .venv/bin/python tests/docs_alignment_tests.py
 
+      - name: Parity manifest
+        run: |
+          set -euo pipefail
+          #
+          # The manifest is generated from the tree, so a stale or invented row
+          # is a failure here rather than a claim that quietly stops being true.
+          #
+          .venv/bin/python scripts/go_parity.py --check
+
       - name: Full suite under coverage, gated at 80%
         run: |
           set -euo pipefail

@@ -155,7 +155,7 @@ type TakeEntry struct {
 	Taker   string
 }
 
-// TakesFor returns the valid takes of one offer, oldest first.
+// TakesFor returns the valid takes of one offer, newest first.
 //
 // A take is valid when it proves itself and when it is *about this offer*: the same
 // economics, the same direction, the roles the direction implies, and an author who is
@@ -203,12 +203,14 @@ func TakesFor(offer *ListedOffer, evidence []event.Event, now time.Time) []TakeE
 		})
 	}
 
+	// Newest first, which is the order the reference lists them in: the take a maker
+	// is deciding about is usually the most recent one.
 	sort.SliceStable(entries, func(i, j int) bool {
 		if entries[i].Event.CreatedAt != entries[j].Event.CreatedAt {
-			return entries[i].Event.CreatedAt < entries[j].Event.CreatedAt
+			return entries[i].Event.CreatedAt > entries[j].Event.CreatedAt
 		}
 
-		return entries[i].EventID < entries[j].EventID
+		return entries[i].EventID > entries[j].EventID
 	})
 
 	return entries

@@ -50,6 +50,23 @@ func main() {
 		return
 	}
 
+	// These commands sign or read, but they touch no chain. Building an engine here
+	// would demand a regtest datadir and two nodes for a command the reference runs on
+	// a laptop with neither, so only the identity is loaded.
+	if isIdentityOnlyCommand(command) {
+		identity, err := loadIdentity(stateDirectory())
+
+		if err != nil {
+			fail(err)
+		}
+
+		if err := run(context.Background(), &swap.Engine{Identity: identity}, command, args); err != nil {
+			fail(err)
+		}
+
+		return
+	}
+
 	engine, cleanup, err := buildEngine()
 
 	if err != nil {
@@ -119,6 +136,8 @@ func run(ctx context.Context, engine *swap.Engine, command string, args []string
 		return runInspectMarketTake(ctx, engine, args)
 	case "take-market-offer":
 		return runTakeMarketOffer(ctx, engine, args)
+	case "market-takes":
+		return runMarketTakes(ctx, engine, args)
 	case "new":
 		return runNew(ctx, engine, args)
 	case "show":

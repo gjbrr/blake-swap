@@ -337,8 +337,8 @@ func TestTakesForAcceptsAValidTakeAndRejectsTheRest(t *testing.T) {
 		t.Fatalf("takes = %d, want 2 valid: %+v", len(takes), takes)
 	}
 
-	// Oldest first, and the duplicate counted once.
-	if takes[0].EventID != f.takeEvent.ID || takes[1].EventID != second.ID {
+	// Newest first, and the duplicate counted once.
+	if takes[0].EventID != second.ID || takes[1].EventID != f.takeEvent.ID {
 		t.Fatalf("order = %q, %q", takes[0].EventID, takes[1].EventID)
 	}
 

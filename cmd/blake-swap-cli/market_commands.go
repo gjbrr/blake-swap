@@ -25,6 +25,20 @@ const (
 	marketStateCommand = "market-state"
 )
 
+// isIdentityOnlyCommand reports whether a command needs the participant key but no node.
+//
+// The distinction is not cosmetic: the reference lets a person cancel an offer, preview a
+// take or read their inbox on a machine that has no nodes configured, and a client that
+// demands a datadir for those would be a worse tool for no reason.
+func isIdentityOnlyCommand(command string) bool {
+	switch command {
+	case "cancel-market-offer", "inspect-market-take", "market-takes":
+		return true
+	}
+
+	return false
+}
+
 // isMarketCommand reports whether a command reads the market rather than a chain.
 //
 // The one switch that needs this is main's, which must decide whether building an

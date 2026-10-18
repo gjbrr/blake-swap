@@ -25,9 +25,9 @@ env:
   # Knots publishes no "latest" alias, so the version appears in both the
   # directory and the file name.
   CORE_VERSION: "30.3"
-  KNOTS_VERSION: "29.3.knots20260508"
+  KNOTS_VERSION: "29.4.2.knots20260508"
   CORE_SHA256: "4753cd70416c629a2090503e8545a3c05e94a0f5037f8fb97b4c35c6e1afee0e"
-  KNOTS_SHA256: "70bd12fb56a2fe3908e0f44f7f142f77a55aabc8427bf00b61cfa4deedcf0899"
+  KNOTS_SHA256: "b59d0445a317e21a03dc29425db3aba79b27d5125230b1a2b1dce62e120827c5"
 
 jobs:
   test:

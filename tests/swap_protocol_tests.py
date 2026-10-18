@@ -96,6 +96,13 @@ node_config_problems = node_config.node_config_problems
 ALICE_WALLET = "alice"
 BOB_WALLET = "bob"
 
+#
+# The wallet `scripts/test-nodes` mines its initial maturity run into.
+# On a fresh chain it is the only source of coins, so the BLAKE capital
+# pool is bootstrapped from it once.
+#
+RIG_WALLET = "rig"
+
 ALICE_PARTICIPANT_KEY = ALICE_BASE / "test-participant.key"
 BOB_PARTICIPANT_KEY = BOB_BASE / "test-participant.key"
 
@@ -374,6 +381,141 @@ def blake_cli(*args, wallet=None):
         return out
 
 
+def _chain_endpoint(chain):
+    """
+    The CLI, datadir, extra RPC arguments and callable for one chain.
+    """
+    if chain == "btc":
+        return BTC_CLI, BTC_DATADIR, BTC_RPC_ARGS, btc_cli
+
+    if chain == "blake":
+        return BLAKE_CLI, BLAKE_DATADIR, BLAKE_RPC_ARGS, blake_cli
+
+    raise ValueError(f"unknown chain: {chain}")
+
+
+def _running_node_argv(datadir):
+    """
+    The argv a locally started daemon is running with, read from /proc.
+
+    Returning the *running* argv is the point: a restart that copies the
+    rig's own configuration cannot drift as node versions add or remove
+    flags, and cannot hardcode a flag the installed binary rejects.
+    """
+    datadir_arg = f"-datadir={datadir}"
+
+    for proc in Path("/proc").iterdir():
+        if not proc.name.isdigit():
+            continue
+
+        try:
+            raw = (proc / "cmdline").read_bytes()
+        except (OSError, PermissionError):
+            continue
+
+        argv = [
+            part
+            for part in raw.replace(b"\x00", b" ").decode(
+                "utf-8",
+                errors="replace",
+            ).split(" ")
+            if part
+        ]
+
+        if argv and "bitcoind" in argv[0] and datadir_arg in argv:
+            return argv
+
+    return None
+
+
+def restart_local_node_without_mempool(chain):
+    """
+    Restart a locally started regtest daemon with mempool persistence off.
+
+    This reproduces the production recovery condition the settlement
+    suites care about: durable swap state survives, but the node forgets
+    its pending transaction and starts with no wallets loaded.
+
+    The restart reuses the argv the daemon is running with rather than a
+    hardcoded copy. A hardcoded copy is how this broke once: it named
+    `-blake2b_headline=`, which a node predating the BLAKE2b hardfork
+    rejects on argv, so the daemon never came back and every later suite
+    in the run lost its BLAKE node.
+
+    Remote and custom-RPC targets cannot be restarted by this black-box
+    harness, so they skip.
+    """
+    cli, datadir, rpc_args, call = _chain_endpoint(chain)
+    label = "Bitcoin" if chain == "btc" else "BLAKE"
+
+    if datadir is None:
+        skip(f"{label} restart test needs a local {label} datadir")
+
+    if rpc_args:
+        skip(
+            f"{label} restart test does not restart "
+            "remote/custom-RPC nodes"
+        )
+
+    bitcoind = Path(str(cli)).parent / "bitcoind"
+
+    if not bitcoind.exists():
+        skip(
+            f"{label} bitcoind executable not found next to bitcoin-cli",
+            details=[f"expected: {bitcoind}"],
+        )
+
+    running = _running_node_argv(datadir)
+
+    if running is None:
+        skip(
+            f"{label} restart test needs a locally started daemon",
+            details=[f"no bitcoind process holds {datadir}"],
+        )
+
+    #
+    # Rebuild from the live argv: same binary, same datadir, same chain
+    # flags, but daemonized and with an empty mempool. The running
+    # process carries no `-daemon`, and may already have
+    # `-persistmempool`, so both are normalised rather than appended
+    # blindly.
+    #
+    restart = [
+        part
+        for part in running
+        if not part.startswith("-persistmempool") and part != "-daemon"
+    ]
+
+    restart.extend(["-persistmempool=0", "-daemon"])
+
+    call("stop")
+
+    deadline = time.time() + 20
+
+    while time.time() < deadline:
+        if _running_node_argv(datadir) is None:
+            break
+
+        time.sleep(0.2)
+    else:
+        raise TestFailure(
+            f"{label} daemon still holds the test datadir after stop"
+        )
+
+    run(restart)
+
+    deadline = time.time() + 20
+
+    while time.time() < deadline:
+        try:
+            call("getblockcount")
+            return
+        except Exception:
+            time.sleep(0.2)
+
+    raise TestFailure(f"{label} daemon did not restart")
+
+
 def tool_env():
     """
     Environment for the independent-implementation tools in tools/.
@@ -568,14 +710,17 @@ def ensure_blake_alice_reserve(
     """
     Maintain the finite BLAKE regtest capital pool.
 
-    At the current chain height mining still produces blocks, but no
-    longer increases spendable BLAKE balance. Therefore the test harness
-    must recycle coins rather than attempt to mint replacements.
+    Protocol Alice is always the BLAKE funder, and the BLAKE chain's
+    issuance is exhaustible, so coins are recycled rather than minted:
+    Bob's accumulated balance is swept back to Alice when her reserve
+    drops below `minimum`.
 
-    Protocol Alice is always the BLAKE funder. Bob does not require an
-    initial BLAKE reserve: successful swaps naturally transfer BLAKE to
-    Bob, and that accumulated spendable balance is swept back to Alice
-    when her reserve drops below `minimum`.
+    A fresh rig has no pool yet. `scripts/test-nodes` mines its initial
+    maturity run into a `rig` wallet, so on a new chain that wallet is
+    the only source of coins; it is swept once to create the pool.
+    Without that step the first suite of a fresh rig fails with an
+    empty-pool error that looks like a swap defect rather than a
+    bootstrap gap.
     """
     alice_balance = trusted_balance(
         blake_cli,
@@ -596,33 +741,26 @@ def ensure_blake_alice_reserve(
         f"bob={bob_balance:.8f}"
     )
 
-    if bob_balance > 0:
-        alice_addr = blake_cli(
-            "getnewaddress",
-            "",
-            "bech32",
-            wallet=ALICE_WALLET,
-        )
+    mine_addr = blake_cli(
+        "getnewaddress",
+        "",
+        "bech32",
+        wallet=ALICE_WALLET,
+    )
 
+    if bob_balance > 0:
         txid = blake_cli(
             "sendall",
             json.dumps(
-                [alice_addr]
+                [mine_addr]
             ),
             wallet=BOB_WALLET,
         )
 
         #
-        # Mining still confirms transactions even though fresh BLAKE
-        # issuance at this height is exhausted.
+        # Mining still confirms transactions even where fresh BLAKE
+        # issuance is exhausted.
         #
-        mine_addr = blake_cli(
-            "getnewaddress",
-            "",
-            "bech32",
-            wallet=ALICE_WALLET,
-        )
-
         blake_cli(
             "generatetoaddress",
             1,
@@ -633,6 +771,34 @@ def ensure_blake_alice_reserve(
             "  BLAKE recycled Bob -> Alice:",
             txid,
         )
+
+    if trusted_balance(blake_cli, ALICE_WALLET) < minimum:
+        rig_balance = trusted_balance(
+            blake_cli,
+            RIG_WALLET,
+        )
+
+        listed = blake_cli("listwallets")
+
+        if rig_balance > 0 and isinstance(listed, list) and RIG_WALLET in listed:
+            txid = blake_cli(
+                "sendall",
+                json.dumps(
+                    [mine_addr]
+                ),
+                wallet=RIG_WALLET,
+            )
+
+            blake_cli(
+                "generatetoaddress",
+                1,
+                mine_addr,
+            )
+
+            print(
+                "  BLAKE bootstrapped the pool from the rig wallet:",
+                txid,
+            )
 
     alice_balance = trusted_balance(
         blake_cli,

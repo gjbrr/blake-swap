@@ -47,3 +47,25 @@ The repository builds a standard wheel with:
 
 ```bash
 python -m pip wheel --no-deps --wheel-dir dist .
+```
+
+That wheel installs into a clean virtual environment and exposes the two
+console entry points, so an independent implementation can run the reference
+engine without the checkout:
+
+```bash
+python -m venv /tmp/blake-rc
+/tmp/blake-rc/bin/pip install dist/blake_swap-0.2.0-py3-none-any.whl
+/tmp/blake-rc/bin/blake-swap-engine --help
+/tmp/blake-rc/bin/blake-swap-agent --help
+```
+
+`tests/installed_wheel_tests.py` proves this on every run in a throwaway
+environment: the wheel builds, `pip check` reports a healthy dependency set,
+both entry points execute, and the installed engine runs node-free from a
+directory that is not the checkout.
+
+The remaining release claims are carried by the portable conformance material
+(`docs/MOXIE_SECURITY_CONFORMANCE.md`) and the adapter contract
+(`docs/IMPLEMENTATION_ADAPTER_PROTOCOL.md`), which a second implementation is
+expected to satisfy rather than this document restating.

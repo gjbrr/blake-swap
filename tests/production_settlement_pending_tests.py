@@ -757,193 +757,22 @@ def test_btc_refund_durable_rebroadcast_after_mempool_loss():
 
 def restart_local_btc_without_mempool():
     """
-    Restart the local Bitcoin regtest daemon with mempool persistence
-    disabled.
+    Restart the local Bitcoin daemon with an empty mempool.
 
-    The swap state survives, but the node forgets its pending
-    transaction and all wallets start unloaded.
+    Delegates to the shared harness helper, which rebuilds the command
+    from the running daemon's own argv instead of a hardcoded copy.
     """
-
-    if h.BTC_DATADIR is None:
-        h.skip(
-            "durable BTC settlement rebroadcast test needs a local Bitcoin datadir"
-        )
-
-    if h.BTC_RPC_ARGS:
-        h.skip(
-            "durable BTC settlement rebroadcast test does not restart remote/custom-RPC Bitcoin nodes"
-        )
-
-    bitcoind = h.BTC_CLI.parent / "bitcoind"
-
-    if not bitcoind.exists():
-        h.skip(
-            "Bitcoin bitcoind executable not found next to bitcoin-cli",
-            details=[f"expected: {bitcoind}"],
-        )
-
-    h.btc_cli("stop")
-
-    deadline = time.time() + 20
-
-    while time.time() < deadline:
-        still_running = False
-        datadir_arg = f"-datadir={h.BTC_DATADIR}"
-
-        for proc in Path("/proc").iterdir():
-            if not proc.name.isdigit():
-                continue
-
-            try:
-                cmdline = (
-                    proc / "cmdline"
-                ).read_bytes().replace(
-                    b"\x00",
-                    b" ",
-                ).decode(
-                    "utf-8",
-                    errors="replace",
-                )
-            except (OSError, PermissionError):
-                continue
-
-            if (
-                "bitcoind" in cmdline
-                and datadir_arg in cmdline
-            ):
-                still_running = True
-                break
-
-        if not still_running:
-            break
-
-        time.sleep(0.2)
-    else:
-        raise h.TestFailure(
-            "Bitcoin daemon still holds the test datadir after stop"
-        )
-
-    h.run([
-        bitcoind,
-        "-regtest",
-        f"-datadir={h.BTC_DATADIR}",
-        "-server=1",
-        "-fallbackfee=0.0001",
-        "-txindex=0",
-        "-persistmempool=0",
-        "-daemon",
-    ])
-
-    deadline = time.time() + 20
-
-    while time.time() < deadline:
-        try:
-            h.btc_cli("getblockcount")
-            return
-        except Exception:
-            time.sleep(0.2)
-
-    raise h.TestFailure(
-        "Bitcoin daemon did not restart"
-    )
+    h.restart_local_node_without_mempool("btc")
 
 
 def restart_local_blake_without_mempool():
     """
-    Restart the local BLAKE regtest daemon with mempool persistence
-    disabled.
+    Restart the local BLAKE daemon with an empty mempool.
 
-    This intentionally reproduces the production recovery condition:
-    the swap state survives, but the node forgets its pending
-    transaction and all wallets start unloaded.
-
-    Remote-node configurations cannot safely be restarted by this
-    black-box suite, so they skip this specific regression.
+    Delegates to the shared harness helper, which rebuilds the command
+    from the running daemon's own argv instead of a hardcoded copy.
     """
-
-    if h.BLAKE_DATADIR is None:
-        h.skip(
-            "durable BLAKE claim rebroadcast test needs a local BLAKE datadir"
-        )
-
-    if h.BLAKE_RPC_ARGS:
-        h.skip(
-            "durable BLAKE claim rebroadcast test does not restart remote/custom-RPC BLAKE nodes"
-        )
-
-    bitcoind = h.BLAKE_CLI.parent / "bitcoind"
-
-    if not bitcoind.exists():
-        h.skip(
-            "BLAKE bitcoind executable not found next to bitcoin-cli",
-            details=[f"expected: {bitcoind}"],
-        )
-
-    h.blake_cli("stop")
-
-    deadline = time.time() + 20
-
-    while time.time() < deadline:
-        still_running = False
-        datadir_arg = f"-datadir={h.BLAKE_DATADIR}"
-
-        for proc in Path("/proc").iterdir():
-            if not proc.name.isdigit():
-                continue
-
-            try:
-                cmdline = (
-                    proc / "cmdline"
-                ).read_bytes().replace(
-                    b"\x00",
-                    b" ",
-                ).decode(
-                    "utf-8",
-                    errors="replace",
-                )
-            except (OSError, PermissionError):
-                continue
-
-            if (
-                "bitcoind" in cmdline
-                and datadir_arg in cmdline
-            ):
-                still_running = True
-                break
-
-        if not still_running:
-            break
-
-        time.sleep(0.2)
-    else:
-        raise h.TestFailure(
-            "BLAKE daemon still holds the test datadir after stop"
-        )
-
-    h.run([
-        bitcoind,
-        "-regtest",
-        f"-datadir={h.BLAKE_DATADIR}",
-        "-server=1",
-        "-fallbackfee=0.0001",
-        "-txindex=0",
-        "-persistmempool=0",
-        "-blake2b_headline=",
-        "-daemon",
-    ])
-
-    deadline = time.time() + 20
-
-    while time.time() < deadline:
-        try:
-            h.blake_cli("getblockcount")
-            return
-        except Exception:
-            time.sleep(0.2)
-
-    raise h.TestFailure(
-        "BLAKE daemon did not restart"
-    )
+    h.restart_local_node_without_mempool("blake")
 
 
 def test_blake_claim_durable_rebroadcast_after_mempool_loss():

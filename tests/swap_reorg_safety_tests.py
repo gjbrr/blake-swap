@@ -46,93 +46,12 @@ def output_of(proc):
 
 def restart_local_blake_without_mempool():
     """
-    Restart the local BLAKE regtest daemon with mempool persistence
-    disabled, leaving wallets unloaded.
+    Restart the local BLAKE daemon with an empty mempool.
+
+    Delegates to the shared harness helper, which rebuilds the command
+    from the running daemon's own argv instead of a hardcoded copy.
     """
-
-    if h.BLAKE_DATADIR is None:
-        h.skip(
-            "BLAKE reorg durable-rebroadcast test needs a local BLAKE datadir"
-        )
-
-    if h.BLAKE_RPC_ARGS:
-        h.skip(
-            "BLAKE reorg durable-rebroadcast test does not restart remote/custom-RPC nodes"
-        )
-
-    bitcoind = h.BLAKE_CLI.parent / "bitcoind"
-
-    if not bitcoind.exists():
-        h.skip(
-            "BLAKE bitcoind executable not found next to bitcoin-cli",
-            details=[f"expected: {bitcoind}"],
-        )
-
-    h.blake_cli("stop")
-
-    deadline = time.time() + 20
-
-    while time.time() < deadline:
-        still_running = False
-        datadir_arg = f"-datadir={h.BLAKE_DATADIR}"
-
-        for proc in Path("/proc").iterdir():
-            if not proc.name.isdigit():
-                continue
-
-            try:
-                cmdline = (
-                    proc / "cmdline"
-                ).read_bytes().replace(
-                    b"\x00",
-                    b" ",
-                ).decode(
-                    "utf-8",
-                    errors="replace",
-                )
-            except (OSError, PermissionError):
-                continue
-
-            if (
-                "bitcoind" in cmdline
-                and datadir_arg in cmdline
-            ):
-                still_running = True
-                break
-
-        if not still_running:
-            break
-
-        time.sleep(0.2)
-    else:
-        raise h.TestFailure(
-            "BLAKE daemon still holds the test datadir after stop"
-        )
-
-    h.run([
-        bitcoind,
-        "-regtest",
-        f"-datadir={h.BLAKE_DATADIR}",
-        "-server=1",
-        "-fallbackfee=0.0001",
-        "-txindex=0",
-        "-persistmempool=0",
-        "-blake2b_headline=",
-        "-daemon",
-    ])
-
-    deadline = time.time() + 20
-
-    while time.time() < deadline:
-        try:
-            h.blake_cli("getblockcount")
-            return
-        except Exception:
-            time.sleep(0.2)
-
-    raise h.TestFailure(
-        "BLAKE daemon did not restart"
-    )
+    h.restart_local_node_without_mempool("blake")
 
 
 def test_blake_funding_reorg():

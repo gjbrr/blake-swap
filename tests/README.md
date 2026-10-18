@@ -84,6 +84,33 @@ scripts/test-nodes stop         # stop; the node-backed suites then SKIP
 scripts/test-nodes reset        # stop and delete both datadirs
 ```
 
+The BLAKE side is [Bitcoin Knots](https://github.com/bitcoinknots/bitcoin)
+with the BLAKE2b proof-of-work hardfork, which is Knots **v29.4.1 or
+later**; the rig prefers `$HOME/s/bitcoin-blake2b/bin/` when that build is
+installed and falls back to a stock Knots otherwise. Either build is
+enough for the swap machinery — no suite depends on how a block header is
+hashed — so the rig does not schedule the hardfork or pass its flags, and
+a suite that restarts a node replays that daemon's own argv rather than a
+hardcoded copy. Build the chain's node with:
+
+```bash
+git clone --depth 1 --branch v29.4.2.knots20260508 \
+    https://github.com/bitcoinknots/bitcoin.git ~/s/bitcoinknots/bitcoin
+cmake -B ~/s/bitcoinknots/bitcoin/build -DCMAKE_BUILD_TYPE=Release \
+    -DBUILD_GUI=OFF -DBUILD_TESTS=OFF -DBUILD_BENCH=OFF
+cmake --build ~/s/bitcoinknots/bitcoin/build -j"$(nproc)"
+mkdir -p ~/s/bitcoin-blake2b/bin
+for b in bitcoind bitcoin-cli bitcoin-tx bitcoin-util; do
+    ln -sfn ~/s/bitcoinknots/bitcoin/build/bin/$b ~/s/bitcoin-blake2b/bin/$b
+done
+```
+
+A wallet created by a newer node cannot be reopened by an older one, so
+switching the rig between node versions needs a `scripts/test-nodes reset`
+(fresh chain, fresh wallets). The suites bootstrap their own capital: the
+BTC side mines, and the BLAKE side takes the rig wallet's initial maturity
+run once and then recycles it between the two participant wallets.
+
 `start` writes `$BLAKE_SWAP_TEST_ROOT/rig-env.json`; `tests/node_config.py`
 reads it. That is what makes a running rig authoritative: a **stopped**
 rig produces a `SKIP` naming the rig, rather than a suite that connects

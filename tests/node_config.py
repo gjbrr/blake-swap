@@ -229,7 +229,18 @@ BTC_CLI, BTC_CLI_SOURCE = _resolve_executable(
 BLAKE_CLI, BLAKE_CLI_SOURCE = _resolve_executable(
     "BLAKE_SWAP_BLAKE_CLI",
     [
-        *_rig_candidates("blake_cli", HOME / "s" / "bitcoin-knots" / "bin" / "bitcoin-cli"),
+        *_rig_candidates(
+            "blake_cli",
+            HOME / "s" / "bitcoin-blake2b" / "bin" / "bitcoin-cli",
+        ),
+        # The BLAKE chain is Bitcoin Knots with the BLAKE2b proof-of-work
+        # hardfork (BIP-110 lineage, activated 2026-08-30 at block 961,640
+        # on mainnet; Knots >= v29.4.1). That build is preferred when it
+        # is installed, because it is the chain this project settles on.
+        HOME / "s" / "bitcoin-blake2b" / "bin" / "bitcoin-cli",
+        HOME / "s" / "bitcoinknots" / "bitcoin" / "build" / "bin" / "bitcoin-cli",
+        # A stock Knots build still works as the second chain: the swap
+        # machinery does not depend on the proof-of-work function.
         HOME / "s" / "bitcoin-knots" / "bin" / "bitcoin-cli",
         HOME / "bitcoin-blake-rc2" / "build-rc2" / "bin" / "bitcoin-cli",
         HOME / "bitcoin-blake-rc2" / "build" / "bin" / "bitcoin-cli",

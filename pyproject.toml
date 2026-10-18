@@ -43,7 +43,6 @@ Repository = "https://github.com/gjbrr/blake-swap"
 # wrong thing.
 [tool.setuptools]
 py-modules = [
-    "blake_web_ui",
     "fee_policy",
     "nip44",
     "swap_agent",

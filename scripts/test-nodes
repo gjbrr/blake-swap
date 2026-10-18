@@ -13,9 +13,12 @@
 # BLAKE node is moved to the 194xx range.
 #
 # This validates the swap machinery across two independent node
-# implementations. It does not exercise the blake2b consensus of the
-# original BLAKE chain, whose node software is not available locally;
-# point BLAKE_SWAP_TEST_BLAKE_CLI at that binary when it is.
+# implementations. The BLAKE chain's own node is a Knots build carrying the
+# BLAKE2b proof-of-work hardfork; it is used when installed at
+# ~/s/bitcoin-blake2b, and a stock Knots otherwise. The proof-of-work
+# function is not exercised either way: no test depends on how a block
+# header is hashed, and regtest activates the hardfork only when a fork
+# height is explicitly scheduled.
 #
 # Usage:
 #   scripts/test-nodes start     start both nodes and print the env exports
@@ -44,7 +47,19 @@ set -uo pipefail
 TEST_ROOT="${BLAKE_SWAP_TEST_ROOT:-$HOME/.blake-swap-test}"
 
 BTC_CLI="${BLAKE_SWAP_TEST_BTC_CLI:-$HOME/s/bitcoin-core/bin/bitcoin-cli}"
-BLAKE_CLI="${BLAKE_SWAP_TEST_BLAKE_CLI:-$HOME/s/bitcoin-knots/bin/bitcoin-cli}"
+#
+# The BLAKE chain is Bitcoin Knots with the BLAKE2b proof-of-work hardfork
+# (Knots >= v29.4.1). Prefer that build when it is installed; a stock Knots
+# still works as the second chain, since the swap machinery does not depend
+# on the proof-of-work function.
+#
+if [[ -n "${BLAKE_SWAP_TEST_BLAKE_CLI:-}" ]]; then
+    BLAKE_CLI="$BLAKE_SWAP_TEST_BLAKE_CLI"
+elif [[ -x "$HOME/s/bitcoin-blake2b/bin/bitcoin-cli" ]]; then
+    BLAKE_CLI="$HOME/s/bitcoin-blake2b/bin/bitcoin-cli"
+else
+    BLAKE_CLI="$HOME/s/bitcoin-knots/bin/bitcoin-cli"
+fi
 
 BTC_DATADIR="$TEST_ROOT/btc"
 BLAKE_DATADIR="$TEST_ROOT/blake"
@@ -82,7 +97,6 @@ Set BLAKE_SWAP_TEST_BLAKE_CLI, or see ~/s/bitcoin-knots/README.md"
 
 write_conf() {
     local datadir="$1" rpcport="$2" port="$3" label="$4"
-    local extra_config="${5:-}"
 
     mkdir -p "$datadir"
 
@@ -108,8 +122,6 @@ rpcallowip=127.0.0.1
 rpcport=$rpcport
 bind=127.0.0.1
 port=$port
-
-$extra_config
 EOF
 }
 
@@ -238,7 +250,7 @@ cmd_start() {
     echo
 
     write_conf "$BTC_DATADIR" "$BTC_RPCPORT" "$BTC_PORT" "btc (Bitcoin Core)"
-    write_conf "$BLAKE_DATADIR" "$BLAKE_RPCPORT" "$BLAKE_PORT" "blake (Bitcoin Knots)" "blake2b_headline="
+    write_conf "$BLAKE_DATADIR" "$BLAKE_RPCPORT" "$BLAKE_PORT" "blake (Bitcoin Knots)"
 
     echo "starting nodes..."
 

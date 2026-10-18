@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>BLAKE swap — two-instance skeleton</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <main>
+    <header>
+      <h1>blake-swap</h1>
+      <p class="sub">page <span class="sep">↔</span> service worker, two wasm instances</p>
+    </header>
+
+    <section class="card">
+      <p class="lede">
+        The text in the box was produced by the <strong>worker</strong> wasm
+        instance and delivered over the channel shim. If you can read it, the
+        page domain and the worker domain are talking.
+      </p>
+
+      <pre id="hello" class="hello" aria-live="polite">…</pre>
+
+      <dl class="rows">
+        <div class="row">
+          <dt>page</dt>
+          <dd><span id="page-status" class="pill state-wait">starting</span></dd>
+        </div>
+        <div class="row">
+          <dt>worker</dt>
+          <dd><span id="worker-status" class="pill state-wait">starting</span></dd>
+        </div>
+        <div class="row">
+          <dt>round trip</dt>
+          <dd><span id="round-trip" class="mono">—</span></dd>
+        </div>
+      </dl>
+
+      <button id="ping" type="button">ping the worker again</button>
+      <pre id="trace" class="trace" hidden></pre>
+    </section>
+
+    <footer>
+      <span class="mono">web/page.wasm</span> owns the document ·
+      <span class="mono">web/worker.wasm</span> owns the services
+    </footer>
+  </main>
+
+  <script src="wasm_exec.js"></script>
+  <script src="page.js"></script>
+</body>
+</html>

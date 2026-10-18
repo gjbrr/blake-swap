@@ -178,6 +178,17 @@ tests/                     60 suites: unit tests and regtest integration
 tools/minimal_*.py         independent wire-message producers
 tools/minimal_nip44.py     standalone NIP-44 v2 implementation (cross-checks src/nip44.py)
 checkpoints/v1.5/          frozen earlier snapshot with SHA256SUMS
+
+pkg/                       TinyGo packages for the browser app
+  proto/                   message vocabulary shared by the page and the worker
+  link/                    postMessage channel shim: a Duplex across two wasm instances
+  page/                    page-side domain: owns the document
+  worker/                  worker-side domain: relay proxy, signatures, Nostr (empty)
+cmd/                       entry points and the development server
+  webpage/                 page wasm main
+  webworker/               service-worker wasm main
+  server/                  serves web/ with application/wasm
+web/                       index.html, the two bootstraps, style.css, built wasm
 ```
 
 Two annotated tags mark the documented checkpoints, so a hash in the
@@ -195,6 +206,43 @@ verify it from inside that directory:
 ```bash
 cd checkpoints/v1.5 && sha256sum -c SHA256SUMS
 ```
+
+---
+
+## Browser application
+
+The repository also contains the start of the browser client: two TinyGo wasm
+instances and the shim that makes them behave like two domains of one runtime.
+
+- **`web/page.wasm`** runs in the document and owns presentation and
+  interaction. It sends the opening hello and renders what comes back.
+- **`web/worker.wasm`** runs in a service Web Worker and is where the relay
+  proxy, signature checking and Nostr work will live. Today it answers one
+  greeting and ignores everything else.
+- **`pkg/link`** is the shim. The app is handed a `tinyspawn.Duplex`, exactly
+  the type an in-instance peer would give it; behind that, `postMessage` and a
+  JSON envelope carry the messages, and the two JavaScript bootstraps own only
+  the transport.
+
+The point of the split is that the page cannot block the worker and the worker
+cannot reach into the page. Both are enforced structurally: different wasm
+memories, different realms, and the only contract is the envelope and the two
+hook names.
+
+```bash
+make            # build both wasm instances and copy the TinyGo loader
+make serve      # build, then serve at http://127.0.0.1:8787/
+make verify     # headless check: the page must render the worker's greeting
+```
+
+`make verify` drives a real browser, clicks the re-ping control twice, and
+asserts that the greeting rendered, the sequence reached three, and the document
+carries `data-hello-verified="true"`. It also writes
+`web/hello-screenshot.png` so the result can be looked at.
+
+The build is TinyGo-only; `go build ./...` on the host still works because the
+wasm entry points carry a native stub, and `make test` covers the packages that
+are not wasm-specific.
 
 ---
 

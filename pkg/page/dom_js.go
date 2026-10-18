@@ -90,25 +90,45 @@ func markWorkerReady() {
 // markVerified records success on the document so the headless check does not
 // have to match presentation prose.
 func markVerified() {
+	mark(VerifiedAttribute)
+}
+
+// mark sets one document marker.
+//
+// The markers are the page's contract with the headless check: a check that asserted
+// panel text would break on every wording change, and a check that asserted nothing
+// would pass on a page that never ran the command.
+func mark(attribute string) {
 	js.Global().Get("document").Get("body").Call(
 		"setAttribute",
-		VerifiedAttribute,
+		attribute,
 		"true",
+	)
+}
+
+// inputValue reads a text field's current value. An absent field reads as empty, which
+// the worker then refuses with its own message instead of the page inventing a default.
+func inputValue(id string) string {
+	el := element(id)
+
+	if el.IsUndefined() {
+		return ""
+	}
+
+	return el.Get("value").String()
+}
+
+// unmark removes a document marker, for a fact that stopped being true.
+func unmark(attribute string) {
+	js.Global().Get("document").Get("body").Call(
+		"removeAttribute",
+		attribute,
 	)
 }
 
 // setVaultText renders the worker's command output.
 func setVaultText(text string) {
 	setText(ElementVault, text)
-}
-
-// markVaultVerified records that the encrypted round trip succeeded in this browser.
-func markVaultVerified() {
-	js.Global().Get("document").Get("body").Call(
-		"setAttribute",
-		VaultVerifiedAttribute,
-		"true",
-	)
 }
 
 func consoleLog(msg string) {

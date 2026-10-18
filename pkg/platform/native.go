@@ -10,6 +10,8 @@ import (
 	"io"
 	"net/http"
 	"time"
+
+	"github.com/gjbrr/blake-swap/pkg/rpc"
 )
 
 // HTTP is the host implementation of rpc.Transport: a plain HTTP POST to a
@@ -29,6 +31,14 @@ type HTTP struct {
 	Timeout time.Duration
 	// Client is an optional transport; nil uses a client with Timeout applied.
 	Client *http.Client
+}
+
+// NewTransport returns the host's transport for one JSON-RPC endpoint.
+//
+// This is the factory the chain package uses, so the choice of transport is a property
+// of the platform rather than a decision each caller makes and one of them gets wrong.
+func NewTransport(url, user, password string, timeout time.Duration) rpc.Transport {
+	return &HTTP{URL: url, User: user, Password: password, Timeout: timeout}
 }
 
 // Do implements rpc.Transport.

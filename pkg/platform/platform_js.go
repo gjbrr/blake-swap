@@ -8,6 +8,8 @@ import (
 	"sync"
 	"syscall/js"
 	"time"
+
+	"github.com/gjbrr/blake-swap/pkg/rpc"
 )
 
 // JSClock is the browser's clock.
@@ -351,6 +353,16 @@ type Fetch struct {
 	URL string
 	// Timeout bounds one request.
 	Timeout time.Duration
+}
+
+// NewTransport returns the browser's transport for one JSON-RPC endpoint.
+//
+// Credentials are accepted and dropped on purpose: a page reaches the chains through
+// the app server's proxy, which holds them, so a password that arrived here would be a
+// secret in the one place that cannot keep one. The parameter exists so this has the
+// same signature as the host factory and the chain package does not branch.
+func NewTransport(url, user, password string, timeout time.Duration) rpc.Transport {
+	return &Fetch{URL: url, Timeout: timeout}
 }
 
 // Do implements rpc.Transport.

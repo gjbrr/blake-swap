@@ -21,9 +21,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/gjbrr/blake-swap/pkg/amount"
 	"github.com/gjbrr/blake-swap/pkg/decimal"
+	"github.com/gjbrr/blake-swap/pkg/platform"
 	"github.com/gjbrr/blake-swap/pkg/rpc"
 )
 
@@ -49,6 +51,15 @@ type Config struct {
 	TimeoutMilliseconds int
 }
 
+// timeout is the per-attempt deadline, zero meaning none.
+func (c Config) timeout() time.Duration {
+	if c.TimeoutMilliseconds <= 0 {
+		return 0
+	}
+
+	return time.Duration(c.TimeoutMilliseconds) * time.Millisecond
+}
+
 // Node is one chain's node, optionally bound to a wallet.
 //
 // Bitcoin Core selects a wallet by URL path (/wallet/<name>), not by an RPC
@@ -72,11 +83,7 @@ func New(name Chain, cfg Config) (*Node, error) {
 		return nil, fmt.Errorf("%s: no node URL configured", name)
 	}
 
-	transport := &rpc.HTTPTransport{
-		URL:      cfg.URL,
-		User:     cfg.User,
-		Password: cfg.Password,
-	}
+	transport := platform.NewTransport(cfg.URL, cfg.User, cfg.Password, cfg.timeout())
 
 	return &Node{
 		Chain:  name,
@@ -98,11 +105,11 @@ func (n *Node) WithWallet(wallet string) *Node {
 		config.URL = walletURL(n.config.URL, wallet)
 		copied.config = config
 
-		copied.Client = &rpc.Client{Transport: &rpc.HTTPTransport{
-			URL:      config.URL,
-			User:     config.User,
-			Password: config.Password,
-		}}
+		copied.Client = &rpc.Client{
+			Transport: platform.NewTransport(
+				config.URL, config.User, config.Password, config.timeout(),
+			),
+		}
 	}
 
 	return &copied

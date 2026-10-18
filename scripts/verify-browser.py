@@ -65,8 +65,55 @@ def find_browser() -> str:
 def free_port() -> int:
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
-
         return sock.getsockname()[1]
+
+
+def rig_args() -> list[str]:
+    """Server flags that point the node proxy at a live two-chain rig.
+
+    The engine panel is only worth asserting when there are real nodes behind it: a
+    fake proxy would prove that the page can render a string, not that a browser can
+    reach a chain. When the rig is absent or not running the check says so and skips
+    that part, rather than passing on nothing.
+    """
+    path = Path(os.environ.get("RIG_ENV", Path.home() / ".blake-swap-test" / "rig-env.json"))
+
+    if not path.is_file():
+        return []
+
+    try:
+        rig = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return []
+
+    if not rig.get("running"):
+        return []
+
+    args: list[str] = []
+
+    for name in ("btc", "blake"):
+        port = rig.get(f"{name}_rpcport")
+        datadir = rig.get(f"{name}_datadir")
+
+        if not port or not datadir:
+            return []
+
+        # The rig runs in regtest, where Core writes its cookie a directory down.
+        cookie = next(
+            (
+                candidate
+                for candidate in (Path(datadir) / "regtest" / ".cookie", Path(datadir) / ".cookie")
+                if candidate.is_file()
+            ),
+            None,
+        )
+
+        if cookie is None:
+            return []
+
+        args += [f"-{name}-rpc", f"http://127.0.0.1:{port}/", f"-{name}-cookie", str(cookie)]
+
+    return args
 
 
 async def evaluate(ws, expression: str, counter: list[int]) -> str:
@@ -161,7 +208,7 @@ async def drive(url: str, budget: float) -> int:
             budget,
         )
 
-        text = await evaluate(ws, "document.getElementById('vault').innerText", [300])
+        text = await evaluate(ws, "document.getElementById('vaulttest').innerText", [300])
 
         if vault != "true":
             print(f"FAIL: the encrypted self-test never finished; panel:\n{text}", file=sys.stderr)
@@ -170,7 +217,78 @@ async def drive(url: str, budget: float) -> int:
 
         print(f"PASS: encrypted round trip in the browser: {text}")
 
+        engine = await engine_round_trip(ws, budget)
+
+        if engine is None:
+            print("SKIP: the engine round trip needs a live two-chain rig (see RIG_ENV)")
+
+            return 0
+
+        if engine is False:
+            return 1
+
+        print(f"PASS: engine read both chains through the proxy: {engine}")
+
     return 0
+
+
+async def engine_round_trip(ws, budget: float):
+    """Drive the vault, identity, proxy and engine panels the way a person would.
+
+    Every step is a real click on a real control with the value typed into the field
+    the page reads, so this exercises the same path a user takes: page domain, link,
+    worker, node proxy, node.
+    """
+    scripts = {
+        "vault": (
+            "document.getElementById('passphrase').value = 'browser-check-passphrase';"
+            "document.querySelector(\"[data-uicmd='vault-create']\").click();"
+            "'clicked'"
+        ),
+        "proxy": (
+            "document.getElementById('proxy-url').value = location.origin;"
+            "document.querySelector(\"[data-uicmd='proxy-set']\").click();"
+            "'clicked'"
+        ),
+        "identity": (
+            "document.getElementById('identity-secret').value = '11'.repeat(32);"
+            "document.querySelector(\"[data-uicmd='identity-set']\").click();"
+            "'clicked'"
+        ),
+        "engine": (
+            "document.querySelector(\"[data-uicmd='engine-status']\").click(); 'clicked'"
+        ),
+    }
+
+    markers = {
+        "vault": "document.body.dataset.vaultOpen || ''",
+        "proxy": "document.body.dataset.proxySet || ''",
+        "identity": "document.body.dataset.identitySet || ''",
+        "engine": "document.body.dataset.engineVerified || ''",
+    }
+
+    for step in ("vault", "proxy", "identity", "engine"):
+        await evaluate(ws, scripts[step], [700])
+
+        reached = await poll(ws, markers[step], budget)
+
+        if reached != "true":
+            panel = await evaluate(ws, f"document.getElementById('{step}').innerText", [800])
+
+            print(f"FAIL: the {step} step never completed; panel:\n{panel}", file=sys.stderr)
+
+            return False
+
+        print(f"PASS: {step} panel completed")
+
+    text = await evaluate(ws, "document.getElementById('engine').innerText", [900])
+
+    if not text or "height" not in text.lower():
+        print(f"FAIL: the engine panel reported no chain heights:\n{text}", file=sys.stderr)
+
+        return False
+
+    return " ".join(str(text).split())
 
 
 def main() -> int:
@@ -201,11 +319,16 @@ def main() -> int:
     if not binary.is_file():
         subprocess.run(["make", "server"], cwd=ROOT, check=True, stdout=subprocess.DEVNULL)
 
+    # The server's own log is kept: when a browser step fails the reason is often on
+    # the server side, and a discarded log turns a five-second diagnosis into a bisect.
+    server_log = (work / "server.log").open("wb")
+
     server = subprocess.Popen(
-        [str(ROOT / "bin" / "blake-swap-app"), "-addr", f"127.0.0.1:{app_port}", "-dir", "web"],
+        [str(ROOT / "bin" / "blake-swap-app"), "-addr", f"127.0.0.1:{app_port}", "-dir", "web"]
+        + rig_args(),
         cwd=ROOT,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        stdout=server_log,
+        stderr=server_log,
     )
 
     profile = work / "profile"

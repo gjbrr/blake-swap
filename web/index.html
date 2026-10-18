@@ -60,13 +60,66 @@
       <pre id="hello" class="hello" aria-live="polite">…</pre>
 
       <section class="panel">
+        <h2>Vault</h2>
+        <p class="hint">
+          Everything the worker keeps — swap records, the participant key, the proxy
+          address — is sealed with a key derived from this passphrase before it reaches
+          IndexedDB. The passphrase never leaves the page.
+        </p>
+        <input id="passphrase" class="field" type="password" placeholder="passphrase" autocomplete="off">
+        <button type="button" data-uicmd="vault-create">Create vault</button>
+        <button type="button" data-uicmd="vault-unlock">Unlock vault</button>
+        <button type="button" data-uicmd="vault-lock">Lock vault</button>
+        <pre id="vault" aria-live="polite">not run</pre>
+      </section>
+
+      <section class="panel">
         <h2>Encrypted state</h2>
         <p class="hint">
           The worker seals swap records before they reach IndexedDB. This runs the
           encrypted round trip inside the worker and reports what it did.
         </p>
         <button type="button" data-uicmd="vault-selftest">Run encrypted self-test</button>
-        <pre id="vault" aria-live="polite">not run</pre>
+        <pre id="vaulttest" aria-live="polite">not run</pre>
+      </section>
+
+      <section class="panel">
+        <h2>Identity</h2>
+        <p class="hint">
+          The Nostr key the worker signs with. It is sealed by the vault like every
+          other record; the field is only a way in, and the worker refuses anything
+          that is not a key.
+        </p>
+        <input id="identity-secret" class="field" type="password" placeholder="64 hex characters" autocomplete="off" spellcheck="false">
+        <button type="button" data-uicmd="identity-set">Set identity</button>
+        <button type="button" data-uicmd="identity-status">Read identity</button>
+        <pre id="identity" aria-live="polite">not read</pre>
+      </section>
+
+      <section class="panel">
+        <h2>Node proxy</h2>
+        <p class="hint">
+          The app server's address. The worker reaches both chains through it,
+          because this page holds no node credentials and never will.
+        </p>
+        <input id="proxy-url" class="field" type="url" placeholder="http://127.0.0.1:8787" autocomplete="off" spellcheck="false">
+        <button type="button" data-uicmd="proxy-set">Set proxy</button>
+        <button type="button" data-uicmd="proxy-status">Read proxy</button>
+        <pre id="proxy" aria-live="polite">not read</pre>
+      </section>
+
+      <section class="panel">
+        <h2>Engine</h2>
+        <p class="hint">
+          Read-only reads of both chains through the proxy: block heights, the
+          records sealed in the vault, and the reconciliation view of each one.
+        </p>
+        <button type="button" data-uicmd="engine-status">Chain heights</button>
+        <button type="button" data-uicmd="engine-list">List swaps</button>
+        <button type="button" data-uicmd="engine-dashboard">Dashboard</button>
+        <input id="swap-id" class="field" type="text" placeholder="swap id" autocomplete="off" spellcheck="false">
+        <button type="button" data-uicmd="engine-show">Show swap</button>
+        <pre id="engine" aria-live="polite">not read</pre>
       </section>
 
       <dl class="rows">

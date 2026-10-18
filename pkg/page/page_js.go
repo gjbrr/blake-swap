@@ -36,8 +36,29 @@ const UICmdPing UICmd = "ping"
 // prove something nobody runs.
 const UICmdVaultTest UICmd = "vault-selftest"
 
+// The rest of the vocabulary: the vault's two dependencies and the read-only engine
+// commands. Each name is a button in index.html and a case in uiRequest.
+const (
+	UICmdIdentityStatus  UICmd = "identity-status"
+	UICmdIdentitySet     UICmd = "identity-set"
+	UICmdProxyStatus     UICmd = "proxy-status"
+	UICmdProxySet        UICmd = "proxy-set"
+	UICmdEngineStatus    UICmd = "engine-status"
+	UICmdEngineList      UICmd = "engine-list"
+	UICmdEngineDashboard UICmd = "engine-dashboard"
+	UICmdEngineShow      UICmd = "engine-show"
+)
+
+// The vault is the page's front door: nothing else can store a record or read a
+// secret until it is open, so creating and unlocking it are controls like any other.
+const (
+	UICmdVaultCreate UICmd = "vault-create"
+	UICmdVaultUnlock UICmd = "vault-unlock"
+	UICmdVaultLock   UICmd = "vault-lock"
+)
+
 // The element ids are part of the page contract: index.html renders them and
-// the headless check in scripts/verify-hello.sh reads them. Keeping them in
+// the headless check in scripts/verify-browser.py reads them. Keeping them in
 // one place stops the three from drifting.
 const (
 	ElementPageStatus   = "page-status"
@@ -50,13 +71,75 @@ const (
 	// presentation text.
 	VerifiedAttribute = "data-hello-verified"
 
-	// ElementVault is where the worker's command output is rendered.
-	ElementVault = "vault"
+	// ElementVault is where the vault's own state is rendered, and ElementVaultTest
+	// is where the encrypted self-test reports. They are separate panels because they
+	// answer different questions: one is "is it open", the other "does sealing work".
+	ElementVault     = "vault"
+	ElementVaultTest = "vaulttest"
 
 	// VaultVerifiedAttribute marks the document once the worker's encrypted
 	// round trip has succeeded in this browser.
 	VaultVerifiedAttribute = "data-vault-verified"
+
+	// The panels the engine and its two dependencies report into.
+	ElementIdentity = "identity"
+	ElementProxy    = "proxy"
+	ElementEngine   = "engine"
+
+	// The inputs a command's arguments are read from. A control carries the id of
+	// the input it feeds in data-uidata, so one click handler serves all of them.
+	InputIdentitySecret = "identity-secret"
+	InputProxyURL       = "proxy-url"
+	InputSwapID         = "swap-id"
+	InputPassphrase     = "passphrase"
+
+	// Markers set once a command of that family has succeeded here. They are what
+	// the headless check asserts, so it never has to read presentation text.
+	IdentityVerifiedAttribute = "data-identity-set"
+	ProxyVerifiedAttribute    = "data-proxy-set"
+	EngineVerifiedAttribute   = "data-engine-verified"
+
+	// VaultOpenAttribute tracks whether the vault is unlocked. Unlike the others it is
+	// cleared again on a lock, because a marker that only ever turns on would claim the
+	// vault is open after it was shut.
+	VaultOpenAttribute = "data-vault-open"
 )
+
+// panel is where one command's output goes and which document marker its success
+// sets. An empty marker means the command is informational and proves nothing on its
+// own, so it sets nothing.
+type panel struct {
+	element string
+	marker  string
+	// clears is the marker a successful run removes, for the commands whose truth can
+	// stop being true. Only locking does that today.
+	clears string
+}
+
+// panels routes a result by the command that produced it.
+//
+// Every command the page can send appears here. A command that does not is rendered
+// into the worker panel and logged, which is how a missing case shows up as itself
+// rather than as output in the wrong place.
+var panels = map[string]panel{
+	"vault.selftest": {element: ElementVaultTest, marker: VaultVerifiedAttribute},
+	"vault.status":   {element: ElementVault},
+	"vault.crypto":   {element: ElementVault},
+	"vault.create":   {element: ElementVault, marker: VaultOpenAttribute},
+	"vault.unlock":   {element: ElementVault, marker: VaultOpenAttribute},
+	"vault.lock":     {element: ElementVault, clears: VaultOpenAttribute},
+
+	"identity.set":    {element: ElementIdentity, marker: IdentityVerifiedAttribute},
+	"identity.status": {element: ElementIdentity},
+
+	"proxy.set":    {element: ElementProxy, marker: ProxyVerifiedAttribute},
+	"proxy.status": {element: ElementProxy},
+
+	"engine.status":    {element: ElementEngine, marker: EngineVerifiedAttribute},
+	"engine.list":      {element: ElementEngine},
+	"engine.show":      {element: ElementEngine},
+	"engine.dashboard": {element: ElementEngine},
+}
 
 // Domain is the page's event loop. It runs until Stop is closed.
 //
@@ -104,34 +187,22 @@ func Domain(_ struct{}, ch Chans) {
 			}
 
 		case cmd := <-ch.UI:
-			switch cmd {
-			case UICmdPing:
+			if cmd == UICmdPing {
 				setPageStatus("pinging the worker", "wait")
 				sendHello()
 
-			case UICmdVaultTest:
-				setVaultText("running the worker's encrypted self-test…")
-
-				body, err := proto.EncodeRequest(proto.Request{Command: "vault.selftest"})
-
-				if err != nil {
-					setVaultText("could not encode the request: " + err.Error())
-
-					continue
-				}
-
-				seq++
-
-				ch.Link.Send(proto.Envelope{
-					Kind: proto.Command,
-					Seq:  seq,
-					Body: body,
-					AtMS: time.Now().UnixMilli(),
-				})
-
-			default:
-				consoleLog("page: ignoring unknown UI command " + cmd)
+				continue
 			}
+
+			request, ok := uiRequest(cmd)
+
+			if !ok {
+				consoleLog("page: ignoring unknown UI command " + cmd)
+
+				continue
+			}
+
+			sendCommand(ch.Link, &seq, request)
 
 		case <-ch.Stop.Done():
 			return
@@ -139,27 +210,149 @@ func Domain(_ struct{}, ch Chans) {
 	}
 }
 
-// renderResult displays one command's result.
+// uiRequest turns a control's command into the worker request it stands for.
 //
-// A failed command is rendered as text and does not set the verified marker: the point
-// of the marker is that the encrypted round trip actually happened.
+// Arguments are read from the document here, at send time, so the page domain is the
+// one place that knows which input feeds which command, and a value the person just
+// typed cannot be stale in a closure.
+func uiRequest(cmd UICmd) (proto.Request, bool) {
+	switch cmd {
+	case UICmdVaultTest:
+		return proto.Request{Command: "vault.selftest"}, true
+
+	case UICmdVaultCreate:
+		return proto.Request{
+			Command: "vault.create",
+			Args:    map[string]string{"passphrase": inputValue(InputPassphrase)},
+		}, true
+
+	case UICmdVaultUnlock:
+		return proto.Request{
+			Command: "vault.unlock",
+			Args:    map[string]string{"passphrase": inputValue(InputPassphrase)},
+		}, true
+
+	case UICmdVaultLock:
+		return proto.Request{Command: "vault.lock"}, true
+
+	case UICmdIdentityStatus:
+		return proto.Request{Command: "identity.status"}, true
+
+	case UICmdIdentitySet:
+		return proto.Request{
+			Command: "identity.set",
+			Args:    map[string]string{"secret": inputValue(InputIdentitySecret)},
+		}, true
+
+	case UICmdProxyStatus:
+		return proto.Request{Command: "proxy.status"}, true
+
+	case UICmdProxySet:
+		return proto.Request{
+			Command: "proxy.set",
+			Args:    map[string]string{"url": inputValue(InputProxyURL)},
+		}, true
+
+	case UICmdEngineStatus:
+		return proto.Request{Command: "engine.status"}, true
+
+	case UICmdEngineList:
+		return proto.Request{Command: "engine.list"}, true
+
+	case UICmdEngineDashboard:
+		return proto.Request{Command: "engine.dashboard"}, true
+
+	case UICmdEngineShow:
+		return proto.Request{
+			Command: "engine.show",
+			Args:    map[string]string{"swap_id": inputValue(InputSwapID)},
+		}, true
+	}
+
+	return proto.Request{}, false
+}
+
+// sendCommand encodes one request and puts it on the link.
+//
+// The panel is cleared to a pending line first, so a command that never answers is
+// visible as a command that never answered rather than as the previous output left
+// sitting there.
+func sendCommand(link tinyspawn.Duplex[proto.Envelope], seq *uint32, request proto.Request) {
+	body, err := proto.EncodeRequest(request)
+
+	if err != nil {
+		renderPanel(request.Command, "could not encode the request: "+err.Error(), "bad")
+
+		return
+	}
+
+	renderPanel(request.Command, "running "+request.Command+"…", "wait")
+
+	*seq = *seq + 1
+
+	link.Send(proto.Envelope{
+		Kind: proto.Command,
+		Seq:  *seq,
+		Body: body,
+		AtMS: time.Now().UnixMilli(),
+	})
+}
+
+// renderResult displays one command's result in that command's panel.
+//
+// A failed command renders as text and sets no marker: a marker means the thing
+// actually worked in this browser, which is the only reason to have one.
 func renderResult(e proto.Envelope) {
 	result, err := proto.DecodeResult(e.Body)
 
 	if err != nil {
-		setVaultText("the result could not be decoded: " + err.Error())
+		renderPanel("", "the result could not be decoded: "+err.Error(), "bad")
 
 		return
 	}
 
 	if !result.OK {
-		setVaultText(result.Command + " failed: " + result.Error)
+		renderPanel(result.Command, result.Command+" failed: "+result.Error, "bad")
 
 		return
 	}
 
-	setVaultText(result.Command + ": " + result.Text)
-	markVaultVerified()
+	renderPanel(result.Command, result.Text, "ok")
+}
+
+// renderPanel writes text into the panel that owns a command and sets its state.
+//
+// The marker is set only for a success, and only for a command whose marker means
+// something; an unknown command is reported as unknown and lands in the worker panel.
+func renderPanel(command, text, state string) {
+	if command == "" {
+		setText(ElementVault, text)
+		setStateClass(ElementVault, state)
+
+		return
+	}
+
+	route, known := panels[command]
+
+	if !known {
+		consoleLog("page: no panel for " + command)
+		route = panel{element: ElementVault}
+	}
+
+	setText(route.element, text)
+	setStateClass(route.element, state)
+
+	if state != "ok" {
+		return
+	}
+
+	if route.marker != "" {
+		mark(route.marker)
+	}
+
+	if route.clears != "" {
+		unmark(route.clears)
+	}
 }
 
 // renderAck displays the worker's greeting. This is the visible proof the

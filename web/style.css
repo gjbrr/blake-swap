@@ -99,6 +99,27 @@ button {
 button:hover { background: #26313f; }
 button:active { transform: translateY(1px); }
 
+/*
+ * The argument fields a panel's commands read. They sit above their buttons so the
+ * value is visible at the moment it is sent, and they are never auto-filled: an
+ * identity key typed into a page that guessed it would be worse than an empty box.
+ */
+.field {
+  font: inherit;
+  font-size: 0.85rem;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  color: var(--ink);
+  background: #0d1319;
+  border: 1px solid var(--line);
+  border-radius: 0.5rem;
+  padding: 0.45rem 0.6rem;
+  width: 100%;
+  box-sizing: border-box;
+  margin-bottom: 0.5rem;
+}
+
+.field:focus { outline: 1px solid var(--ok); }
+
 footer {
   margin-top: 1rem;
   color: var(--dim);

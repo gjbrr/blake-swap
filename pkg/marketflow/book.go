@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/gjbrr/blake-swap/pkg/event"
+	"github.com/gjbrr/blake-swap/pkg/market"
 	"github.com/gjbrr/blake-swap/pkg/nostr"
 )
 
@@ -141,4 +142,74 @@ func MarketFilters(limit int) []nostr.Filter {
 		{Kinds: []int{1}, Topics: []string{CancelTag}, Limit: evidence},
 		{Kinds: []int{1}, Topics: []string{MatchTag}, Limit: evidence},
 	}
+}
+
+// TakeEntry is one valid take of an offer.
+type TakeEntry struct {
+	// Event is the signed take.
+	Event event.Event
+	// Take is its parsed terms.
+	Take market.Take
+	// EventID and Taker are the event's id and author.
+	EventID string
+	Taker   string
+}
+
+// TakesFor returns the valid takes of one offer, oldest first.
+//
+// A take is valid when it proves itself and when it is *about this offer*: the same
+// economics, the same direction, the roles the direction implies, and an author who is
+// the taker it names. Every one of those is a way to ask for a different trade than the
+// offer describes, so a take that fails any of them is not a worse take, it is not a
+// take at all.
+func TakesFor(offer *ListedOffer, evidence []event.Event, now time.Time) []TakeEntry {
+	if offer == nil {
+		return nil
+	}
+
+	if now.IsZero() {
+		now = time.Now()
+	}
+
+	seen := map[string]bool{}
+	entries := make([]TakeEntry, 0, len(evidence))
+
+	for _, e := range evidence {
+		if e.ID == "" || seen[e.ID] {
+			continue
+		}
+
+		if referenced, ok := e.TagValue("e"); !ok || referenced != offer.EventID {
+			continue
+		}
+
+		take, err := ParseTake(e, now)
+
+		if err != nil {
+			continue
+		}
+
+		if err := take.ValidateAgainstOffer(offer.Offer, offer.EventID, offer.Maker); err != nil {
+			continue
+		}
+
+		seen[e.ID] = true
+
+		entries = append(entries, TakeEntry{
+			Event:   e,
+			Take:    *take,
+			EventID: e.ID,
+			Taker:   e.Pubkey,
+		})
+	}
+
+	sort.SliceStable(entries, func(i, j int) bool {
+		if entries[i].Event.CreatedAt != entries[j].Event.CreatedAt {
+			return entries[i].Event.CreatedAt < entries[j].Event.CreatedAt
+		}
+
+		return entries[i].EventID < entries[j].EventID
+	})
+
+	return entries
 }

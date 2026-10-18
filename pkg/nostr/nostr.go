@@ -414,7 +414,10 @@ type Filter struct {
 	Authors []string
 	// Ids selects specific events, which is how one event is fetched by id when the
 	// caller already knows which event it wants.
-	Ids   []string
+	Ids []string
+	// ETags selects events referencing given event ids. It is how every reply to one
+	// offer is asked for: a take names the offer it accepts in its `e` tag.
+	ETags []string
 	DTags []string
 	// Topics selects the `#t` tags. A market read is selected this way: an offer,
 	// a cancellation and a match are all kind 1 and are told apart by their topic.
@@ -434,6 +437,10 @@ func (f Filter) request() map[string]any {
 
 	if len(f.Ids) > 0 {
 		object["ids"] = f.Ids
+	}
+
+	if len(f.ETags) > 0 {
+		object["#e"] = f.ETags
 	}
 
 	if len(f.DTags) > 0 {

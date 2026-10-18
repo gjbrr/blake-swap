@@ -7,6 +7,7 @@ import (
 
 	"github.com/gjbrr/blake-swap/pkg/amount"
 	"github.com/gjbrr/blake-swap/pkg/event"
+	"github.com/gjbrr/blake-swap/pkg/keys"
 	"github.com/gjbrr/blake-swap/pkg/market"
 	"github.com/gjbrr/blake-swap/pkg/nostr"
 )
@@ -287,5 +288,132 @@ func TestMarketFiltersSizesEvidenceGenerously(t *testing.T) {
 
 	if defaulted := MarketFilters(0); defaulted[0].Limit != 50 {
 		t.Fatalf("zero limit = %d, want the default 50", defaulted[0].Limit)
+	}
+}
+
+// TestTakesForAcceptsAValidTakeAndRejectsTheRest is the whole binding rule in one
+// fixture: one good take, and one of each way to ask for a different trade.
+func TestTakesForAcceptsAValidTakeAndRejectsTheRest(t *testing.T) {
+	f := buildStateFixture(t)
+
+	// The good take, and a second from another taker.
+	second, _, err := BuildTake(maker(t), BuildTakeOptions{Offer: f.offer, CreatedAt: 1_700_000_260})
+
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// A take whose content was edited after signing: the terms no longer match.
+	tampered := f.takeEvent
+	tampered.Content = strings.Replace(tampered.Content, `"btc_sats":25000`, `"btc_sats":1`, 1)
+
+	// A take for a different offer.
+	other, _, err := BuildOffer(maker(t), BuildOfferOptions{
+		BlakeAmount: amount.Blake(3_000_000), BTCSats: 30_000, Minutes: 30,
+		Direction: market.BlakeForBTC, CreatedAt: 1_700_000_010,
+	})
+
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	otherListed, err := ParseOffer(other, time.Unix(1_700_000_100, 0))
+
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	elsewhere, _, err := BuildTake(taker(t), BuildTakeOptions{Offer: *otherListed, CreatedAt: 1_700_000_270})
+
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	takes := TakesFor(&f.offer, []event.Event{
+		f.takeEvent, second, tampered, elsewhere, f.takeEvent,
+	}, time.Unix(bookNow, 0))
+
+	if len(takes) != 2 {
+		t.Fatalf("takes = %d, want 2 valid: %+v", len(takes), takes)
+	}
+
+	// Oldest first, and the duplicate counted once.
+	if takes[0].EventID != f.takeEvent.ID || takes[1].EventID != second.ID {
+		t.Fatalf("order = %q, %q", takes[0].EventID, takes[1].EventID)
+	}
+
+	for _, take := range takes {
+		if take.Taker != take.Event.Pubkey {
+			t.Fatalf("taker is not the author: %+v", take)
+		}
+
+		if take.Take.BTCSats != f.offer.BTCSats {
+			t.Fatalf("a take with different terms was accepted: %+v", take)
+		}
+	}
+}
+
+// TestTakesForAnOfferWithNone: an untaken offer has no takes, not an error.
+func TestTakesForAnOfferWithNone(t *testing.T) {
+	f := buildStateFixture(t)
+
+	if takes := TakesFor(&f.offer, []event.Event{f.offerEvent}, time.Unix(bookNow, 0)); len(takes) != 0 {
+		t.Fatalf("takes = %+v, want none", takes)
+	}
+
+	if takes := TakesFor(nil, []event.Event{f.takeEvent}, time.Unix(bookNow, 0)); takes != nil {
+		t.Fatalf("a nil offer produced takes: %+v", takes)
+	}
+}
+
+// resignTake rewrites an event's content and signs it again, so a test can produce a
+// well-formed event that says something its author would never have signed.
+func resignTake(t *testing.T, original event.Event, secret string, rewrite func(string) string) event.Event {
+	t.Helper()
+
+	forged := original
+	forged.Content = rewrite(forged.Content)
+
+	id, err := forged.ComputeID()
+
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	forged.ID = id
+
+	signer, err := keys.FromSecretHex(secret)
+
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := event.Sign(&forged, signer); err != nil {
+		t.Fatal(err)
+	}
+
+	return forged
+}
+
+// TestTakesForRejectsATakeThatChangesTheTerms: a take can convince every structural
+// check and still ask for a different trade. It references this offer, its direction and
+// roles are right, its author is its taker — and its amounts say something else. Only the
+// binding check catches that, which is why that check exists.
+func TestTakesForRejectsATakeThatChangesTheTerms(t *testing.T) {
+	f := buildStateFixture(t)
+
+	cheaper := resignTake(t, f.takeEvent, strings.Repeat("22", 32), func(content string) string {
+		return strings.Replace(content, `"btc_sats":25000`, `"btc_sats":24000`, 1)
+	})
+
+	// It really is a valid take in isolation: signature, tags and roles all check out.
+	if _, err := ParseTake(cheaper, time.Unix(bookNow, 0)); err != nil {
+		t.Fatalf("the fixture is not a parseable take: %v", err)
+	}
+
+	takes := TakesFor(&f.offer, []event.Event{f.takeEvent, cheaper}, time.Unix(bookNow, 0))
+
+	if len(takes) != 1 || takes[0].EventID != f.takeEvent.ID {
+		t.Fatalf("a take that changed the terms was accepted: %+v", takes)
 	}
 }

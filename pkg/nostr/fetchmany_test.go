@@ -247,3 +247,24 @@ func TestFilterIdsRendersAsIds(t *testing.T) {
 		t.Fatalf("filter = %+v, want an ids filter", relay.requests[0][0])
 	}
 }
+
+// TestFilterETagsRendersAsReferencedEvents: asking for replies to one event must reach
+// the relay as `#e`, or the relay answers with every take it holds.
+func TestFilterETagsRendersAsReferencedEvents(t *testing.T) {
+	offer := signedEvent(t, "11", event.TopicMarket, 1_700_000_000)
+	relay := &topicRelay{byTopic: map[string][]event.Event{event.TopicMarket: {offer}}}
+
+	client := &Client{Dialer: relay.dial, Relays: []string{"wss://a"}, Now: func() time.Time {
+		return time.Unix(1_700_000_100, 0)
+	}}
+
+	if _, err := client.Fetch(context.Background(), Filter{Kinds: []int{1}, ETags: []string{offer.ID}}); err != nil {
+		t.Fatal(err)
+	}
+
+	tags, ok := relay.requests[0][0]["#e"].([]any)
+
+	if !ok || len(tags) != 1 || tags[0] != offer.ID {
+		t.Fatalf("filter = %+v, want a #e filter", relay.requests[0][0])
+	}
+}

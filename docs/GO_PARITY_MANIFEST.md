@@ -6,7 +6,7 @@ It records what replaces each part of the Python engine in Go, and what has not 
 
 Statuses: **ported** (behaviour and tests), **partial** (in progress), **pending** (not started).
 
-## Modules (23/29 ported)
+## Modules (24/29 ported)
 
 | Python | Go | Status | Contents |
 |---|---|---|---|
@@ -30,7 +30,7 @@ Statuses: **ported** (behaviour and tests), **partial** (in progress), **pending
 | `src/swap_v2.py (_reconcile_observe_htlc)` | `pkg/observe` | ported | observation statuses, the funded scan and the hardened spender search |
 | `src/swap_v2.py (funding)` | `pkg/fund` | ported | funding one leg, the crash-window intent, watch-only import and solvability |
 | `src/swap_v2.py (settlement)` | `pkg/settle` | ported | the PSBT pipeline, fee/vsize convergence, broadcast and rebroadcast |
-| `src/swap_v2.py (coordination)` | `pkg/coord` | pending | one Transport interface: the encrypted store spool, or Nostr |
+| `src/swap_v2.py (coordination)` | `pkg/coord` | ported | one Transport interface: the local spool, or Nostr; validation and sender pinning on both |
 | `src/swap_v2.py (relays)` | `pkg/nostr` | ported | relay sessions over a platform connection, publish report, REQ/EOSE, event cache, the encryption policy |
 | `src/swap_v2.py (durable state)` | `pkg/store` | ported | workflow store: atomic swap records, the message spool, the archive |
 | `src/swap_v2.py (commands)` | `pkg/swap` | pending | the 58 commands as a Go API, one function per command |
@@ -64,7 +64,7 @@ Statuses: **ported** (behaviour and tests), **partial** (in progress), **pending
 | `_reconcile_observe_htlc`, `scan_chain_for_expected_funding`, `find_confirmed_htlc_spend` | `Observe`, `ScanFunding`, `FindSpend` | `pkg/observe` |
 | `command_fund_blake`, `write_funding_intent`, `reconcile_funding_intent` | `Fund`, `ResolveIntent`, `ImportWatchOnly`, `VerifyAnchor` | `pkg/fund` |
 | `build_dynamic_settlement_spend`, `_decoded_spend_fee_sats`, `_decoded_tx_vsize` | `Build`, `Claim`, `Refund`, `Broadcast`, `SpendFee` | `pkg/settle` |
-| `file_send_message`, `file_receive_message`, `send_message` | — | `pkg/coord` |
+| `file_send_message`, `send_message`, `receive_message`, `validate_transport_message` | `FileTransport`, `NostrTransport`, `Validate`, `Transport` | `pkg/coord` |
 | `nostr_send_message`, `nostr_receive_message`, `nostr_publish_event`, `decode_coordination_content` | `Client`, `BuildCoordinationEvent`, `DecodeContent`, `Cache` | `pkg/nostr` |
 | `atomic_write_json`, `load_local_swap`, `local_swap_paths`, `file_send_message`, `file_receive_message` | `File`, `Memory`, `SupersededPlaceholders`, `ArchiveSuperseded` | `pkg/store` |
 | `command_new`, `command_show`, `command_advance` | — | `pkg/swap` |

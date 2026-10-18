@@ -336,9 +336,10 @@ MODULES: list[Module] = [
         ["build_dynamic_settlement_spend", "_decoded_spend_fee_sats", "_decoded_tx_vsize"],
     ),
     Module(
-        "src/swap_v2.py (coordination)", "pkg/coord", "pending",
-        "one Transport interface: the encrypted store spool, or Nostr",
-        [], ["file_send_message", "file_receive_message", "send_message"],
+        "src/swap_v2.py (coordination)", "pkg/coord", "ported",
+        "one Transport interface: the local spool, or Nostr; validation and sender pinning on both",
+        ["FileTransport", "NostrTransport", "Validate", "Transport"],
+        ["file_send_message", "send_message", "receive_message", "validate_transport_message"],
     ),
     Module(
         "src/swap_v2.py (relays)", "pkg/nostr", "ported",

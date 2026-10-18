@@ -332,7 +332,7 @@ build rather than quietly becoming a claim.
 | M2 | `reconcile`, `htlc`, `psbt` | the 12-action table and witness classifier match Python on recorded fixtures |
 | M3 | `rpc`/`chain`/`fund`/`settle`/`observe` against a real regtest through the proxy | **partly done**: `rpc`, `chain`, `contract`, `fund` and `observe` are in; `settle` remains |
 | M4 | `pkg/cli` + `cmd/blake-swap-cli` | the existing suites run with `$SWAP_V2` pointed at the Go binary |
-| M5 | `store`/`vault`/`coord`/`nostr` + worker domains | two browser instances complete a swap on regtest; `store` and `nostr` are in, `coord` and the worker domains remain |
+| M5 | `store`/`vault`/`coord`/`nostr` + worker domains | two browser instances complete a swap on regtest; `store`, `nostr` and `coord` are in, the worker domains remain |
 | M6 | `marketflow` (offer, take, match, cancel, import) + page UI | the whole market cycle driven from the UI |
 
 M4 and the orly reuse are the two big schedule wins: one gives a mechanical

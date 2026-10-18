@@ -349,6 +349,21 @@ func (n *Node) MempoolEntry(ctx context.Context, txid string) (json.RawMessage, 
 	return raw, nil
 }
 
+// InMempool reports whether the node holds a transaction in its mempool.
+//
+// The distinction it preserves matters for recovery: "the node says it is not
+// there" is a fact a caller may act on, while a transport failure is not, and a
+// caller that branched on error text could not tell them apart.
+func (n *Node) InMempool(ctx context.Context, txid string) (bool, error) {
+	entry, err := n.MempoolEntry(ctx, txid)
+
+	if err != nil {
+		return false, err
+	}
+
+	return entry != nil, nil
+}
+
 // MempoolInfo is the part of getmempoolinfo the fee policy reads.
 type MempoolInfo struct {
 	Size                int64       `json:"size"`

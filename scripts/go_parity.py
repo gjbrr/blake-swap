@@ -355,9 +355,11 @@ MODULES: list[Module] = [
     ),
     Module(
         "src/swap_v2.py (commands)", "pkg/swap", "partial",
-        "the 58 commands as a Go API: inspection, state advance and the funding commands are in; settlement and market commands remain",
-        ["Engine", "Status", "Show", "List", "Advance", "FundBlake", "FundBTC", "VerifyBlake", "VerifyBTC"],
-        ["command_status", "command_show", "command_advance", "command_list", "command_fund_blake", "command_fund_btc"],
+        "the 58 commands as a Go API: inspection, state advance, funding and settlement are in; the coordination and market commands remain",
+        ["Engine", "Status", "Show", "List", "Advance", "FundBlake", "FundBTC", "VerifyBlake", "VerifyBTC",
+         "ClaimBTC", "ClaimBlake", "RefundBTC", "RefundBlake", "Complete"],
+        ["command_status", "command_show", "command_advance", "command_list", "command_fund_blake", "command_fund_btc",
+         "command_claim_btc", "command_claim_blake", "command_refund_btc", "command_refund_blake", "command_complete"],
     ),
     Module(
         "src/swap_agent.py", "pkg/agent", "pending",

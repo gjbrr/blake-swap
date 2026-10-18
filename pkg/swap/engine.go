@@ -37,6 +37,8 @@ type Node interface {
 	fund.Node
 	settle.Node
 	observe.Node
+	// InMempool is the presence check settlement recovery branches on.
+	InMempool(ctx context.Context, txid string) (bool, error)
 }
 
 // The engine must be wireable to the real node surface, not just to test doubles.
@@ -64,8 +66,25 @@ type Engine struct {
 	TestMode bool
 	// Funding is the fee and rig policy funding commands use.
 	Funding FundingSettings
+	// Settlement is the fee policy settlement commands use.
+	Settlement SettlementSettings
 	// Now is the clock. Zero means time.Now.
 	Now func() time.Time
+}
+
+// SettlementSettings is how a settlement command prices its transaction.
+type SettlementSettings struct {
+	// FeeRate is an explicit feerate in sat/vB, outranking every other knob.
+	FeeRate *decimal.Dec
+	// FeeSats is an exact fee (the environment's standby override).
+	FeeSats *int64
+	// Multiplier scales the estimator.
+	Multiplier *decimal.Dec
+	// MaxPercent and MaxSats bound what a settlement may pay.
+	MaxPercent decimal.Dec
+	MaxSats    *int64
+	// FeeTargetBlocks is the estimator's confirmation target.
+	FeeTargetBlocks int64
 }
 
 // FundingSettings is how a funding command prices and confirms its transaction.

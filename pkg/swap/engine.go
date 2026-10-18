@@ -19,9 +19,11 @@ import (
 	"time"
 
 	"github.com/gjbrr/blake-swap/pkg/chain"
+	"github.com/gjbrr/blake-swap/pkg/coord"
 	"github.com/gjbrr/blake-swap/pkg/decimal"
 	"github.com/gjbrr/blake-swap/pkg/fund"
 	"github.com/gjbrr/blake-swap/pkg/model"
+	"github.com/gjbrr/blake-swap/pkg/nostr"
 	"github.com/gjbrr/blake-swap/pkg/observe"
 	"github.com/gjbrr/blake-swap/pkg/settle"
 	"github.com/gjbrr/blake-swap/pkg/state"
@@ -54,8 +56,12 @@ type Engine struct {
 	Blake, BTC Node
 	// Identity is this participant's Nostr identity, when coordination is used.
 	Identity Identity
-	// Transport carries coordination messages.
-	Transport Transport
+	// Transport carries coordination messages. It is the coordination layer's
+	// own interface, so the engine can drive either the local spool or relays
+	// without knowing which.
+	Transport coord.Transport
+	// Mode is the coordination confidentiality mode.
+	Mode nostr.Mode
 	// Role is this participant's local protocol role for loads and saves.
 	Role string
 	// Wallets are the signing wallet names per chain.
@@ -105,33 +111,6 @@ type FundingSettings struct {
 type Identity interface {
 	// PublicKey is the x-only public key, 64 hex characters.
 	PublicKey() string
-}
-
-// Transport is the coordination route the engine sends and receives through.
-type Transport interface {
-	Send(ctx context.Context, swapID, kind string, body map[string]any, opts SendOptions) (string, error)
-	Receive(ctx context.Context, swapID, kind string, opts ReceiveOptions) (*Message, error)
-}
-
-// SendOptions and ReceiveOptions mirror the coordination layer's, so a caller
-// can wire either the local spool or relays without the engine knowing which.
-type SendOptions struct {
-	LocalRole    string
-	ExpectedRole string
-	PeerPubkey   string
-	CreatedAt    int64
-}
-
-// ReceiveOptions carries the pinned counterparty identity.
-type ReceiveOptions struct {
-	ExpectedPubkey string
-}
-
-// Message is one coordination message as the engine hands it to a command.
-type Message struct {
-	Kind   string
-	Sender string
-	Body   map[string]any
 }
 
 // NewEngine returns an engine with the conventional role defaults: a fresh

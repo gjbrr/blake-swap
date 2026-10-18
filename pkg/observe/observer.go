@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/gjbrr/blake-swap/pkg/chain"
+	"github.com/gjbrr/blake-swap/pkg/contract"
 	"github.com/gjbrr/blake-swap/pkg/htlc"
 	"github.com/gjbrr/blake-swap/pkg/model"
 )
@@ -91,7 +92,7 @@ func Observe(
 			// waiting for a block, but it also is not proof: prove the amount
 			// and address independently before calling it pending.
 			//
-			contract, err := Derive(ctx, node, swap, ch)
+			derived, err := contract.Derive(ctx, node, swap, ch)
 
 			if err != nil {
 				return &Observation{
@@ -99,7 +100,7 @@ func Observe(
 				}, nil
 			}
 
-			if err := contract.checkOutput(utxo.Value, utxo.ScriptPubKey.Address); err != nil {
+			if err := derived.CheckOutput(utxo.Value, utxo.ScriptPubKey.Address); err != nil {
 				return &Observation{
 					Status: Invalid, TxID: txid, Vout: vout, Reason: err.Error(),
 				}, nil
@@ -115,7 +116,7 @@ func Observe(
 			}, nil
 		}
 
-		contract, err := Derive(ctx, node, swap, ch)
+		derived, err := contract.Derive(ctx, node, swap, ch)
 
 		if err != nil {
 			return &Observation{
@@ -123,7 +124,7 @@ func Observe(
 			}, nil
 		}
 
-		if err := contract.checkOutput(utxo.Value, utxo.ScriptPubKey.Address); err != nil {
+		if err := derived.CheckOutput(utxo.Value, utxo.ScriptPubKey.Address); err != nil {
 			return &Observation{
 				Status: Invalid, TxID: txid, Vout: vout, Reason: err.Error(),
 			}, nil
@@ -170,7 +171,7 @@ func Observe(
 				}, nil
 			}
 
-			contract, err := Derive(ctx, node, swap, ch)
+			derived, err := contract.Derive(ctx, node, swap, ch)
 
 			if err != nil {
 				return &Observation{
@@ -178,7 +179,7 @@ func Observe(
 				}, nil
 			}
 
-			if err := contract.checkOutput(output.Value, output.ScriptPubKey.Address); err != nil {
+			if err := derived.CheckOutput(output.Value, output.ScriptPubKey.Address); err != nil {
 				return &Observation{
 					Status: Invalid, TxID: txid, Vout: vout, Reason: err.Error(),
 				}, nil

@@ -267,6 +267,7 @@ Five layers. Arrows are import direction; nothing lower imports anything higher.
 | `pkg/vault` | (new) | passphrase KDF, record encryption with NIP-44 primitives, key binding |
 | `pkg/rpc` | `run_chain_cli` | JSON-RPC over HTTPS, timeout, retry allowlist, "state-changing calls are never retried" |
 | `pkg/chain` | `btc_cli`/`blake_cli`, wallets | per-chain client, wallet selection, height/utxo/tx reads, confirmations |
+| `pkg/contract` | `htlc_descriptor_body` + checksum + `deriveaddresses` | the node-compiled HTLC descriptor, its address and its expected amount, shared by funding and observation |
 | `pkg/fund` | funding intent, descriptor import, watch-only | funding one leg, the crash-window intent record, watch-only import and solvability |
 | `pkg/settle` | `build_dynamic_settlement_spend` + builders | PSBT pipeline, fee/vsize convergence, caps, broadcast, rebroadcast |
 | `pkg/observe` | `_reconcile_observe_htlc`, scan | wallet-first observation **and** the bounded fallback scan |
@@ -320,7 +321,7 @@ func (e *Engine) Next(role Role, id SwapID) (reconcile.Action, error)
 | M0 | Spikes | **partly done**: orly crypto + NIP-44 + event encoders run under TinyGo; `ws` and `wasmdb` are ruled out. Remaining: JS WebSocket bridge, JS IndexedDB store, node proxy |
 | M1 | Value layer (`amount`, `wire`, `market`, `state`, `model`, `timeout`, `fees`) | ported vectors pass under `go test` on the host |
 | M2 | `reconcile`, `htlc`, `psbt` | the 12-action table and witness classifier match Python on recorded fixtures |
-| M3 | `rpc`/`chain`/`fund`/`settle`/`observe` against a real regtest through the proxy | **partly done**: `rpc`, `chain` and `observe` are in; `fund` and `settle` remain |
+| M3 | `rpc`/`chain`/`fund`/`settle`/`observe` against a real regtest through the proxy | **partly done**: `rpc`, `chain`, `contract`, `fund` and `observe` are in; `settle` remains |
 | M4 | `pkg/cli` + `cmd/blake-swap-cli` | the existing suites run with `$SWAP_V2` pointed at the Go binary |
 | M5 | `store`/`vault`/`coord`/`nostr` + worker domains | two browser instances complete a swap on regtest |
 | M6 | `marketflow` (offer, take, match, cancel, import) + page UI | the whole market cycle driven from the UI |

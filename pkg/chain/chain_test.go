@@ -3,12 +3,14 @@ package chain
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/gjbrr/blake-swap/pkg/htlc"
 	"github.com/gjbrr/blake-swap/pkg/rpc"
 )
 
@@ -416,5 +418,115 @@ func TestRigSendRefusals(t *testing.T) {
 
 	if !asNodeError(err, &nodeErr) {
 		t.Fatalf("error is %T (%v), want a node error", err, err)
+	}
+}
+
+// TestRigWalletSurface exercises the wallet-scoped calls funding depends on:
+// a fresh address the wallet owns, the watch-only wallet lifecycle, a
+// descriptor import with the node's verdict, and the transaction listing
+// recovery reads.
+func TestRigWalletSurface(t *testing.T) {
+	node := rigNode(t, BTC)
+	ctx := context.Background()
+
+	wallets, err := node.ListWallets(ctx)
+
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(wallets) == 0 {
+		t.Skip("the rig has no wallet loaded")
+	}
+
+	alice := node.Bind(wallets[0])
+
+	address, err := alice.NewAddress(ctx)
+
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	info, err := alice.AddressInfo(ctx, address)
+
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !info.IsMine {
+		t.Fatalf("a fresh address is not ours: %+v", info)
+	}
+
+	entries, err := alice.ListTransactions(ctx, 100, 0)
+
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, entry := range entries {
+		if entry.Category == "receive" && entry.Address == address {
+			// Not an assertion: the entry only exists once the address has
+			// been paid. The call itself is what is under test.
+			break
+		}
+	}
+
+	// A watch-only wallet holds no keys, so the node will accept a public
+	// descriptor — which is exactly what funding relies on before it moves
+	// money.
+	watchName := "watchtest" + fmt.Sprint(len(entries))
+
+	if err := node.EnsureWallet(ctx, watchName, true); err != nil {
+		t.Fatalf("create the watch-only wallet: %v", err)
+	}
+
+	bond := htlc.Bond{
+		SecretHash:    strings.Repeat("ab", 32),
+		BlakeBobPub:   "03c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5",
+		BlakeAlicePub: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+		BTCAlicePub:   "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+		BTCBobPub:     "03c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5",
+		BlakeTimeout:  1000,
+		BTCTimeout:    900,
+	}
+
+	body, err := bond.Descriptor(htlc.BTC)
+
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	compiled, err := node.DescriptorInfo(ctx, body)
+
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	watch := node.Bind(watchName)
+
+	result, err := watch.ImportDescriptor(ctx, compiled.Descriptor)
+
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !result.Success {
+		t.Fatalf("the node refused a watch-only import: %+v", result)
+	}
+
+	addresses, err := node.DeriveAddresses(ctx, compiled.Descriptor)
+
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	solvable, err := watch.AddressInfo(ctx, addresses[0])
+
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !solvable.Solvable {
+		t.Fatalf("the imported HTLC is not solvable: %+v", solvable)
 	}
 }

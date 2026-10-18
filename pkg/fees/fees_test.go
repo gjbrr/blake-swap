@@ -1,6 +1,7 @@
 package fees
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -296,5 +297,25 @@ func TestHistoricalEnvironments(t *testing.T) {
 			t.Errorf("%s: minimum %d <= 2600, but the table says it is not settleable",
 				environment.name, needed)
 		}
+	}
+}
+
+// TestChooseRateAcceptsDecodedJSONNumbers: the node adapter keeps a feerate as
+// json.Number so no float ever touches it, and that is the shape the policy
+// actually receives from a real RPC reply. A string-only parser would reject
+// every live estimate.
+func TestChooseRateAcceptsDecodedJSONNumbers(t *testing.T) {
+	rate, err := ChooseRate(FeeData{
+		Feerate:       json.Number("0.00010000"),
+		MempoolMinFee: json.Number("0.00001000"),
+		MinRelayTxFee: json.Number("0.00001000"),
+	}, nil)
+
+	if err != nil {
+		t.Fatalf("decoded numbers were rejected: %v", err)
+	}
+
+	if got, want := rate.String(), "10"; got != want {
+		t.Fatalf("rate = %s, want %s", got, want)
 	}
 }

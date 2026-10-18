@@ -482,6 +482,15 @@ type Balances struct {
 // coinAmount keeps the node's decimal string.
 type coinAmount string
 
+// BalancesFromTrusted builds a Balances from an exact decimal string.
+//
+// It exists so a caller that already has the figure — a test double, or a
+// cached wallet snapshot — can construct one without going through RPC, and
+// without a float ever standing in for the amount.
+func BalancesFromTrusted(trusted string) *Balances {
+	return &Balances{Trusted: coinAmount(trusted)}
+}
+
 // Trusted returns the trusted balance as an exact decimal.
 func (b Balances) TrustedAmount() (decimal.Dec, error) {
 	return decimal.Parse(string(b.Trusted))
@@ -651,6 +660,234 @@ func (n *Node) ImportDescriptor(ctx context.Context, descriptor string, watchOnl
 	_, err = n.callWithWallet(ctx, "importdescriptors", json.RawMessage(payload))
 
 	return err
+}
+
+// Wallet is the wallet-scoped surface the engine's funding and settlement
+// layers use.
+//
+// It is an interface, and the binding is by wallet name rather than by
+// constructing a node with a wallet attached, so the same code can address the
+// signing wallet and the watch-only wallet on one node — which is exactly what
+// funding does — and so a fake can stand in for the node in tests.
+type Wallet interface {
+	// Name is the wallet as the node knows it.
+	Name() string
+	// Balances returns the wallet's trusted balance.
+	Balances(ctx context.Context) (*Balances, error)
+	// Tx returns a wallet transaction.
+	Tx(ctx context.Context, txid string) (*WalletTx, error)
+	// ListTransactions returns the wallet's recent entries, newest first.
+	ListTransactions(ctx context.Context, count, skip int64) ([]WalletEntry, error)
+	// AddressInfo reports what the wallet knows about an address, including
+	// whether it can currently solve it.
+	AddressInfo(ctx context.Context, address string) (*AddressInfo, error)
+	// ImportDescriptor imports the descriptor and reports the node's verdict
+	// per descriptor rather than as one opaque error.
+	ImportDescriptor(ctx context.Context, descriptor string) (*ImportResult, error)
+	// SendToAddress sends funds at an explicit feerate, or at the node's own
+	// estimate when the rate is nil.
+	SendToAddress(ctx context.Context, address string, sats amount.Sats, feeRate *decimal.Dec) (string, error)
+	// NewAddress returns a fresh receiving address.
+	NewAddress(ctx context.Context) (string, error)
+	// Decode decodes raw transaction hex. It is node-wide rather than
+	// wallet-scoped, and it lives here so recovery code that holds a wallet can
+	// verify what that wallet claims without also holding the node.
+	Decode(ctx context.Context, hexTx string) (*Tx, error)
+}
+
+// Bind returns this node's wallet-scoped surface for one wallet name.
+func (n *Node) Bind(name string) Wallet {
+	return &walletNode{node: n.WithWallet(name), name: name}
+}
+
+// walletNode is the concrete Wallet: a node whose transport carries the
+// wallet in the URL path.
+type walletNode struct {
+	node *Node
+	name string
+}
+
+func (w *walletNode) Name() string { return w.name }
+
+func (w *walletNode) Balances(ctx context.Context) (*Balances, error) {
+	return w.node.GetBalances(ctx)
+}
+
+func (w *walletNode) Tx(ctx context.Context, txid string) (*WalletTx, error) {
+	return w.node.WalletTx(ctx, txid)
+}
+
+func (w *walletNode) ListTransactions(ctx context.Context, count, skip int64) ([]WalletEntry, error) {
+	return w.node.ListTransactions(ctx, count, skip)
+}
+
+func (w *walletNode) AddressInfo(ctx context.Context, address string) (*AddressInfo, error) {
+	return w.node.AddressInfo(ctx, address)
+}
+
+func (w *walletNode) ImportDescriptor(ctx context.Context, descriptor string) (*ImportResult, error) {
+	return w.node.ImportDescriptorResult(ctx, descriptor)
+}
+
+func (w *walletNode) SendToAddress(
+	ctx context.Context, address string, sats amount.Sats, feeRate *decimal.Dec,
+) (string, error) {
+	return w.node.sendToAddressAt(ctx, address, sats, feeRate)
+}
+
+func (w *walletNode) NewAddress(ctx context.Context) (string, error) {
+	return w.node.NewAddress(ctx)
+}
+
+func (w *walletNode) Decode(ctx context.Context, hexTx string) (*Tx, error) {
+	return w.node.DecodeRaw(ctx, hexTx)
+}
+
+// WalletEntry is one listtransactions entry, reduced to what the engine reads.
+type WalletEntry struct {
+	Address       string      `json:"address"`
+	Category      string      `json:"category"`
+	Amount        amount.Coin `json:"amount"`
+	TxID          string      `json:"txid"`
+	Vout          int64       `json:"vout"`
+	Confirmations int64       `json:"confirmations"`
+	BlockHash     string      `json:"blockhash"`
+}
+
+// ListTransactions returns recent wallet entries.
+//
+// The "send" entries are how funding recovery finds a payment this wallet
+// already made, so the list includes unconfirmed and abandoned entries: a
+// funding transaction that has not confirmed is exactly the case recovery is
+// for.
+func (n *Node) ListTransactions(ctx context.Context, count, skip int64) ([]WalletEntry, error) {
+	raw, err := n.callWithWallet(ctx, "listtransactions", "*", count, skip, true)
+
+	if err != nil {
+		return nil, err
+	}
+
+	var entries []WalletEntry
+
+	if err := decode(raw, &entries); err != nil {
+		return nil, fmt.Errorf("%s: listtransactions: %w", n.Chain, err)
+	}
+
+	return entries, nil
+}
+
+// AddressInfo is getaddressinfo's answer, reduced to the facts the engine uses.
+type AddressInfo struct {
+	Address      string `json:"address"`
+	ScriptPubKey string `json:"scriptPubKey"`
+	IsMine       bool   `json:"ismine"`
+	IsWatchOnly  bool   `json:"iswatchonly"`
+	Solvable     bool   `json:"solvable"`
+	Desc         string `json:"desc"`
+}
+
+// AddressInfo asks the bound wallet what it knows about an address.
+func (n *Node) AddressInfo(ctx context.Context, address string) (*AddressInfo, error) {
+	raw, err := n.callWithWallet(ctx, "getaddressinfo", address)
+
+	if err != nil {
+		return nil, err
+	}
+
+	var info AddressInfo
+
+	if err := decode(raw, &info); err != nil {
+		return nil, fmt.Errorf("%s: getaddressinfo: %w", n.Chain, err)
+	}
+
+	return &info, nil
+}
+
+// ImportResult is importdescriptors' verdict for one descriptor.
+type ImportResult struct {
+	Success  bool     `json:"success"`
+	Warnings []string `json:"warnings"`
+	Error    *struct {
+		Code    int    `json:"code"`
+		Message string `json:"message"`
+	} `json:"error"`
+}
+
+// Reason describes a failed import.
+func (r ImportResult) Reason() string {
+	if r.Error != nil && r.Error.Message != "" {
+		return r.Error.Message
+	}
+
+	return "the node reported the import as unsuccessful"
+}
+
+// ImportDescriptorResult imports a descriptor and reports the node's verdict.
+//
+// funding needs the verdict rather than a bool: a node that refuses the import
+// has to be reported to the operator, but it must not stop the funding that is
+// already in progress — see pkg/fund.
+func (n *Node) ImportDescriptorResult(ctx context.Context, descriptor string) (*ImportResult, error) {
+	request := []map[string]any{{
+		"desc":      descriptor,
+		"timestamp": "now",
+		"active":    false,
+		"internal":  false,
+	}}
+
+	payload, err := json.Marshal(request)
+
+	if err != nil {
+		return nil, err
+	}
+
+	raw, err := n.callWithWallet(ctx, "importdescriptors", json.RawMessage(payload))
+
+	if err != nil {
+		return nil, err
+	}
+
+	var results []ImportResult
+
+	if err := decode(raw, &results); err != nil {
+		return nil, fmt.Errorf("%s: importdescriptors: %w", n.Chain, err)
+	}
+
+	if len(results) == 0 {
+		return nil, fmt.Errorf("%s: importdescriptors: the node returned no result", n.Chain)
+	}
+
+	return &results[0], nil
+}
+
+// sendToAddressAt broadcasts a wallet payment at an explicit feerate.
+//
+// The rate is rendered exactly, and conf_target is omitted so the node cannot
+// silently prefer its own estimate over the rate the engine chose.
+func (n *Node) sendToAddressAt(
+	ctx context.Context, address string, sats amount.Sats, feeRate *decimal.Dec,
+) (string, error) {
+	rendered := sats.Coin().String()
+
+	params := []any{address, rendered, "", "", false, true, nil, "unset", false}
+
+	if feeRate != nil {
+		params = append(params, feeRate.String())
+	}
+
+	raw, err := n.callWithWallet(ctx, "sendtoaddress", params...)
+
+	if err != nil {
+		return "", err
+	}
+
+	var txid string
+
+	if err := decode(raw, &txid); err != nil {
+		return "", fmt.Errorf("%s: sendtoaddress: %w", n.Chain, err)
+	}
+
+	return txid, nil
 }
 
 // SendToAddress sends funds from the bound wallet.

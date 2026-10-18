@@ -11,6 +11,7 @@ import (
 
 	"github.com/gjbrr/blake-swap/pkg/amount"
 	"github.com/gjbrr/blake-swap/pkg/chain"
+	"github.com/gjbrr/blake-swap/pkg/contract"
 	"github.com/gjbrr/blake-swap/pkg/htlc"
 	"github.com/gjbrr/blake-swap/pkg/model"
 )
@@ -231,7 +232,7 @@ func mustHex(s string) []byte {
 func (f *fakeNode) fund(t *testing.T, swap *model.Swap, ch chain.Chain, confirmations int64) *chain.Tx {
 	t.Helper()
 
-	contract, err := Derive(context.Background(), f, swap, ch)
+	derived, err := contract.Derive(context.Background(), f, swap, ch)
 
 	if err != nil {
 		t.Fatalf("derive: %v", err)
@@ -252,10 +253,10 @@ func (f *fakeNode) fund(t *testing.T, swap *model.Swap, ch chain.Chain, confirma
 		Confirmations: confirmations,
 		Vout: []chain.Vout{{
 			N:     vout,
-			Value: amount.Coin(fmt.Sprintf("%.8f", float64(contract.Amount)/1e8)),
+			Value: amount.Coin(fmt.Sprintf("%.8f", float64(derived.Amount)/1e8)),
 		}},
 	}
-	tx.Vout[0].ScriptPubKey.Address = contract.Address
+	tx.Vout[0].ScriptPubKey.Address = derived.Address
 
 	if confirmations > 0 {
 		tx.BlockHash = hashFor(f.height)
@@ -266,7 +267,7 @@ func (f *fakeNode) fund(t *testing.T, swap *model.Swap, ch chain.Chain, confirma
 	if confirmations > 0 {
 		out := &chain.TxOut{Confirmations: confirmations}
 		out.Value = tx.Vout[0].Value
-		out.ScriptPubKey.Address = contract.Address
+		out.ScriptPubKey.Address = derived.Address
 		f.utxos[key(txid, vout)] = out
 	}
 

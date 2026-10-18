@@ -12,6 +12,7 @@
 package fees
 
 import (
+	"encoding/json"
 	"fmt"
 
 	"github.com/gjbrr/blake-swap/pkg/decimal"
@@ -79,6 +80,10 @@ func decimalFrom(v any) (decimal.Dec, error) {
 		return decimal.Dec{}, fmt.Errorf("value is absent")
 	case decimal.Dec:
 		return value, nil
+	case json.Number:
+		// The node adapter keeps a decoded JSON number as its exact text, and
+		// that is the shape this policy receives from real RPC replies.
+		return decimal.Parse(string(value))
 	case string:
 		return decimal.Parse(value)
 	case int:

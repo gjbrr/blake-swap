@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/gjbrr/blake-swap/pkg/chain"
+	"github.com/gjbrr/blake-swap/pkg/contract"
 	"github.com/gjbrr/blake-swap/pkg/model"
 )
 
@@ -36,7 +37,7 @@ func ScanFunding(
 	ch chain.Chain,
 	cfg Config,
 ) (*Funding, error) {
-	contract, err := Derive(ctx, node, swap, ch)
+	derived, err := contract.Derive(ctx, node, swap, ch)
 
 	if err != nil {
 		return nil, err
@@ -92,7 +93,7 @@ func ScanFunding(
 			}
 
 			for _, out := range tx.Vout {
-				if out.ScriptPubKey.Address != contract.Address {
+				if out.ScriptPubKey.Address != derived.Address {
 					continue
 				}
 
@@ -102,7 +103,7 @@ func ScanFunding(
 					continue
 				}
 
-				if int64(value) != contract.Amount {
+				if int64(value) != derived.Amount {
 					continue
 				}
 
@@ -111,8 +112,8 @@ func ScanFunding(
 					Vout:      out.N,
 					BlockHash: blockHash,
 					Height:    height,
-					Address:   contract.Address,
-					Amount:    contract.Amount,
+					Address:   derived.Address,
+					Amount:    derived.Amount,
 				})
 			}
 		}

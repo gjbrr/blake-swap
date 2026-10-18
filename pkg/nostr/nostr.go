@@ -413,7 +413,10 @@ type Filter struct {
 	Kinds   []int
 	Authors []string
 	DTags   []string
-	Limit   int
+	// Topics selects the `#t` tags. A market read is selected this way: an offer,
+	// a cancellation and a match are all kind 1 and are told apart by their topic.
+	Topics []string
+	Limit  int
 }
 
 // request renders the filter as a subscription object.
@@ -428,6 +431,10 @@ func (f Filter) request() map[string]any {
 
 	if len(f.DTags) > 0 {
 		object["#d"] = f.DTags
+	}
+
+	if len(f.Topics) > 0 {
+		object["#t"] = f.Topics
 	}
 
 	if f.Limit > 0 {
@@ -628,15 +635,29 @@ func (c *Client) publishToRelay(ctx context.Context, relay string, e event.Event
 // counterparty. One relay answering is enough to proceed; none answering is an
 // error, because "no message" and "no relay" are different conditions.
 func (c *Client) Fetch(ctx context.Context, filter Filter) ([]event.Event, error) {
+	return c.FetchMany(ctx, filter)
+}
+
+// FetchMany queries every relay for several filters in one subscription each.
+//
+// A market read is three questions at once — offers, cancellations and matches — and
+// asking them over one connection is not an optimisation: three separate reads can
+// straddle a cancellation and report a marketplace that never existed at any instant.
+// The reference engine issues them the same way, as one REQ carrying three filters.
+func (c *Client) FetchMany(ctx context.Context, filters ...Filter) ([]event.Event, error) {
 	if len(c.Relays) == 0 {
 		return nil, fmt.Errorf("no Nostr relays configured")
+	}
+
+	if len(filters) == 0 {
+		return nil, fmt.Errorf("no filters to fetch")
 	}
 
 	byID := map[string]event.Event{}
 	answered := 0
 
 	for _, relay := range c.Relays {
-		events, err := c.fetchFromRelay(ctx, relay, filter)
+		events, err := c.fetchFromRelay(ctx, relay, filters...)
 
 		if err != nil {
 			continue
@@ -686,7 +707,7 @@ func (c *Client) Fetch(ctx context.Context, filter Filter) ([]event.Event, error
 }
 
 // fetchFromRelay opens a subscription, reads until EOSE and closes it.
-func (c *Client) fetchFromRelay(ctx context.Context, relay string, filter Filter) ([]event.Event, error) {
+func (c *Client) fetchFromRelay(ctx context.Context, relay string, filters ...Filter) ([]event.Event, error) {
 	conn, err := c.dial(ctx, relay)
 
 	if err != nil {
@@ -700,7 +721,14 @@ func (c *Client) fetchFromRelay(ctx context.Context, relay string, filter Filter
 
 	subscription := "blake-swap-" + randomSuffix()
 
-	request, err := json.Marshal([]any{"REQ", subscription, filter.request()})
+	frame := make([]any, 0, 2+len(filters))
+	frame = append(frame, "REQ", subscription)
+
+	for _, filter := range filters {
+		frame = append(frame, filter.request())
+	}
+
+	request, err := json.Marshal(frame)
 
 	if err != nil {
 		return nil, err

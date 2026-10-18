@@ -581,27 +581,72 @@ def trusted_balance(cli, wallet: str) -> float:
     """
     Trusted (mature, spendable) balance of one wallet, in coins.
 
-    The engine refuses to fund an HTLC from untrusted balance, and
-    coinbase outputs need 100 confirmations before they mature, so the
-    bootstrap below has to mine a maturity run rather than a few blocks.
+    This has to be the same quantity the engine reads before it funds an
+    HTLC: `getbalances.mine.trusted`. The engine refuses to fund from
+    untrusted balance, and coinbase outputs need 100 confirmations before
+    they mature, so the bootstrap below mines a maturity run rather than a
+    few blocks.
+
+    An earlier version fell back to `getwalletinfo.balance` when
+    `getbalances` failed. That field includes immature and unconfirmed
+    coins, so a pool that the engine would refuse could still satisfy the
+    guard here, and the failure surfaced later as "insufficient trusted
+    BLAKE balance" inside a swap — a setup flake wearing a protocol
+    defect's clothes. A failed read is now retried and then reported as
+    zero, which makes the reserve top-up run instead of the guard lying.
     """
-    try:
-        info = cli("getbalances", wallet=wallet)
+    detail = "no attempt was made"
 
-        if isinstance(info, dict):
-            return float(info.get("mine", {}).get("trusted", 0.0))
-    except Exception:
-        pass
+    for attempt in range(5):
+        try:
+            info = cli("getbalances", wallet=wallet)
 
-    try:
-        info = cli("getwalletinfo", wallet=wallet)
+            if isinstance(info, dict):
+                return float(
+                    info.get("mine", {}).get("trusted", 0.0)
+                )
 
-        if isinstance(info, dict):
-            return float(info.get("balance", 0.0))
-    except Exception:
-        pass
+            detail = f"getbalances returned {type(info).__name__}"
+        except Exception as e:  # a busy wallet, or a transient RPC error
+            detail = str(e)
+
+        if attempt < 4:
+            time.sleep(0.5)
+
+    print(
+        f"  WARNING: trusted balance of {wallet} is unreadable: "
+        f"{detail}"
+    )
 
     return 0.0
+
+
+def wait_for_trusted_balance(
+    cli,
+    wallet: str,
+    minimum: float,
+    *,
+    attempts: int = 20,
+    delay: float = 0.5,
+) -> float:
+    """
+    Poll a wallet's trusted balance until it reaches `minimum`.
+
+    A transaction that was just mined is not always reflected in the
+    trusted figure on the first read, and one such read would make a
+    funded pool look starved. Polling keeps the wait in the bootstrap,
+    where it belongs, instead of in whichever test noticed the shortfall.
+    """
+    balance = trusted_balance(cli, wallet)
+
+    for _ in range(attempts):
+        if balance >= minimum:
+            return balance
+
+        time.sleep(delay)
+        balance = trusted_balance(cli, wallet)
+
+    return balance
 
 
 def ensure_bitcoin_wallet_funds(
@@ -639,9 +684,10 @@ def ensure_bitcoin_wallet_funds(
             addr,
         )
 
-        alice_balance = trusted_balance(
+        alice_balance = wait_for_trusted_balance(
             btc_cli,
             ALICE_WALLET,
+            minimum,
         )
 
     if bob_balance < minimum:
@@ -677,14 +723,16 @@ def ensure_bitcoin_wallet_funds(
             addr,
         )
 
-    alice_balance = trusted_balance(
+    alice_balance = wait_for_trusted_balance(
         btc_cli,
         ALICE_WALLET,
+        minimum,
     )
 
-    bob_balance = trusted_balance(
+    bob_balance = wait_for_trusted_balance(
         btc_cli,
         BOB_WALLET,
+        minimum,
     )
 
     require(
@@ -800,9 +848,10 @@ def ensure_blake_alice_reserve(
                 txid,
             )
 
-    alice_balance = trusted_balance(
+    alice_balance = wait_for_trusted_balance(
         blake_cli,
         ALICE_WALLET,
+        minimum,
     )
 
     bob_balance = trusted_balance(

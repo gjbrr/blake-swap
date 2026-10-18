@@ -179,6 +179,35 @@ type Block struct {
 	Tx            []string `json:"tx"`
 }
 
+// VerboseBlock is a block with its transactions decoded.
+//
+// The recovery scans need each transaction's inputs, and asking for block
+// verbosity 2 fetches that in one call instead of one getrawtransaction per
+// transaction, which on a node without txindex would not even be possible.
+type VerboseBlock struct {
+	Hash          string `json:"hash"`
+	Height        int64  `json:"height"`
+	Confirmations int64  `json:"confirmations"`
+	Tx            []Tx   `json:"tx"`
+}
+
+// BlockTxs returns a block with its transactions decoded.
+func (n *Node) BlockTxs(ctx context.Context, hash string) (*VerboseBlock, error) {
+	raw, err := n.call(ctx, "getblock", hash, 2)
+
+	if err != nil {
+		return nil, err
+	}
+
+	var block VerboseBlock
+
+	if err := decode(raw, &block); err != nil {
+		return nil, fmt.Errorf("%s: getblock: %w", n.Chain, err)
+	}
+
+	return &block, nil
+}
+
 // Block returns a block by hash.
 func (n *Node) Block(ctx context.Context, hash string, verbosity int) (*Block, error) {
 	raw, err := n.call(ctx, "getblock", hash, verbosity)
@@ -223,6 +252,7 @@ type Vout struct {
 // Tx is a decoded transaction.
 type Tx struct {
 	TxID          string `json:"txid"`
+	InActiveChain *bool  `json:"in_active_chain"`
 	Hash          string `json:"hash"`
 	VSize         int64  `json:"vsize"`
 	Weight        int64  `json:"weight"`
@@ -513,6 +543,7 @@ func (u Unspent) Sats() (amount.Sats, error) { return u.Amount.Sats() }
 // WalletTx is gettransaction's answer, reduced to what the engine reads.
 type WalletTx struct {
 	TxID          string      `json:"txid"`
+	Hex           string      `json:"hex"`
 	Confirmations int64       `json:"confirmations"`
 	BlockHash     string      `json:"blockhash"`
 	Amount        amount.Coin `json:"amount"`
@@ -663,24 +694,20 @@ func (n *Node) SendRaw(ctx context.Context, hexTx string) (string, error) {
 	return txid, nil
 }
 
-// DecodedTx is decoderawtransaction's answer, reduced to the fields used.
-type DecodedTx struct {
-	TxID   string `json:"txid"`
-	VSize  int64  `json:"vsize"`
-	Weight int64  `json:"weight"`
-	Vin    []Vin  `json:"vin"`
-	Vout   []Vout `json:"vout"`
-}
-
 // DecodeRaw decodes a raw transaction.
-func (n *Node) DecodeRaw(ctx context.Context, hexTx string) (*DecodedTx, error) {
+//
+// The answer is the same Tx shape every other read returns, so a transaction
+// recovered through the wallet (gettransaction's hex, decoded here) and one
+// fetched by txid are interchangeable to the caller. decoderawtransaction does
+// not report confirmations or a block hash; a caller that knows them sets them.
+func (n *Node) DecodeRaw(ctx context.Context, hexTx string) (*Tx, error) {
 	raw, err := n.call(ctx, "decoderawtransaction", hexTx)
 
 	if err != nil {
 		return nil, err
 	}
 
-	var decoded DecodedTx
+	var decoded Tx
 
 	if err := decode(raw, &decoded); err != nil {
 		return nil, fmt.Errorf("%s: decoderawtransaction: %w", n.Chain, err)

@@ -26,6 +26,10 @@ const (
 )
 
 // isMarketCommand reports whether a command reads the market rather than a chain.
+//
+// The one switch that needs this is main's, which must decide whether building an
+// engine is worth failing over. run's own dispatch lists the same two names; a test
+// keeps the two from drifting.
 func isMarketCommand(command string) bool {
 	return command == marketCommand || command == marketStateCommand
 }

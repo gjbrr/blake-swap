@@ -82,28 +82,28 @@ Statuses: **ported** (behaviour and tests), **partial** (in progress), **pending
 
 ## CLI commands (58)
 
-The Go command surface is not started; every command is pending until `pkg/cli` reproduces it.
+The Go CLI dispatches 40 of these 58. Implemented means the command exists with the reference's arguments and environment; it does not by itself mean the output text is identical, which is tracked per command in the module table above.
 
 | Command | Go | Status |
 |---|---|---|
-| `new` | — | pending |
-| `show` | — | pending |
-| `advance` | — | pending |
-| `list` | — | pending |
+| `new` | `run` | implemented |
+| `show` | `run` | implemented |
+| `advance` | `run` | implemented |
+| `list` | `run` | implemented |
 | `fund` | — | pending |
-| `fund-blake` | — | pending |
-| `verify-blake` | — | pending |
-| `refresh-timeouts` | — | pending |
-| `status` | — | pending |
-| `fund-btc` | — | pending |
-| `verify-btc` | — | pending |
-| `claim-btc` | — | pending |
-| `extract-secret` | — | pending |
-| `claim-blake` | — | pending |
-| `refund-blake` | — | pending |
-| `refund-btc` | — | pending |
-| `market` | — | pending |
-| `market-state` | — | pending |
+| `fund-blake` | `run` | implemented |
+| `verify-blake` | `run` | implemented |
+| `refresh-timeouts` | `run` | implemented |
+| `status` | `run` | implemented |
+| `fund-btc` | `run` | implemented |
+| `verify-btc` | `run` | implemented |
+| `claim-btc` | `run` | implemented |
+| `extract-secret` | `run` | implemented |
+| `claim-blake` | `run` | implemented |
+| `refund-blake` | `run` | implemented |
+| `refund-btc` | `run` | implemented |
+| `market` | `run` | implemented |
+| `market-state` | `run` | implemented |
 | `publish-market-offer` | — | pending |
 | `inspect-market-take` | — | pending |
 | `market-takes` | — | pending |
@@ -117,33 +117,33 @@ The Go command surface is not started; every command is pending until `pkg/cli` 
 | `accept-market-match` | — | pending |
 | `take-market-offer` | — | pending |
 | `cancel-market-offer` | — | pending |
-| `publish-offer` | — | pending |
-| `accept-offer` | — | pending |
-| `publish-blake-funded` | — | pending |
-| `receive-blake-funded` | — | pending |
-| `receive-accept` | — | pending |
-| `publish-btc-funded` | — | pending |
-| `receive-btc-funded` | — | pending |
-| `publish-btc-claimed` | — | pending |
-| `receive-btc-claimed` | — | pending |
-| `publish-blake-claimed` | — | pending |
-| `receive-blake-claimed` | — | pending |
-| `complete` | — | pending |
-| `publish-btc-refunded` | — | pending |
-| `receive-btc-refunded` | — | pending |
+| `publish-offer` | `run` | implemented |
+| `accept-offer` | `run` | implemented |
+| `publish-blake-funded` | `run` | implemented |
+| `receive-blake-funded` | `run` | implemented |
+| `receive-accept` | `run` | implemented |
+| `publish-btc-funded` | `run` | implemented |
+| `receive-btc-funded` | `run` | implemented |
+| `publish-btc-claimed` | `run` | implemented |
+| `receive-btc-claimed` | `run` | implemented |
+| `publish-blake-claimed` | `run` | implemented |
+| `receive-blake-claimed` | `run` | implemented |
+| `complete` | `run` | implemented |
+| `publish-btc-refunded` | `run` | implemented |
+| `receive-btc-refunded` | `run` | implemented |
 | `rebroadcast-nostr-event` | — | pending |
-| `sync-settlement` | — | pending |
-| `sync-funding` | — | pending |
-| `watch-htlc` | — | pending |
-| `recovery-plan` | — | pending |
-| `reconcile` | — | pending |
+| `sync-settlement` | `run` | implemented |
+| `sync-funding` | `run` | implemented |
+| `watch-htlc` | `run` | implemented |
+| `recovery-plan` | `run` | implemented |
+| `reconcile` | `run` | implemented |
 | `ignore-match` | — | pending |
-| `next` | — | pending |
-| `dashboard` | — | pending |
+| `next` | `run` | implemented |
+| `dashboard` | `run` | implemented |
 | `dismiss` | — | pending |
-| `resume` | — | pending |
+| `resume` | `run` | implemented |
 | `run` | — | pending |
-| `resume-all` | — | pending |
+| `resume-all` | `run` | implemented |
 
 ## Test suites (60)
 

@@ -75,6 +75,27 @@ def python_commands(path: Path) -> list[str]:
 # --------------------------------------------------------------------------
 
 
+COMMAND_CASE = re.compile(r'case ((?:"[a-z0-9\-]+"(?:\s*,\s*)?)+):')
+
+
+def go_cli_commands(path: Path) -> set[str]:
+    """The command names the Go CLI dispatches, read from its switch.
+
+    Reading the dispatch rather than a maintained list means the manifest cannot
+    claim a command is missing after it was wired, or present because somebody added
+    a line to a document.
+    """
+    if not path.is_file():
+        return set()
+
+    names: set[str] = set()
+
+    for group in COMMAND_CASE.findall(path.read_text()):
+        names |= set(re.findall(r'"([a-z0-9\-]+)"', group))
+
+    return names
+
+
 def go_packages() -> dict[str, Path]:
     """Every Go package under pkg/, keyed by import path suffix."""
 
@@ -542,17 +563,25 @@ def render() -> str:
 
     lines.append("")
     lines.append(f"## CLI commands ({len(commands)})")
+    implemented = go_cli_commands(ROOT / "cmd" / "blake-swap-cli" / "main.go")
+    done = sum(1 for command in commands if command in implemented)
+
     lines.append("")
     lines.append(
-        "The Go command surface is not started; every command is pending until "
-        "`pkg/cli` reproduces it."
+        f"The Go CLI dispatches {done} of these {len(commands)}. Implemented means the "
+        "command exists with the reference's arguments and environment; it does not by "
+        "itself mean the output text is identical, which is tracked per command in the "
+        "module table above."
     )
     lines.append("")
     lines.append("| Command | Go | Status |")
     lines.append("|---|---|---|")
 
     for command in commands:
-        lines.append(f"| `{command}` | — | pending |")
+        if command in implemented:
+            lines.append(f"| `{command}` | `run` | implemented |")
+        else:
+            lines.append(f"| `{command}` | — | pending |")
 
     lines.append("")
     lines.append(f"## Test suites ({len(suites)})")

@@ -43,7 +43,7 @@ func main() {
 	// A market read talks to relays, not to nodes, so it runs before the engine is
 	// built: looking for an offer must not require a regtest datadir and two nodes.
 	if isMarketCommand(command) {
-		if err := runMarketCommand(context.Background(), command, args); err != nil {
+		if err := run(context.Background(), nil, command, args); err != nil {
 			fail(err)
 		}
 
@@ -109,6 +109,8 @@ commands:
 // run dispatches one command.
 func run(ctx context.Context, engine *swap.Engine, command string, args []string) error {
 	switch command {
+	case "market", "market-state":
+		return runMarketCommand(ctx, command, args)
 	case "new":
 		return runNew(ctx, engine, args)
 	case "show":

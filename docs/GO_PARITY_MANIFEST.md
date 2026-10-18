@@ -31,17 +31,17 @@ Statuses: **ported** (behaviour and tests), **partial** (in progress), **pending
 | `src/swap_v2.py (funding)` | `pkg/fund` | ported | funding one leg, the crash-window intent, watch-only import and solvability |
 | `src/swap_v2.py (settlement)` | `pkg/settle` | ported | the PSBT pipeline, fee/vsize convergence, broadcast and rebroadcast |
 | `src/swap_v2.py (coordination)` | `pkg/coord` | ported | one Transport interface: the local spool, or Nostr; validation and sender pinning on both |
-| `src/swap_v2.py (relays)` | `pkg/nostr` | ported | relay sessions over a platform connection, publish report, REQ/EOSE, event cache, the encryption policy |
+| `src/swap_v2.py (relays)` | `pkg/nostr` | ported | relay sessions over a platform connection, publish report, REQ/EOSE with topic filters and several filters per subscription, event cache, the encryption policy |
 | `src/swap_v2.py (durable state)` | `pkg/store` | ported | workflow store: atomic swap records, the message spool, the archive |
 | `src/swap_v2.py (commands)` | `pkg/swap` | partial | the 58 commands as a Go API: the full settlement lifecycle, refunds, the offer/accept handshake, and the reporting/recovery/resume commands are in; a Go participant completes real swaps and refunds against the Python reference in both directions, and both implementations agree about the protocol report; market commands remain |
 | `src/swap_agent.py` | `pkg/agent` | pending | the autonomous driver's step policy and budget |
-| `src/swap_v2.py (market flow)` | `pkg/marketflow` | partial | market events: offer, take, cancel and match are built, parsed and validated by the reference; state is derived from evidence the same way; the market commands remain |
+| `src/swap_v2.py (market flow)` | `pkg/marketflow` | partial | market events: offer, take, cancel and match are built, parsed and validated by the reference; state is derived from evidence the same way, for one offer and for a whole book of them; the market commands remain |
 | `src/swap_v2.py (CLI)` | `cmd/blake-swap-cli (missing)` | partial | the drop-in CLI: the implemented commands with the reference's arguments and environment; the output text is not yet byte-identical |
 | `(new)` | `pkg/vault` | ported | passphrase KDF and record encryption with the NIP-44 primitives |
 | `(new)` | `pkg/proxy` | ported | the node RPC proxy: credentials stay server-side, the method allowlist and a per-address rate limit are the boundary |
-| `(new)` | `pkg/worker` | partial | the browser worker's domains: the event loop, the encrypted-state domain, and the command dispatcher the page drives |
+| `(new)` | `pkg/worker` | partial | the browser worker's domains: the event loop, the encrypted-state domain, the read-only engine domain it drives through the app server's proxy, and the command dispatcher |
 | `(new)` | `pkg/client` | partial | the browser client's encrypted state: a store.Store whose records are sealed with a passphrase-derived key before they reach IndexedDB, with a pluggable entropy source |
-| `(new)` | `pkg/platform` | ported | the browser seams: clock, console, IndexedDB-backed KV, a relay WebSocket, and a fetch transport for the node proxy; native implementations for tests and hosts |
+| `(new)` | `pkg/platform` | ported | the platform seams: clock, console, durable KV, a relay WebSocket and a JSON-RPC transport, each with a browser implementation (IndexedDB, WebSocket, fetch) and a host one (memory or files, TCP socket, HTTP POST) |
 
 ### Symbols
 
@@ -68,17 +68,17 @@ Statuses: **ported** (behaviour and tests), **partial** (in progress), **pending
 | `command_fund_blake`, `write_funding_intent`, `reconcile_funding_intent` | `Fund`, `ResolveIntent`, `ImportWatchOnly`, `VerifyAnchor` | `pkg/fund` |
 | `build_dynamic_settlement_spend`, `_decoded_spend_fee_sats`, `_decoded_tx_vsize` | `Build`, `Claim`, `Refund`, `Broadcast`, `SpendFee` | `pkg/settle` |
 | `file_send_message`, `send_message`, `receive_message`, `validate_transport_message` | `FileTransport`, `NostrTransport`, `Validate`, `Transport` | `pkg/coord` |
-| `nostr_send_message`, `nostr_receive_message`, `nostr_publish_event`, `decode_coordination_content` | `Client`, `BuildCoordinationEvent`, `DecodeContent`, `Cache` | `pkg/nostr` |
+| `nostr_send_message`, `nostr_receive_message`, `nostr_publish_event`, `decode_coordination_content` | `Client`, `BuildCoordinationEvent`, `DecodeContent`, `Cache`, `Filter`, `FetchMany` | `pkg/nostr` |
 | `atomic_write_json`, `load_local_swap`, `local_swap_paths`, `file_send_message`, `file_receive_message` | `File`, `Memory`, `SupersededPlaceholders`, `ArchiveSuperseded` | `pkg/store` |
 | `command_status`, `command_show`, `command_advance`, `command_list`, `command_fund_blake`, `command_fund_btc`, `command_claim_btc`, `command_claim_blake`, `command_refund_btc`, `command_refund_blake`, `command_complete`, `command_publish_blake_funded`, `command_receive_blake_funded`, `command_publish_btc_funded`, `command_receive_btc_funded`, `command_publish_btc_claimed`, `command_receive_btc_claimed`, `command_publish_blake_claimed`, `command_receive_blake_claimed`, `command_publish_btc_refunded`, `command_receive_btc_refunded`, `command_extract_secret`, `command_new`, `command_publish_offer`, `command_accept_offer`, `command_receive_accept`, `command_reconcile`, `command_next`, `command_resume`, `command_watch_htlc`, `command_recovery_plan`, `command_dashboard`, `command_resume_all`, `command_sync_funding`, `command_sync_settlement`, `command_refresh_timeouts` | `Engine`, `Status`, `Show`, `List`, `Advance`, `FundBlake`, `FundBTC`, `VerifyBlake`, `VerifyBTC`, `ClaimBTC`, `ClaimBlake`, `RefundBTC`, `RefundBlake`, `Complete`, `ExtractSecret`, `AnnounceBlakeFunding`, `ReceiveBlakeFunding`, `AnnounceBTCFunding`, `ReceiveBTCFunding`, `AnnounceBTCCLaimed`, `ReceiveBTCCLaimed`, `AnnounceBlakeClaimed`, `ReceiveBlakeClaimed`, `AnnounceBTCRefunded`, `ReceiveBTCRefunded`, `New`, `PublishOffer`, `AcceptOffer`, `ReceiveAccept`, `Reconcile`, `Next`, `Resume`, `WatchHTLC`, `RecoveryPlan`, `Dashboard`, `ResumeAll`, `SyncFunding`, `SyncSettlement`, `RefreshTimeouts` | `pkg/swap` |
 | `AgentPolicy` | — | `pkg/agent` |
-| `build_market_offer_v2_event`, `nostr_parse_market_offer_event`, `build_market_take_event`, `nostr_validate_market_take_event`, `build_market_cancel_event`, `build_market_match_event`, `validate_market_match_evidence`, `nostr_derive_market_offer_state`, `nostr_market_cancellation_applies` | `BuildOffer`, `ParseOffer`, `BuildTake`, `ParseTake`, `BuildCancel`, `ParseCancel`, `BuildMatch`, `ParseMatch`, `DeriveState`, `CancellationApplies` | `pkg/marketflow` |
+| `build_market_offer_v2_event`, `nostr_parse_market_offer_event`, `build_market_take_event`, `nostr_validate_market_take_event`, `build_market_cancel_event`, `build_market_match_event`, `validate_market_match_evidence`, `nostr_derive_market_offer_state`, `nostr_market_cancellation_applies` | `BuildOffer`, `ParseOffer`, `BuildTake`, `ParseTake`, `BuildCancel`, `ParseCancel`, `BuildMatch`, `ParseMatch`, `DeriveState`, `CancellationApplies`, `Book`, `OpenOffers`, `Entry` | `pkg/marketflow` |
 | `main` | — | `pkg/cmd/blake-swap-cli` |
 | — | `Seal`, `Open`, `DeriveKey` | `pkg/vault` |
 | `run_chain_cli`, `chain_dispatch` | `Proxy`, `Config`, `Endpoint`, `DefaultAllowlist` | `pkg/proxy` |
 | — | `NewVaultDomain`, `Domain`, `Chans` | `pkg/worker` |
 | `load_swap`, `save_swap`, `atomic_write_json` | `Encrypted`, `Create`, `Open`, `KV`, `Memory` | `pkg/client` |
-| `chain_dispatch`, `nostr_publish_event_to_relay` | `KV`, `Clock`, `Console`, `HTTP`, `IndexedDB`, `WebSocket`, `Fetch`, `MemoryKV` | `pkg/platform` |
+| `chain_dispatch`, `nostr_publish_event_to_relay` | `KV`, `Clock`, `Console`, `HTTP`, `IndexedDB`, `WebSocket`, `Fetch`, `MemoryKV`, `DialWebSocket`, `NewTransport` | `pkg/platform` |
 
 ## CLI commands (58)
 

@@ -343,8 +343,8 @@ MODULES: list[Module] = [
     ),
     Module(
         "src/swap_v2.py (relays)", "pkg/nostr", "ported",
-        "relay sessions over a platform connection, publish report, REQ/EOSE, event cache, the encryption policy",
-        ["Client", "BuildCoordinationEvent", "DecodeContent", "Cache"],
+        "relay sessions over a platform connection, publish report, REQ/EOSE with topic filters and several filters per subscription, event cache, the encryption policy",
+        ["Client", "BuildCoordinationEvent", "DecodeContent", "Cache", "Filter", "FetchMany"],
         ["nostr_send_message", "nostr_receive_message", "nostr_publish_event", "decode_coordination_content"],
     ),
     Module(
@@ -380,9 +380,9 @@ MODULES: list[Module] = [
     ),
     Module(
         "src/swap_v2.py (market flow)", "pkg/marketflow", "partial",
-        "market events: offer, take, cancel and match are built, parsed and validated by the reference; state is derived from evidence the same way; the market commands remain",
+        "market events: offer, take, cancel and match are built, parsed and validated by the reference; state is derived from evidence the same way, for one offer and for a whole book of them; the market commands remain",
         ["BuildOffer", "ParseOffer", "BuildTake", "ParseTake", "BuildCancel", "ParseCancel", "BuildMatch",
-         "ParseMatch", "DeriveState", "CancellationApplies"],
+         "ParseMatch", "DeriveState", "CancellationApplies", "Book", "OpenOffers", "Entry"],
         ["build_market_offer_v2_event", "nostr_parse_market_offer_event", "build_market_take_event",
          "nostr_validate_market_take_event", "build_market_cancel_event", "build_market_match_event",
          "validate_market_match_evidence", "nostr_derive_market_offer_state", "nostr_market_cancellation_applies"],
@@ -406,7 +406,7 @@ MODULES: list[Module] = [
     ),
     Module(
         "(new)", "pkg/worker", "partial",
-        "the browser worker's domains: the event loop, the encrypted-state domain, and the command dispatcher the page drives",
+        "the browser worker's domains: the event loop, the encrypted-state domain, the read-only engine domain it drives through the app server's proxy, and the command dispatcher",
         ["NewVaultDomain", "Domain", "Chans"],
         [],
     ),
@@ -418,8 +418,9 @@ MODULES: list[Module] = [
     ),
     Module(
         "(new)", "pkg/platform", "ported",
-        "the browser seams: clock, console, IndexedDB-backed KV, a relay WebSocket, and a fetch transport for the node proxy; native implementations for tests and hosts",
-        ["KV", "Clock", "Console", "HTTP", "IndexedDB", "WebSocket", "Fetch", "MemoryKV"],
+        "the platform seams: clock, console, durable KV, a relay WebSocket and a JSON-RPC transport, each with a browser implementation (IndexedDB, WebSocket, fetch) and a host one (memory or files, TCP socket, HTTP POST)",
+        ["KV", "Clock", "Console", "HTTP", "IndexedDB", "WebSocket", "Fetch", "MemoryKV", "DialWebSocket",
+         "NewTransport"],
         ["chain_dispatch", "nostr_publish_event_to_relay"],
     ),
 ]

@@ -22,10 +22,16 @@ SERVER := $(BIN)/blake-swap-app
 # Everything the wasm modules are built from.
 SOURCES := $(shell find pkg cmd -name '*.go' -not -name native_stub.go) go.mod go.sum
 
-# Packages that build for the host: proto is pure Go, server is native.
-NATIVE_PKGS := ./pkg/proto ./cmd/server
+# Packages that build for the host. Everything except the browser seams and
+# the wasm entry points is host-buildable, which is what makes the value layer
+# testable without a browser.
+NATIVE_PKGS := ./pkg/... ./cmd/server
 
-.PHONY: all wasm server serve verify test fmt vet clean
+# Packages whose tests also run under TinyGo wasm. They are the ones the
+# browser client will link, so a host-only pass would not be enough.
+WASM_TEST_PKGS := ./pkg/decimal ./pkg/amount ./pkg/fees ./pkg/timeout
+
+.PHONY: all wasm server serve verify test wasmtest fmt vet clean
 
 all: wasm
 
@@ -59,6 +65,12 @@ verify: wasm
 
 test:
 	$(GO) test $(NATIVE_PKGS)
+
+# Run the value-layer tests compiled to wasm. This is how a package that
+# accidentally depends on something TinyGo lacks gets caught here rather than
+# at browser runtime.
+wasmtest:
+	$(TINYGO) test -target=wasm $(WASM_TEST_PKGS)
 
 fmt:
 	$(GO) fmt ./pkg/... ./cmd/...

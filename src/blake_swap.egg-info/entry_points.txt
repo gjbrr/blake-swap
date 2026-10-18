@@ -1,0 +1,3 @@
+[console_scripts]
+blake-swap-agent = swap_agent:main
+blake-swap-engine = swap_v2:main

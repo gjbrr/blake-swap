@@ -388,8 +388,10 @@ def test_accept_match_performs_the_whole_reverse_step():
     #    durable binding the import wrote and the command reports the
     #    duplicate instead of failing: a crash retry of a command that
     #    already succeeded is not an error. (This used to refuse with
-    #    "No pending valid match begins with ..." — NEW-15 in the
-    #    correctness review, fixed by reading the durable binding first.)
+    #    "No pending valid match begins with ...", because it looked for
+    #    a pending match in the published list and this import had
+    #    already moved the match out of it. Reading the durable binding
+    #    the import wrote is what makes the retry answerable.)
     repeat = run("alice", "accept-match", match_id)
 
     repeat_text = repeat.stdout + repeat.stderr

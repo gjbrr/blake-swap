@@ -8,9 +8,11 @@ version = "0.2.0"
 description = "BTC <-> BLAKE atomic swap reference implementation"
 readme = "README.md"
 license = { file = "LICENSE" }
-# coincurve 21.0.0 cannot build on Python 3.14 (its hatch build fails on
-# cffi's licence metadata), so the supported range is stated rather than
-# implied. See blake-swap-correctness-review.md, NEW-5.
+# coincurve 21.0.0 cannot build on Python 3.14: its hatch build reads
+# cffi's licence metadata, which that release no longer exposes, so the
+# dependency fails before any code of ours runs. The supported range is
+# therefore stated here rather than implied by whatever interpreter
+# happens to build it.
 requires-python = ">=3.12,<3.14"
 dependencies = [
     "coincurve==21.0.0",

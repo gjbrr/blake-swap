@@ -21,6 +21,7 @@ import (
 	"strings"
 
 	"github.com/gjbrr/blake-swap/pkg/amount"
+	"github.com/gjbrr/blake-swap/pkg/decimal"
 )
 
 // Direction is which asset the maker is giving.
@@ -245,6 +246,14 @@ func ParseOffer(message map[string]any) (Offer, error) {
 	blake, err := amount.ParseBlake(blakeText)
 
 	if err != nil {
+		//
+		// A zero or negative amount is a *value* problem and has its own message,
+		// which is what the reference reports; anything else is a shape problem.
+		//
+		if value, decimalErr := decimal.Parse(blakeText); decimalErr == nil && value.Sign() <= 0 {
+			return Offer{}, fmt.Errorf("market offer BLAKE amount must be positive")
+		}
+
 		return Offer{}, fmt.Errorf("market offer contains invalid economic fields")
 	}
 

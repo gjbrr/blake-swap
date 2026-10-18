@@ -376,9 +376,10 @@ MODULES: list[Module] = [
         [], ["AgentPolicy"],
     ),
     Module(
-        "src/swap_v2.py (market flow)", "pkg/marketflow", "pending",
-        "offer, take, match, cancel, accept, import as a flow",
-        [], ["command_publish_market_offer", "command_accept_market_match"],
+        "src/swap_v2.py (market flow)", "pkg/marketflow", "partial",
+        "market events: the v2 offer is built, parsed and exchanged with the reference; take, match, cancel and state derivation remain",
+        ["BuildOffer", "ParseOffer", "ListedOffer", "MarketTag"],
+        ["build_market_offer_v2_event", "nostr_parse_market_offer_event", "command_publish_market_offer"],
     ),
     Module(
         "src/swap_v2.py (CLI)", "cmd/blake-swap-cli", "partial",

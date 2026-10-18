@@ -155,7 +155,10 @@ func ensureCapital(t *testing.T, r *rig) {
 		return
 	}
 
-	cliOutput(t, r.blakeCLI, r.blakeDatadir, "-rpcwallet=rig", "sendall", aliceAddress)
+	// sendall takes a JSON recipient list, the same shape the Python suites pass.
+	recipients := `["` + aliceAddress + `"]`
+
+	cliOutput(t, r.blakeCLI, r.blakeDatadir, "-rpcwallet=rig", "sendall", recipients)
 	cliOutput(t, r.blakeCLI, r.blakeDatadir, "generatetoaddress", "1", aliceAddress)
 }
 

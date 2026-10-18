@@ -33,7 +33,7 @@ Statuses: **ported** (behaviour and tests), **partial** (in progress), **pending
 | `src/swap_v2.py (coordination)` | `pkg/coord` | ported | one Transport interface: the local spool, or Nostr; validation and sender pinning on both |
 | `src/swap_v2.py (relays)` | `pkg/nostr` | ported | relay sessions over a platform connection, publish report, REQ/EOSE, event cache, the encryption policy |
 | `src/swap_v2.py (durable state)` | `pkg/store` | ported | workflow store: atomic swap records, the message spool, the archive |
-| `src/swap_v2.py (commands)` | `pkg/swap` | pending | the 58 commands as a Go API, one function per command |
+| `src/swap_v2.py (commands)` | `pkg/swap` | partial | the 58 commands as a Go API: inspection and state advance are in, funding and settlement commands remain |
 | `src/swap_agent.py` | `pkg/agent` | pending | the autonomous driver's step policy and budget |
 | `src/swap_v2.py (market flow)` | `pkg/marketflow` | pending | offer, take, match, cancel, accept, import as a flow |
 | `src/swap_v2.py (CLI)` | `pkg/cli + cmd/blake-swap-cli` | pending | the drop-in CLI: the same commands, arguments and output |
@@ -67,7 +67,7 @@ Statuses: **ported** (behaviour and tests), **partial** (in progress), **pending
 | `file_send_message`, `send_message`, `receive_message`, `validate_transport_message` | `FileTransport`, `NostrTransport`, `Validate`, `Transport` | `pkg/coord` |
 | `nostr_send_message`, `nostr_receive_message`, `nostr_publish_event`, `decode_coordination_content` | `Client`, `BuildCoordinationEvent`, `DecodeContent`, `Cache` | `pkg/nostr` |
 | `atomic_write_json`, `load_local_swap`, `local_swap_paths`, `file_send_message`, `file_receive_message` | `File`, `Memory`, `SupersededPlaceholders`, `ArchiveSuperseded` | `pkg/store` |
-| `command_new`, `command_show`, `command_advance` | — | `pkg/swap` |
+| `command_status`, `command_show`, `command_advance`, `command_list` | `Engine`, `Status`, `Show`, `List`, `Advance` | `pkg/swap` |
 | `AgentPolicy` | — | `pkg/agent` |
 | `command_publish_market_offer`, `command_accept_market_match` | — | `pkg/marketflow` |
 | `build_parser`, `main` | — | `pkg/cli` |

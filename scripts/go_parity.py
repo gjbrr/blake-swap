@@ -354,9 +354,10 @@ MODULES: list[Module] = [
         ["atomic_write_json", "load_local_swap", "local_swap_paths", "file_send_message", "file_receive_message"],
     ),
     Module(
-        "src/swap_v2.py (commands)", "pkg/swap", "pending",
-        "the 58 commands as a Go API, one function per command",
-        [], ["command_new", "command_show", "command_advance"],
+        "src/swap_v2.py (commands)", "pkg/swap", "partial",
+        "the 58 commands as a Go API: inspection and state advance are in, funding and settlement commands remain",
+        ["Engine", "Status", "Show", "List", "Advance"],
+        ["command_status", "command_show", "command_advance", "command_list"],
     ),
     Module(
         "src/swap_agent.py", "pkg/agent", "pending",

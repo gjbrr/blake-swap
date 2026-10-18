@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/gjbrr/blake-swap/pkg/chain"
+	"github.com/gjbrr/blake-swap/pkg/decimal"
 	"github.com/gjbrr/blake-swap/pkg/fund"
 	"github.com/gjbrr/blake-swap/pkg/model"
 	"github.com/gjbrr/blake-swap/pkg/observe"
@@ -61,8 +62,24 @@ type Engine struct {
 	BlakeWatchWallet, BTCWatchWallet string
 	// TestMode enables the commands that exist to drive tests, such as Advance.
 	TestMode bool
+	// Funding is the fee and rig policy funding commands use.
+	Funding FundingSettings
 	// Now is the clock. Zero means time.Now.
 	Now func() time.Time
+}
+
+// FundingSettings is how a funding command prices and confirms its transaction.
+type FundingSettings struct {
+	// FeeRate is an explicit feerate in sat/vB. It outranks the estimator.
+	FeeRate *decimal.Dec
+	// FeeTargetBlocks is the estimator's confirmation target.
+	FeeTargetBlocks int64
+	// FeeMultiplier scales the estimator's answer.
+	FeeMultiplier *decimal.Dec
+	// MinFeeRate is the wallet-construction floor (Bitcoin Core needs 1 sat/vB).
+	MinFeeRate *decimal.Dec
+	// AutoMine mines blocks after broadcasting. It exists for the regtest rig.
+	AutoMine int64
 }
 
 // Identity is the local Nostr identity the engine signs with.

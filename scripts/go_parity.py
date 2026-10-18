@@ -399,6 +399,12 @@ MODULES: list[Module] = [
         [],
     ),
     Module(
+        "(new)", "pkg/proxy", "ported",
+        "the node RPC proxy: credentials stay server-side, the method allowlist and a per-address rate limit are the boundary",
+        ["Proxy", "Config", "Endpoint", "DefaultAllowlist"],
+        ["run_chain_cli", "chain_dispatch"],
+    ),
+    Module(
         "(new)", "pkg/worker", "partial",
         "the browser worker's domains: the event loop, the encrypted-state domain, and the command dispatcher the page drives",
         ["NewVaultDomain", "Domain", "Chans"],

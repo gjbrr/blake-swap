@@ -29,7 +29,7 @@ NATIVE_PKGS := ./pkg/... ./cmd/server
 
 # Packages whose tests also run under TinyGo wasm. They are the ones the
 # browser client will link, so a host-only pass would not be enough.
-WASM_TEST_PKGS := ./pkg/decimal ./pkg/amount ./pkg/fees ./pkg/timeout ./pkg/state ./pkg/model ./pkg/wire ./pkg/reconcile ./pkg/htlc ./pkg/psbt ./pkg/market
+WASM_TEST_PKGS := ./pkg/decimal ./pkg/amount ./pkg/fees ./pkg/timeout ./pkg/state ./pkg/model ./pkg/wire ./pkg/reconcile ./pkg/htlc ./pkg/psbt ./pkg/market ./pkg/keys ./pkg/nip44
 
 .PHONY: all wasm server serve verify test wasmtest fmt vet clean
 

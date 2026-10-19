@@ -153,7 +153,7 @@ The Go CLI dispatches 58 of these 58. Implemented means the command exists with 
 
 ## Test suites (60)
 
-Every Python suite and its disposition: 58 ported, 0 partial, 2 pending, 0 waived.
+Every Python suite and its disposition: 60 ported, 0 partial, 0 pending, 0 waived.
 
 A suite is **ported** only when a Go test names it with a `// Parity:` marker and that test exists in the tree; a similar file name is not evidence. **Waived** needs a specific reason, and the check refuses a placeholder.
 
@@ -198,8 +198,8 @@ A suite is **ported** only when a Go test names it with a `// Parity:` marker an
 | `swap_driver_surface_tests.py` | `cmd/blake-swap-cli` | ported | `cmd/blake-swap-cli:TestNextTakesTheOnlyOpenOffer` |
 | `swap_dynamic_fee_integration_tests.py` | `pkg/swap` | ported | `pkg/swap:TestSwapDynamicFeeIntegrationTradeMinimum` |
 | `swap_encrypted_coordination_tests.py` | `pkg/nostr` | ported | `pkg/nostr:TestParseMode` |
-| `swap_isolated_full_chain_swap_tests.py` | — | pending | — |
-| `swap_isolated_nostr_handshake_tests.py` | — | pending | — |
+| `swap_isolated_full_chain_swap_tests.py` | `pkg/swap` | ported | `pkg/swap:TestIsolatedNostrHandshakeSuite`<br>`pkg/swap:TestIsolatedFullChainSwapSuite` |
+| `swap_isolated_nostr_handshake_tests.py` | `pkg/swap` | ported | `pkg/swap:TestIsolatedNostrHandshakeSuite` |
 | `swap_market_flow_tests.py` | `cmd/blake-swap-cli` | ported | `cmd/blake-swap-cli:TestSwapMarketFlow` |
 | `swap_market_takes_json_tests.py` | `cmd/blake-swap-cli` | ported | `cmd/blake-swap-cli:TestCacheDirectoryMatchesTheReferenceStateTree` |
 | `swap_model_settlement_identity_tests.py` | `pkg/model` | ported | `pkg/model:TestSwapModelSettlementIdentityAcceptsALegacyRecord` |

@@ -961,14 +961,14 @@
     {
       "id": "C37",
       "go_tests": [
-        "pkg/swap:TestSettlementCandidateIsDurableBeforeBroadcast"
+        "internal/rigsuites:TestSettlementCandidateIsDurableBeforeBroadcast"
       ],
       "reference_only": ""
     },
     {
       "id": "C38",
       "go_tests": [
-        "pkg/swap:TestSettlementCandidateIsDurableBeforeBroadcast",
+        "internal/rigsuites:TestSettlementCandidateIsDurableBeforeBroadcast",
         "pkg/fund:TestFundRecoversInsteadOfPayingTwice"
       ],
       "reference_only": ""
@@ -976,7 +976,7 @@
     {
       "id": "C39",
       "go_tests": [
-        "pkg/swap:TestSettlementCandidateIsDurableBeforeBroadcast"
+        "internal/rigsuites:TestSettlementCandidateIsDurableBeforeBroadcast"
       ],
       "reference_only": ""
     },

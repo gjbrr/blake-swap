@@ -16,12 +16,16 @@ import (
 
 // SettlementResult is what a settlement command did.
 type SettlementResult struct {
-	Chain       chain.Chain
-	Branch      htlc.Branch
-	TxID        string
-	BlockHash   string
-	Hex         string
-	Pending     bool
+	Chain     chain.Chain
+	Branch    htlc.Branch
+	TxID      string
+	BlockHash string
+	Hex       string
+	Pending   bool
+	// Recovered means this call adopted a settlement the record already named
+	// instead of signing a new one. A recovered settlement has no plan to report
+	// and no fee this call measured, so it is rendered differently.
+	Recovered   bool
 	Rebroadcast bool
 	State       state.State
 	FeeSats     int64

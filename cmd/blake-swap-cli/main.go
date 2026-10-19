@@ -26,6 +26,7 @@ import (
 	"github.com/gjbrr/blake-swap/pkg/chain"
 	"github.com/gjbrr/blake-swap/pkg/coord"
 	"github.com/gjbrr/blake-swap/pkg/fund"
+	"github.com/gjbrr/blake-swap/pkg/htlc"
 	"github.com/gjbrr/blake-swap/pkg/model"
 	"github.com/gjbrr/blake-swap/pkg/nodeconfig"
 	"github.com/gjbrr/blake-swap/pkg/nostr"
@@ -2636,6 +2637,11 @@ func buildEngine() (*swap.Engine, func(), error) {
 
 	engine.Funding.AutoMine = autoMine()
 	engine.Now = time.Now
+	engine.BeforeSettlement = func(
+		ctx context.Context, record *model.Swap, ch chain.Chain, branch htlc.Branch,
+	) error {
+		return reportBeforeSettlement(ctx, engine, record, ch, branch)
+	}
 
 	//
 	// The coordination transport is chosen by BLAKE_SWAP_TRANSPORT: the local spool,

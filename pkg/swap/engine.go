@@ -22,6 +22,7 @@ import (
 	"github.com/gjbrr/blake-swap/pkg/coord"
 	"github.com/gjbrr/blake-swap/pkg/decimal"
 	"github.com/gjbrr/blake-swap/pkg/fund"
+	"github.com/gjbrr/blake-swap/pkg/htlc"
 	"github.com/gjbrr/blake-swap/pkg/model"
 	"github.com/gjbrr/blake-swap/pkg/nostr"
 	"github.com/gjbrr/blake-swap/pkg/observe"
@@ -74,6 +75,10 @@ type Engine struct {
 	Funding FundingSettings
 	// Settlement is the fee policy settlement commands use.
 	Settlement SettlementSettings
+	// BeforeSettlement, when set, is called once the record's own settlement has
+	// been ruled out and just before a new one is built. The CLI uses it to print
+	// the funding verification at the point the reference prints it.
+	BeforeSettlement func(ctx context.Context, swap *model.Swap, ch chain.Chain, branch htlc.Branch) error
 	// Now is the clock. Zero means time.Now.
 	Now func() time.Time
 }

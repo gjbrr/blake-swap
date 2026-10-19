@@ -11,6 +11,7 @@ import (
 	"github.com/gjbrr/blake-swap/pkg/chain"
 	"github.com/gjbrr/blake-swap/pkg/contract"
 	"github.com/gjbrr/blake-swap/pkg/fund"
+	"github.com/gjbrr/blake-swap/pkg/htlc"
 	"github.com/gjbrr/blake-swap/pkg/model"
 	"github.com/gjbrr/blake-swap/pkg/state"
 	"github.com/gjbrr/blake-swap/pkg/swap"
@@ -483,12 +484,66 @@ func renderClaimBanner(label string) string {
 	return "Bob verifies BLAKE HTLC is still available...\n\n"
 }
 
+// reportBeforeSettlement prints the funding verification at the point the reference
+// prints it: once the record's own settlement has been ruled out, before a new one
+// is built.
+//
+// It is a report and not a gate. A settlement the record already names is printed by
+// the command as a recovery, and asking the node to prove the HTLC unspent on that
+// path would report the very spend the record names as an error.
+func reportBeforeSettlement(
+	ctx context.Context, engine *swap.Engine, record *model.Swap, ch chain.Chain, branch htlc.Branch,
+) error {
+	label := "BLAKE"
+
+	if ch == chain.BTC {
+		label = "BTC"
+	}
+
+	if branch == htlc.Claim {
+		fmt.Print(renderClaimBanner(label))
+	}
+
+	check := engine.CheckBlakeFunding
+
+	if ch == chain.BTC {
+		check = engine.CheckBTCFunding
+	}
+
+	verified, err := check(ctx, record.SwapID)
+
+	if err != nil {
+		//
+		// The verification cannot be printed, and the engine's own proof is about to
+		// fail with the reason. Reporting it here as well would print the same refusal
+		// twice.
+		//
+		return nil
+	}
+
+	if ch == chain.BTC {
+		fmt.Print(renderVerifyBTC(verified, record))
+	} else {
+		fmt.Print(renderVerifyBlake(verified))
+	}
+
+	//
+	// A claim closes with the spend it priced, and the reference separates the
+	// verification from that block with a blank line. A refund prints its own.
+	//
+	if branch == htlc.Claim {
+		fmt.Print("\n")
+	}
+
+	return nil
+}
+
 // runClaim is the claim command: verify the counterparty's HTLC, price the spend,
 // then report it.
 //
-// The verification happens here rather than only inside the engine because the
-// reference prints what it verified, and an operator reading "BTC CLAIMED" needs to
-// know which outpoint was checked before the claim was signed.
+// The verification is printed by the engine's report hook, which runs only when the
+// claim is fresh: a claim the record already names is reported as a recovery, and
+// the reference prints no verification for it.
 func runClaim(
 	ctx context.Context,
 	engine *swap.Engine,
@@ -501,11 +556,9 @@ func runClaim(
 	}
 
 	label := "BTC"
-	check := engine.CheckBTCFunding
 
 	if ch == chain.Blake {
 		label = "BLAKE"
-		check = engine.CheckBlakeFunding
 	}
 
 	record, err := engine.Show(ctx, args[0])
@@ -514,28 +567,10 @@ func runClaim(
 		return err
 	}
 
-	fmt.Print(renderClaimBanner(label))
-
 	input := record.BTCSats
 
 	if ch == chain.Blake {
 		input = record.BlakeAmountBaseUnits
-	}
-
-	//
-	// The verification is printed, not required: a second claim after a broadcast
-	// finds the HTLC spent by the transaction already recorded, and the engine's own
-	// branch proof is what decides whether that is this claim. Gating here would
-	// refuse a participant the settlement it made itself.
-	//
-	if verified, err := check(ctx, args[0]); err == nil {
-		if ch == chain.Blake {
-			fmt.Print(renderVerifyBlake(verified))
-		} else {
-			fmt.Print(renderVerifyBTC(verified, record))
-		}
-
-		fmt.Print("\n")
 	}
 
 	result, err := claim(ctx, args[0])
@@ -544,8 +579,21 @@ func runClaim(
 		return err
 	}
 
+	if result.Recovered {
+		if result.Pending {
+			fmt.Print("\n")
+			fmt.Print(renderSettlementPending(label, htlc.Claim, result))
+
+			return nil
+		}
+
+		fmt.Print(renderSettlementRecovered(label, htlc.Claim, result))
+
+		return nil
+	}
+
 	if result.Pending {
-		fmt.Print(renderPending(label, result))
+		fmt.Print(renderSettlementBroadcast(label, htlc.Claim, result))
 
 		return nil
 	}
@@ -556,27 +604,64 @@ func runClaim(
 	return nil
 }
 
-// renderPending is the reference's block for a claim still in the mempool.
-func renderPending(label string, result *swap.SettlementResult) string {
-	header := label + " CLAIM PENDING"
+// settlementWords is CLAIM or REFUND, as the reference's headings spell it.
+func settlementWords(branch htlc.Branch) string {
+	if branch == htlc.Claim {
+		return "CLAIM"
+	}
 
-	return "\n" + header + "\n" + strings.Repeat("=", len(header)) + "\n" +
-		"txid:  " + result.TxID + "\n" +
-		"block:  pending\n" +
-		"state: " + string(result.State) + "\n"
+	return "REFUND"
 }
 
-// renderRefundBroadcast is the reference's block for a refund it has just sent and
-// that has not confirmed yet.
-func renderRefundBroadcast(label string, result *swap.SettlementResult) string {
-	header := label + " REFUND BROADCAST"
+// renderSettlementBroadcast is the reference's block for a settlement it has just
+// sent and that has not confirmed yet.
+//
+// The two headings spend their padding differently: a pending broadcast prints
+// "txid:" with three spaces because the reference passes the label and the value as
+// two arguments to print, and "state:" with two for the same reason. Those spaces are
+// the comparison, so they are spelled out rather than aligned.
+func renderSettlementBroadcast(label string, branch htlc.Branch, result *swap.SettlementResult) string {
+	words := settlementWords(branch)
+	header := label + " " + words + " BROADCAST"
 
-	return "\n" + header + "\n" + strings.Repeat("=", len(header)) + "\n" +
+	return header + "\n" + strings.Repeat("=", len(header)) + "\n" +
 		"txid:   " + result.TxID + "\n" +
 		"block:  pending\n" +
-		"state: " + string(result.State) + "\n" +
+		"state:  " + string(result.State) + "\n" +
 		"\n" +
-		labelTitle(label) + " refund is awaiting active-chain confirmation.\n"
+		labelTitle(label) + " " + strings.ToLower(words) +
+		" is awaiting active-chain confirmation.\n"
+}
+
+// renderSettlementPending is the reference's block for a settlement the record
+// already named and that is still in the mempool.
+func renderSettlementPending(label string, branch htlc.Branch, result *swap.SettlementResult) string {
+	header := label + " " + settlementWords(branch) + " PENDING"
+
+	return header + "\n" + strings.Repeat("=", len(header)) + "\n" +
+		"txid:   " + result.TxID + "\n" +
+		"block:  pending\n" +
+		"state:  " + string(result.State) + "\n"
+}
+
+// renderSettlementRecovered is the reference's block for a settlement it found
+// already confirmed because the record named it.
+//
+// The BLAKE claim underline is one character shorter than its heading in the
+// reference. It is reproduced rather than corrected: this output is compared byte for
+// byte, so a correction here would be a difference.
+func renderSettlementRecovered(label string, branch htlc.Branch, result *swap.SettlementResult) string {
+	header := label + " " + settlementWords(branch) + " RECOVERED FROM CHAIN"
+	underline := len(header)
+
+	if branch == htlc.Claim && label == "BLAKE" {
+		underline--
+	}
+
+	return header + "\n" + strings.Repeat("=", underline) + "\n" +
+		"txid:   " + result.TxID + "\n" +
+		"block:  " + result.BlockHash + "\n" +
+		"state:  " + string(result.State) + "\n"
 }
 
 // renderRefundPublished is the reference's publish confirmation for a refund.
@@ -676,11 +761,9 @@ func runRefund(
 	}
 
 	label := "BTC"
-	check := engine.CheckBTCFunding
 
 	if ch == chain.Blake {
 		label = "BLAKE"
-		check = engine.CheckBlakeFunding
 	}
 
 	record, err := engine.Show(ctx, args[0])
@@ -689,22 +772,28 @@ func runRefund(
 		return err
 	}
 
-	verified, err := check(ctx, args[0])
-
-	if err != nil {
-		return err
-	}
-
-	if ch == chain.Blake {
-		fmt.Print(renderVerifyBlake(verified))
-	} else {
-		fmt.Print(renderVerifyBTC(verified, record))
-	}
-
 	result, err := refund(ctx, args[0])
 
 	if err != nil {
 		return err
+	}
+
+	//
+	// A refund the record already named has nothing to sign and nothing to save.
+	// The reference reports it and stops, so no path is written and no plan is
+	// printed: the fee table belongs to the transaction this call did not build.
+	//
+	if result.Recovered {
+		if result.Pending {
+			fmt.Print("\n")
+			fmt.Print(renderSettlementPending(label, htlc.Refund, result))
+
+			return nil
+		}
+
+		fmt.Print(renderSettlementRecovered(label, htlc.Refund, result))
+
+		return nil
 	}
 
 	//
@@ -726,12 +815,6 @@ func runRefund(
 	fmt.Println(signedPath)
 	fmt.Print("\n")
 
-	if result.Pending {
-		fmt.Print(renderRefundBroadcast(label, result))
-
-		return nil
-	}
-
 	input := record.BTCSats
 	timeout := record.BTCTimeout
 
@@ -740,7 +823,19 @@ func runRefund(
 		timeout = record.BlakeTimeout
 	}
 
+	//
+	// The plan is reported before the transaction is sent, so a refund that is still
+	// in the mempool has a fee table too: the reference prints it either way, and the
+	// fee is the part an operator needs before the confirmation.
+	//
 	fmt.Print(renderRefundReady(label, result, input, timeout, timeout))
+
+	if result.Pending {
+		fmt.Print(renderSettlementBroadcast(label, htlc.Refund, result))
+
+		return nil
+	}
+
 	fmt.Print(renderRefunded(label, result))
 
 	return nil

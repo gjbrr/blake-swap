@@ -76,7 +76,16 @@ func newWalk(t *testing.T, r *rigtest.Rig, impl string) *walk {
 func (w *walk) do(name string, side *rigtest.Side, args ...string) string {
 	w.t.Helper()
 
-	output, exit, err := w.r.Exec(w.t, side, w.spool, nil, args...)
+	return w.doEnv(name, side, nil, args...)
+}
+
+// doEnv runs one step with extra environment, which is how a step asks for a
+// settlement that is broadcast but not mined: the confirmation has to be arranged by
+// the script, not by the engine.
+func (w *walk) doEnv(name string, side *rigtest.Side, env []string, args ...string) string {
+	w.t.Helper()
+
+	output, exit, err := w.r.Exec(w.t, side, w.spool, env, args...)
 
 	if err != nil {
 		w.t.Fatalf("%s %v: %v", w.impl, args, err)
@@ -241,10 +250,17 @@ func TestCLIParityRefundWalk(t *testing.T) {
 		w.do("receive-btc-refunded", w.alice, "receive-btc-refunded", id)
 
 		// BLAKE's, then Alice refunds.
+		//
+		// Auto-mine is held off for this step so the refund is reported as broadcast
+		// rather than confirmed. That is the shape a second invocation has to adopt:
+		// after the block lands, the record names a confirmed refund, and asking again
+		// must recognise it instead of signing a second transaction.
 		timeout = r.FieldInt(t, w.alice, w.spool, id, "blake_timeout")
 		r.MineTo(t, "blake", "alice", timeout)
 
-		w.do("refund-blake", w.alice, "refund-blake", id)
+		w.doEnv("refund-blake", w.alice, []string{"BLAKE_SWAP_AUTO_MINE=0"}, "refund-blake", id)
+		r.Mine(t, "blake", "alice", 1)
+		w.do("refund-blake-adopt", w.alice, "refund-blake", id)
 		w.do("status", w.alice, "status")
 
 		for name, failure := range w.failures {

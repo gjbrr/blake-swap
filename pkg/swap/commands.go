@@ -50,12 +50,16 @@ func (e *Engine) ClaimBTC(ctx context.Context, swapID string) (*SettlementResult
 		})
 	}
 
-	if err := contract.VerifyFunding(ctx, e.BTC, swap, chain.BTC); err != nil {
+	if swap.SecretHex == nil || *swap.SecretHex == "" {
+		return nil, fmt.Errorf("this swap has no secret to claim with")
+	}
+
+	if err := e.beforeSettlement(ctx, swap, chain.BTC, htlc.Claim); err != nil {
 		return nil, err
 	}
 
-	if swap.SecretHex == nil || *swap.SecretHex == "" {
-		return nil, fmt.Errorf("this swap has no secret to claim with")
+	if err := contract.VerifyFunding(ctx, e.BTC, swap, chain.BTC); err != nil {
+		return nil, err
 	}
 
 	derived, err := contract.Derive(ctx, e.BTC, swap, chain.BTC)
@@ -117,15 +121,19 @@ func (e *Engine) ClaimBlake(ctx context.Context, swapID string) (*SettlementResu
 		})
 	}
 
-	if err := contract.VerifyFunding(ctx, e.Blake, swap, chain.Blake); err != nil {
-		return nil, err
-	}
-
 	if swap.RevealedSecretHex == nil || *swap.RevealedSecretHex == "" {
 		return nil, fmt.Errorf(
 			"this swap has no revealed secret; claim-blake requires the preimage " +
 				"from Bitcoin",
 		)
+	}
+
+	if err := e.beforeSettlement(ctx, swap, chain.Blake, htlc.Claim); err != nil {
+		return nil, err
+	}
+
+	if err := contract.VerifyFunding(ctx, e.Blake, swap, chain.Blake); err != nil {
+		return nil, err
 	}
 
 	derived, err := contract.Derive(ctx, e.Blake, swap, chain.Blake)
@@ -177,6 +185,10 @@ func (e *Engine) RefundBTC(ctx context.Context, swapID string) (*SettlementResul
 		return e.finishRecovered(ctx, swap, chain.BTC, htlc.Refund, recovered, func(swap *model.Swap) error {
 			return swap.Transition(state.BTCRefunded)
 		})
+	}
+
+	if err := e.beforeSettlement(ctx, swap, chain.BTC, htlc.Refund); err != nil {
+		return nil, err
 	}
 
 	if err := contract.VerifyFunding(ctx, e.BTC, swap, chain.BTC); err != nil {
@@ -243,6 +255,10 @@ func (e *Engine) RefundBlake(ctx context.Context, swapID string) (*SettlementRes
 		})
 	}
 
+	if err := e.beforeSettlement(ctx, swap, chain.Blake, htlc.Refund); err != nil {
+		return nil, err
+	}
+
 	if err := contract.VerifyFunding(ctx, e.Blake, swap, chain.Blake); err != nil {
 		return nil, err
 	}
@@ -295,6 +311,22 @@ func (e *Engine) Complete(ctx context.Context, swapID string) error {
 	return e.save(ctx, swap)
 }
 
+// beforeSettlement runs the caller's pre-settlement report, when it installed one.
+//
+// It is called once recovery has been ruled out and before the funding proof, which
+// is where the reference prints its verification: a settlement the record already
+// names has nothing to verify, because verifying it would report the HTLC as spent
+// — by the very transaction the record names.
+func (e *Engine) beforeSettlement(
+	ctx context.Context, swap *model.Swap, ch chain.Chain, branch htlc.Branch,
+) error {
+	if e.BeforeSettlement == nil {
+		return nil
+	}
+
+	return e.BeforeSettlement(ctx, swap, ch, branch)
+}
+
 // finishRecovered records a settlement the chain already holds.
 func (e *Engine) finishRecovered(
 	ctx context.Context,
@@ -308,6 +340,7 @@ func (e *Engine) finishRecovered(
 		Chain:       ch,
 		Branch:      branch,
 		Pending:     recovered.Pending,
+		Recovered:   true,
 		Rebroadcast: recovered.Rebroadcast,
 		State:       swap.State,
 	}

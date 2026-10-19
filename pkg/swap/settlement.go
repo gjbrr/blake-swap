@@ -388,13 +388,24 @@ func (e *Engine) walletForSettlement(ch chain.Chain) string {
 	return e.BTCWallet
 }
 
-// settleAndRecord builds, broadcasts, records and confirms one settlement.
+// settleAndRecord builds, records, broadcasts and confirms one settlement.
 //
-// The record is updated in two steps on purpose. The txid and the signed hex are
-// saved immediately after the broadcast, because that is the only trace of a
-// transaction that may already be mining; the protocol state only advances once
-// the transaction is confirmed. That split is what lets a later invocation
-// recognise its own work instead of building a second transaction.
+// The order is the durability contract, not an implementation detail:
+//
+//  1. build and finalize the transaction;
+//  2. derive its identity and prove it spends the HTLC the way this branch must;
+//  3. persist the signed candidate — txid and hex — *before* it exists on any
+//     node;
+//  4. broadcast, and require the node to return the txid that was persisted;
+//  5. observe and confirm it;
+//  6. advance the protocol state and persist that.
+//
+// Step 3 used to come after step 4. That is the same order right up until the
+// process dies in between: after a broadcast the transaction is already mining,
+// so a record written afterwards is a record that may never be written. A
+// participant that dies with money in flight must come back able to recognise its
+// own transaction — that is what the stored hex is for — and it cannot recognise
+// what it never recorded.
 func (e *Engine) settleAndRecord(
 	ctx context.Context,
 	swap *model.Swap,
@@ -419,22 +430,57 @@ func (e *Engine) settleAndRecord(
 		return nil, err
 	}
 
-	txid, fee, err := settle.Broadcast(ctx, node, ch, plan, inputSats(swap, ch))
+	// The transaction is final, so its identity and its shape can both be proved
+	// before it is announced to anyone. Doing it here means a mis-signed
+	// settlement is refused instead of persisted and broadcast.
+	decoded, err := node.DecodeRaw(ctx, plan.Hex)
 
 	if err != nil {
 		return nil, err
 	}
 
-	setSettlement(swap, ch, branch, txid, "", plan.Hex)
+	if decoded.TxID == "" {
+		return nil, fmt.Errorf(
+			"signed %s %s has no decodable txid", chainLabel(ch), branch,
+		)
+	}
+
+	if err := e.verifySettlementShape(swap, ch, branch, decoded); err != nil {
+		return nil, err
+	}
+
+	// Measured from the finalized transaction rather than assumed from the
+	// request, and measured *before* the broadcast: a failure after money moved
+	// would otherwise lose the fee the operator needs to see.
+	fee, err := settle.SpendFee(ctx, node, plan.Hex, inputSats(swap, ch))
+
+	if err != nil {
+		return nil, err
+	}
+
+	setSettlement(swap, ch, branch, decoded.TxID, "", plan.Hex)
 
 	if err := e.save(ctx, swap); err != nil {
 		return nil, err
 	}
 
+	broadcast, err := node.SendRaw(ctx, plan.Hex)
+
+	if err != nil {
+		return nil, fmt.Errorf("%s %s broadcast: %w", chainLabel(ch), branch, err)
+	}
+
+	if broadcast != decoded.TxID {
+		return nil, fmt.Errorf(
+			"SECURITY FAILURE: %s %s broadcast returned a different txid",
+			chainLabel(ch), branch,
+		)
+	}
+
 	result := &SettlementResult{
 		Chain:     ch,
 		Branch:    branch,
-		TxID:      txid,
+		TxID:      decoded.TxID,
 		Hex:       plan.Hex,
 		Pending:   true,
 		State:     swap.State,
@@ -458,7 +504,7 @@ func (e *Engine) settleAndRecord(
 
 	if recovered == nil {
 		return nil, fmt.Errorf(
-			"%s claim broadcast is neither pending nor confirmed", chainLabel(ch),
+			"%s %s broadcast is neither pending nor confirmed", chainLabel(ch), branch,
 		)
 	}
 
@@ -482,6 +528,39 @@ func (e *Engine) settleAndRecord(
 	result.State = swap.State
 
 	return result, nil
+}
+
+// verifySettlementShape requires a signed settlement to spend the HTLC the way
+// this branch is supposed to.
+//
+// The witness shape is what distinguishes a claim from a refund, and the two move
+// money in opposite directions. A signature that classified as the other branch
+// would be a transaction that does the opposite of what the record will say it
+// did, so it is refused before it is stored or broadcast rather than discovered
+// later.
+func (e *Engine) verifySettlementShape(
+	swap *model.Swap, ch chain.Chain, branch htlc.Branch, decoded *chain.Tx,
+) error {
+	fundingTxID, fundingVout, err := contract.Outpoint(swap, ch)
+
+	if err != nil {
+		return err
+	}
+
+	actual, err := classifyTx(decoded, fundingTxID, fundingVout, swap.SecretHash)
+
+	if err != nil {
+		return err
+	}
+
+	if actual != branch {
+		return fmt.Errorf(
+			"SECURITY FAILURE: signed %s %s classified as %s",
+			chainLabel(ch), branch, actual,
+		)
+	}
+
+	return nil
 }
 
 // inputSats is the HTLC's value in the chain's smallest unit.

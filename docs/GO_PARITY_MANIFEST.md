@@ -6,7 +6,7 @@ It records what replaces each part of the Python engine in Go, and what has not 
 
 Statuses: **ported** (behaviour and tests), **partial** (in progress), **pending** (not started).
 
-## Modules (27/32 ported)
+## Modules (27/33 ported)
 
 | Python | Go | Status | Contents |
 |---|---|---|---|
@@ -41,6 +41,7 @@ Statuses: **ported** (behaviour and tests), **partial** (in progress), **pending
 | `(new)` | `pkg/proxy` | ported | the node RPC proxy: credentials stay server-side, the method allowlist and a per-address rate limit are the boundary |
 | `(new)` | `pkg/worker` | partial | the browser worker's domains: the event loop, the encrypted-state domain, the read-only engine domain it drives through the app server's proxy, and the command dispatcher |
 | `(new)` | `pkg/client` | partial | the browser client's encrypted state: a store.Store whose records are sealed with a passphrase-derived key before they reach IndexedDB, with a pluggable entropy source |
+| `(new)` | `pkg/adapter` | partial | the portable participant interface `blake-swap-adapter-v1`: capabilities, role-pinned commands and the portable state projection, served one JSON request per process; the pair orchestration and seeded scenario scheduling remain the reference harness's |
 | `(new)` | `pkg/platform` | ported | the platform seams: clock, console, durable KV, a relay WebSocket and a JSON-RPC transport, each with a browser implementation (IndexedDB, WebSocket, fetch) and a host one (memory or files, TCP socket, HTTP POST) |
 
 ### Symbols
@@ -78,6 +79,7 @@ Statuses: **ported** (behaviour and tests), **partial** (in progress), **pending
 | `run_chain_cli`, `chain_dispatch` | `Proxy`, `Config`, `Endpoint`, `DefaultAllowlist` | `pkg/proxy` |
 | — | `NewVaultDomain`, `Domain`, `Chans` | `pkg/worker` |
 | `load_swap`, `save_swap`, `atomic_write_json` | `Encrypted`, `Create`, `Open`, `KV`, `Memory` | `pkg/client` |
+| `PARTICIPANT_ADAPTER_SURFACE`, `PythonParticipantAdapter`, `SwapImplementationPair` | `Capabilities`, `Handle`, `PortableState`, `Decode`, `Encode`, `Protocol`, `Operations`, `Roles`, `PortableFields` | `pkg/adapter` |
 | `chain_dispatch`, `nostr_publish_event_to_relay` | `KV`, `Clock`, `Console`, `HTTP`, `IndexedDB`, `WebSocket`, `Fetch`, `MemoryKV`, `DialWebSocket`, `NewTransport` | `pkg/platform` |
 
 ## CLI commands (58)
@@ -163,10 +165,10 @@ Every Python suite, and the Go package whose tests cover the same ground where o
 | `fail_closed_tests.py` | `pkg/htlc` | partial |
 | `fee_policy_tests.py` | — | pending |
 | `htlc_key_recovery_tests.py` | — | pending |
-| `implementation_adapter_tests.py` | — | pending |
+| `implementation_adapter_tests.py` | `pkg/adapter` | partial |
 | `installed_wheel_tests.py` | — | pending |
 | `market_state_tests.py` | — | pending |
-| `moxie_adapter_smoke_tests.py` | — | pending |
+| `moxie_adapter_smoke_tests.py` | `pkg/adapter` | partial |
 | `nip44_tests.py` | — | pending |
 | `node_config_tests.py` | — | pending |
 | `nostr_market_tests.py` | — | pending |

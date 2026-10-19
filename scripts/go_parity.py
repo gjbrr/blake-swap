@@ -37,7 +37,12 @@ MANIFEST = ROOT / "docs" / "GO_PARITY_MANIFEST.md"
 
 
 def python_defs(path: Path) -> set[str]:
-    """Top-level function and class names in one Python module."""
+    """Top-level function, class and constant names in one Python module.
+
+    Constants are included because a contract can be a name rather than a function: the
+    participant adapter's surface is a tuple, and a manifest that could not anchor on it
+    would have to describe the interface without pointing at it.
+    """
 
     names: set[str] = set()
 
@@ -45,6 +50,9 @@ def python_defs(path: Path) -> set[str]:
         match = re.match(
             r"^(?:async\s+)?(?:def|class)\s+([A-Za-z_][A-Za-z0-9_]*)", line,
         )
+
+        if not match:
+            match = re.match(r"^([A-Z][A-Z0-9_]*)\s*(?::[^=]+)?=", line)
 
         if match:
             names.add(match.group(1))
@@ -438,6 +446,13 @@ MODULES: list[Module] = [
         ["load_swap", "save_swap", "atomic_write_json"],
     ),
     Module(
+        "(new)", "pkg/adapter", "partial",
+        "the portable participant interface `blake-swap-adapter-v1`: capabilities, role-pinned commands and the portable state projection, served one JSON request per process; the pair orchestration and seeded scenario scheduling remain the reference harness's",
+        ["Capabilities", "Handle", "PortableState", "Decode", "Encode", "Protocol", "Operations", "Roles",
+         "PortableFields"],
+        ["PARTICIPANT_ADAPTER_SURFACE", "PythonParticipantAdapter", "SwapImplementationPair"],
+    ),
+    Module(
         "(new)", "pkg/platform", "ported",
         "the platform seams: clock, console, durable KV, a relay WebSocket and a JSON-RPC transport, each with a browser implementation (IndexedDB, WebSocket, fetch) and a host one (memory or files, TCP socket, HTTP POST)",
         ["KV", "Clock", "Console", "HTTP", "IndexedDB", "WebSocket", "Fetch", "MemoryKV", "DialWebSocket",
@@ -456,6 +471,17 @@ class Suite:
     status: str = "pending"
 
 
+# Suites whose Go replacement cannot be recognised by a matching file name.
+#
+# The name match below is the default because it cannot drift into optimism: a suite is
+# only claimed when a Go test file names it. These entries are the exceptions, where the
+# replacement is a package whose tests are named after the contract rather than the suite.
+SUITE_REPLACEMENTS: dict[str, tuple[str, str]] = {
+    "implementation_adapter_tests.py": ("pkg/adapter", "partial"),
+    "moxie_adapter_smoke_tests.py": ("pkg/adapter", "partial"),
+}
+
+
 def suite_rows() -> list[Suite]:
     """Every registered Python suite, with the Go tests that cover it."""
 
@@ -465,6 +491,12 @@ def suite_rows() -> list[Suite]:
     for path in sorted(TESTS.glob("*_tests.py")):
         name = path.name
         row = Suite(python=name)
+
+        if name in SUITE_REPLACEMENTS:
+            row.go, row.status = SUITE_REPLACEMENTS[name]
+            rows.append(row)
+
+            continue
 
         # A suite is only claimed as ported when a Go test file names it
         # explicitly, so the manifest cannot drift into optimism.
@@ -613,6 +645,16 @@ def check() -> int:
     python = {
         path.name: python_defs(path) for path in sorted(SRC.glob("*.py"))
     }
+
+    #
+    # The participant adapter lives beside its suites rather than in src/, because it is a
+    # test-facing boundary. It is still a Python module the manifest anchors on, so it is
+    # read here rather than being claimed without a source.
+    #
+    adapter_module = TESTS / "swap_impl_adapter.py"
+
+    if adapter_module.is_file():
+        python[adapter_module.name] = python_defs(adapter_module)
 
     for module in MODULES:
         package = module.go.split(" ")[0].removeprefix("pkg/")

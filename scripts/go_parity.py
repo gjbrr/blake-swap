@@ -710,9 +710,9 @@ def render() -> str:
 
     for module in MODULES:
         go = module.go
-        package = go.split(" ")[0].removeprefix("pkg/")
 
-        if module.status != "pending" and package not in packages:
+        # A command is not a package, so the check has to know both kinds of target.
+        if module.status != "pending" and not moduleExists(module.go):
             go += " (missing)"
 
         lines.append(f"| `{module.python}` | `{go}` | {module.status} | {module.note} |")

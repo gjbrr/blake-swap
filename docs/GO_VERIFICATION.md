@@ -49,6 +49,25 @@ than scraping text. Its steps, all passing:
 
 The market step is the browser's own `WebSocket`: no CLI, no proxy, no node.
 
+### The crypto path is the TinyGo one, and it is tested as such
+
+The secp256k1 surface comes from `git.smesh.lol/orly`, whose signer and BIP-340 code have
+`tinygo`/`wasm` build-tagged variants: a host build uses the amd64 assembly and a browser build
+uses the pure-Go field, group and Schnorr implementation. That switch is not cosmetic — an
+assembly-only dependency compiles on the host and fails, or silently misbehaves, in wasm — so
+the key package's own tests run under `tinygo test -target=wasm` and are part of the WASM test
+list:
+
+```bash
+tinygo test -target=wasm ./pkg/keys
+```
+
+They sign and verify the BIP-340 reference vectors (deterministic signing reproduces each
+vector, which is what cross-checks the pure-Go signer against the vectors rather than against
+itself), and they exercise the raw-x ECDH that NIP-44 needs. `pkg/event`, `pkg/nostr` and
+`pkg/nip44` run under the same target, so event ids, signatures and encrypted payloads are
+verified in the browser's actual runtime, not only on the host.
+
 ## 3. The CLI is byte-identical to the reference where it claims to be
 
 Run on a live swap, in the same state tree, one implementation after the other:

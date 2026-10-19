@@ -343,16 +343,12 @@ func renderOpenOffers(market proto.MarketView) {
 			child(elem("td").class("num").text(offer.BTCSats)).
 			child(elem("td").text(ageText(offer.CreatedAt)))
 
-		//
-		// Taking an offer is the taker's irreversible market act, and the accept path
-		// that turns a take into a swap is not implemented in this client yet. A button
-		// that cannot finish is worse than no button: it would move a negotiation into a
-		// state this client cannot resolve.
-		//
-		action := elem("td").
-			child(elem("button").attr("type", "button").attr("disabled", "disabled").
-				attr("title", "taking is not implemented in this client yet; the CLI can accept and match").
-				text("Take"))
+		// Taking is a coordination act, and the maker's accept path that turns a take into
+		// a swap is implemented here, so the button can finish what it starts.
+		action := elem("td").child(elem("button").
+			attr("type", "button").
+			onCmd(cmdMarketTake + offer.EventID).
+			text("Take"))
 
 		row = row.child(action)
 
@@ -373,12 +369,25 @@ func renderMine(market proto.MarketView) {
 	toggle(ElementMarketMineEmpty, false)
 
 	for _, offer := range market.Mine {
+		actions := elem("td")
+
+		if offer.State == "OPEN" {
+			actions = actions.child(elem("button").attr("type", "button").
+				onCmd(cmdMarketTakes + offer.EventID).text("Takes"))
+			actions = actions.child(elem("button").attr("type", "button").
+				onCmd(cmdMarketCancel + offer.EventID).text("Cancel"))
+		} else {
+			actions = actions.child(elem("button").attr("type", "button").
+				onCmd(cmdMarketTakes + offer.EventID).text("Takes"))
+		}
+
 		appendTo(ElementMarketMine, elem("tr").
 			child(elem("td").text(short(offer.EventID))).
 			child(elem("td").text(offer.State)).
 			child(elem("td").class("num").text(offer.BlakeAmount)).
 			child(elem("td").class("num").text(offer.BTCSats)).
-			child(elem("td").text(expiryText(offer.ExpiresAt))))
+			child(elem("td").text(expiryText(offer.ExpiresAt))).
+			child(actions))
 	}
 }
 
@@ -400,7 +409,9 @@ func renderTakes(market proto.MarketView) {
 			child(elem("td").text(short(take.Taker))).
 			child(elem("td").class("num").text(take.BlakeAmount)).
 			child(elem("td").class("num").text(take.BTCSats)).
-			child(elem("td").text(ageText(take.CreatedAt))))
+			child(elem("td").text(ageText(take.CreatedAt))).
+			child(elem("td").child(elem("button").attr("type", "button").
+				onCmd(cmdMarketAcceptTake+take.EventID).text("Accept take"))))
 	}
 }
 
@@ -419,11 +430,19 @@ func renderMatches(market proto.MarketView) {
 	for _, match := range market.Matches {
 		trace := short(match.OfferID) + " -> " + short(match.TakeID)
 
+		action := elem("td")
+
+		if !match.Imported {
+			action = action.child(elem("button").attr("type", "button").
+				onCmd(cmdMarketAcceptMatch + match.EventID).text("Import match"))
+		}
+
 		appendTo(ElementMarketMatches, elem("tr").
 			child(elem("td").text(short(match.EventID))).
 			child(elem("td").text(match.SwapID)).
 			child(elem("td").text(trace)).
-			child(elem("td").text(ageText(match.CreatedAt))))
+			child(elem("td").text(ageText(match.CreatedAt))).
+			child(action))
 	}
 }
 
@@ -1111,4 +1130,109 @@ func stopDashboardTimer(state *app) {
 	state.ticker.Stop()
 	state.ticker = nil
 	state.tick = nil
+}
+
+// ------------------------------------------------------------------ market acts ---
+
+// beginMarketTake opens the confirmation for taking an offer.
+func beginMarketTake(state *app, offerID string) {
+	offer := findOffer(state.market.Open, offerID)
+
+	spec := actionSpec{
+		command: "market.take",
+		label:   "Take offer",
+		what: "Publish a signed take for this offer. It is a public statement of interest" +
+			" and moves no funds; the maker then accepts or ignores it.",
+	}
+
+	facts := [][2]string{
+		{"offer", offerID},
+		{"maker", orDash(offer.Maker)},
+		{"BLAKE", orDash(offer.BlakeAmount)},
+		{"BTC sats", orDash(offer.BTCSats)},
+	}
+
+	request := proto.Request{
+		Command: "market.take",
+		Args:    map[string]string{"offer_id": offerID},
+	}
+
+	openConfirmation(state, spec, request, "", facts)
+}
+
+// beginMarketCancel opens the confirmation for withdrawing one of this participant's offers.
+func beginMarketCancel(state *app, offerID string) {
+	offer := findOffer(state.market.Mine, offerID)
+
+	spec := actionSpec{
+		command: "market.cancel",
+		label:   "Cancel offer",
+		what: "Publish a signed cancellation of your own offer. It cannot be un-cancelled;" +
+			" publish a new offer instead.",
+	}
+
+	facts := [][2]string{
+		{"offer", offerID},
+		{"BLAKE", orDash(offer.BlakeAmount)},
+		{"BTC sats", orDash(offer.BTCSats)},
+		{"state", orDash(offer.State)},
+	}
+
+	request := proto.Request{
+		Command: "market.cancel",
+		Args:    map[string]string{"offer_id": offerID},
+	}
+
+	openConfirmation(state, spec, request, "", facts)
+}
+
+// beginMarketAcceptTake opens the confirmation for turning a take into a swap.
+func beginMarketAcceptTake(state *app, takeID string) {
+	spec := actionSpec{
+		command: "market.accept-take",
+		label:   "Accept take",
+		what: "Accept this take: create the swap, pin both identities, and publish the" +
+			" protocol offer and the market match that binds them. It creates the swap but" +
+			" moves no funds — funding stays a separate explicit action.",
+	}
+
+	facts := [][2]string{
+		{"take", takeID},
+		{"offer", orDash(state.marketOfferID)},
+	}
+
+	request := proto.Request{
+		Command: "market.accept-take",
+		Args:    map[string]string{"take_id": takeID},
+	}
+
+	openConfirmation(state, spec, request, "", facts)
+}
+
+// beginMarketAcceptMatch opens the confirmation for importing a match as the taker.
+func beginMarketAcceptMatch(state *app, matchID string) {
+	spec := actionSpec{
+		command: "market.accept-match",
+		label:   "Import match",
+		what: "Validate this match against the offer and take it names, then create your" +
+			" side of the swap and bind the negotiation to it. No funds move.",
+	}
+
+	request := proto.Request{
+		Command: "market.accept-match",
+		Args:    map[string]string{"match_id": matchID},
+	}
+
+	openConfirmation(state, spec, request, "", [][2]string{{"match", matchID}})
+}
+
+// findOffer reads one offer out of a list, zero when it is not there.
+func findOffer(offers []proto.MarketOffer, eventID string) proto.MarketOffer {
+	for _, offer := range offers {
+		if offer.EventID == eventID {
+			return offer
+		}
+	}
+
+	return proto.MarketOffer{}
 }

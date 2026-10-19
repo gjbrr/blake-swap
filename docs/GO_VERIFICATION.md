@@ -169,6 +169,7 @@ loopback relay and the app server in front of the live rig, then:
 | browser Bob, CLI Alice | the same swap with the roles reversed, in the **same vault and the same wallets**: the wallet is not the role |
 | reload in the middle | the vault locks, unlocking restores the dashboard **and the selected swap** from the sealed store, and the next action is still the right one |
 | refusals | an action the engine refuses is shown in its own words; an unknown swap is refused; a dead relay is an error rather than an empty market; a triple click sends one command |
+| market handshake | the browser publishes an offer, a CLI taker takes it, the browser lists the take and accepts it (creating the swap and publishing the match), and the CLI taker imports that match into its own record |
 
 The worker's write surface is the engine's, not a second protocol: create, publish, accept,
 receive, fund, verify, claim, refund, extract, complete, sync, resume, recovery plan, watch,
@@ -308,7 +309,7 @@ port work:
 | `make wasm` | pass, both modules |
 | `go test ./internal/fuzz/` (seeds) | pass: model, wire, proto, market, keys and NIP-44 parsers, including the empty-key and one-byte-key cases |
 | `go test -fuzz=Fuzz... -fuzztime 15s` (six targets) | ~2.3M executions, no panic |
-| `python3 scripts/verify-browser.py` | exit 0, 46 PASS: hello, boot gate, encrypted self-test, vault, identity, relays/proxy/wallets, market read and publish, coordination a–f, settlement transport round trip, engine heights, **browser-Alice full swap, browser-Bob full swap, reload mid-swap, four refusal paths** |
+| `python3 scripts/verify-browser.py` | exit 0, 49 PASS: hello, boot gate, encrypted self-test, vault, identity, relays/proxy/wallets, market read and publish, coordination a–f, settlement transport round trip, engine heights, **browser-Alice full swap, browser-Bob full swap, reload mid-swap, four refusal paths, market handshake** |
 | `python3 scripts/go_parity.py --check` | `parity manifest: current` |
 | `.venv/bin/python tests/docs_alignment_tests.py` | 11 checks, 0 failures |
 | `.venv/bin/python tests/cli_wiring_tests.py` | 58 subcommands, 0 failures |

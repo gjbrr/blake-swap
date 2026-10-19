@@ -2,15 +2,10 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
-	"time"
 
-	"github.com/gjbrr/blake-swap/pkg/event"
-	"github.com/gjbrr/blake-swap/pkg/marketflow"
-	"github.com/gjbrr/blake-swap/pkg/store"
+	"github.com/gjbrr/blake-swap/pkg/marketops"
 	"github.com/gjbrr/blake-swap/pkg/swap"
 )
 
@@ -60,165 +55,28 @@ func publishMarketMatch(
 		)
 	}
 
-	key, err := engineKey(engine)
+	env, err := marketEnvOrError(engine, marketClient(), func(line string) { fmt.Print(line) })
 
 	if err != nil {
 		return matchPublication{}, err
 	}
 
-	selectionPath := filepath.Join(stateDirectory(), selectionsDirectory, takeID+".json")
-
-	raw, err := os.ReadFile(selectionPath)
-
-	if os.IsNotExist(err) {
-		return matchPublication{}, fmt.Errorf("Alice has not accepted this market take")
-	}
+	published, err := marketops.PublishMatch(ctx, env, takeID)
 
 	if err != nil {
 		return matchPublication{}, err
 	}
 
-	var selection map[string]any
-
-	if err := json.Unmarshal(raw, &selection); err != nil {
-		return matchPublication{}, err
-	}
-
-	swapID, _ := selection["swap_id"].(string)
-
-	if swapID == "" {
-		return matchPublication{}, fmt.Errorf("Market selection has no swap_id")
-	}
-
-	offerID, _ := selection["offer_id"].(string)
-
-	records := store.NewFile(stateDirectory())
-
-	record, err := records.Load(ctx, swapID)
-
-	if err != nil {
-		return matchPublication{}, err
-	}
-
-	client := marketClient()
-
-	takeEvent, err := fetchEventByID(ctx, client, takeID)
-
-	if err != nil {
-		return matchPublication{}, err
-	}
-
-	take, err := marketflow.ParseTake(*takeEvent, time.Now())
-
-	if err != nil {
-		return matchPublication{}, fmt.Errorf("Referenced event is not a market take")
-	}
-
-	// The take must name the offer the selection recorded: a selection that has been
-	// edited, or a take that has been swapped underneath it, is not the negotiation that
-	// was accepted.
-	if take.OfferID != offerID {
-		return matchPublication{}, fmt.Errorf("SECURITY FAILURE: take references a different market offer")
-	}
-
-	offerEvent, err := fetchEventByID(ctx, client, offerID)
-
-	if err != nil {
-		return matchPublication{}, err
-	}
-
-	listed, err := marketflow.ParseOffer(*offerEvent, time.Now())
-
-	if err != nil {
-		return matchPublication{}, fmt.Errorf("Referenced event is not a market offer")
-	}
-
-	if err := event.Verify(*offerEvent, time.Now()); err != nil {
-		return matchPublication{}, err
-	}
-
-	if err := event.Verify(*takeEvent, time.Now()); err != nil {
-		return matchPublication{}, err
-	}
-
-	// A durable selection may allow recovery of an old negotiation, but it must not
-	// create a newly signed post-expiry match: counterparties reject those.
-	if listed.ExpiresAt <= time.Now().Unix() {
-		return matchPublication{}, fmt.Errorf("Market offer expired before match publication; publish a fresh offer instead")
-	}
-
-	alice, bob := key.PublicKey(), takeEvent.Pubkey
-
-	if offerEvent.Pubkey != alice {
-		return matchPublication{}, fmt.Errorf("SECURITY FAILURE: market offer was not signed by current Alice")
-	}
-
-	if value, _ := selection["nostr_alice_pub"].(string); value != alice {
-		return matchPublication{}, fmt.Errorf("SECURITY FAILURE: stored Alice identity mismatch")
-	}
-
-	if value, _ := selection["nostr_bob_pub"].(string); value != bob {
-		return matchPublication{}, fmt.Errorf("SECURITY FAILURE: stored Bob identity mismatch")
-	}
-
-	if record.NostrAlicePub == nil || *record.NostrAlicePub != alice {
-		return matchPublication{}, fmt.Errorf("SECURITY FAILURE: swap Alice identity mismatch")
-	}
-
-	if record.NostrBobPub == nil || *record.NostrBobPub != bob {
-		return matchPublication{}, fmt.Errorf("SECURITY FAILURE: swap Bob identity mismatch")
-	}
-
-	if listed.BlakeAmount != record.BlakeAmount() {
-		return matchPublication{}, fmt.Errorf("SECURITY FAILURE: BLAKE terms changed")
-	}
-
-	if listed.BTCSats != record.BTCSats {
-		return matchPublication{}, fmt.Errorf("SECURITY FAILURE: BTC terms changed")
-	}
-
-	built, _, err := marketflow.BuildMatch(key, marketflow.BuildMatchOptions{
-		Offer:       *listed,
-		OfferEvent:  *offerEvent,
-		TakeEvent:   *takeEvent,
-		Taker:       take,
-		SwapID:      record.SwapID,
-		BlakeAmount: listed.BlakeAmount,
-		BTCSats:     listed.BTCSats,
-		CreatedAt:   time.Now().Unix(),
-	})
-
-	if err != nil {
-		return matchPublication{}, err
-	}
-
-	report, err := client.Publish(ctx, built)
-
-	if err != nil {
-		return matchPublication{}, err
-	}
-
-	if err := reportPublished(ctx, built, report); err != nil {
-		return matchPublication{}, err
-	}
-
-	selection["market_match_id"] = built.ID
-
-	encoded, err := json.MarshalIndent(selection, "", "  ")
-
-	if err != nil {
-		return matchPublication{}, err
-	}
-
-	if err := writeAtomically(selectionPath, append(encoded, '\n')); err != nil {
-		return matchPublication{}, err
-	}
+	// The report is printed here rather than by the operation: it is the CLI's answer to
+	// "where did this go", and the browser has no terminal to print it to.
+	fmt.Print(renderOutboundCached(published.Published.ID, cacheDirectory()))
+	fmt.Print(renderRelayResults(published.Report))
 
 	return matchPublication{
-		OfferID: offerID,
-		TakeID:  takeID,
-		MatchID: built.ID,
-		SwapID:  record.SwapID,
+		OfferID: published.OfferID,
+		TakeID:  published.TakeID,
+		MatchID: published.MatchID,
+		SwapID:  published.SwapID,
 	}, nil
 }
 

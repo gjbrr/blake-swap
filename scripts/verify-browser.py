@@ -743,25 +743,108 @@ async def market_round_trip(ui: Ui, relay_url: str):
 
         return False
 
-    # The take button is present and disabled: taking needs the accept path, which this
-    # client does not implement yet, and a button that cannot finish is worse than none.
+    # Taking is enabled now that the accept path exists. The check completes the whole
+    # handshake against the CLI rather than trusting the button.
     enabled = await ui.js(
         "(() => {"
         "  const row = document.querySelector('#market-open-rows tr');"
         "  if (!row) { return 'no-row'; }"
         "  const button = row.querySelector('button');"
-        "  return button && !button.disabled ? 'enabled' : 'disabled';"
+        "  return button && !button.disabled ? button.getAttribute('data-uicmd') : 'disabled';"
         "})()"
     )
 
-    if enabled != "disabled":
-        print(f"FAIL: the Take button is {enabled}, but taking cannot complete", file=sys.stderr)
+    if not str(enabled).startswith("market-take:"):
+        print(f"FAIL: the Take button is {enabled!r}, want an enabled market-take", file=sys.stderr)
 
         return False
 
-    print("PASS: market published, and taking is not offered while the accept path is missing")
+    print("PASS: market published, and taking is offered")
 
-    return f"offer {str(offer_id)[:12]}…"
+    return str(offer_id)
+
+
+async def market_handshake(ui: Ui, work: Path, relay_url: str, offer_id: str) -> bool:
+    """The full market handshake: a CLI taker, a browser maker, and an imported match.
+
+    This is the flow the Take button exists for. The browser is the maker here: it accepts
+    the taker's take, which creates the swap and publishes the match, and the CLI taker then
+    imports that match into its own record.
+    """
+    taker_key = write_key(work, "taker.nostr-key", "22" * 32)
+
+    # The taker is a settlement participant, so it speaks the relay transport the engine's
+    # accept path uses; the plain peer helper reads coordination messages only.
+    code, output = peer_swap(work, taker_key, relay_url, "take-market-offer", offer_id)
+
+    if not require(code == 0, f"the CLI taker could not take the offer:\n{output}"):
+        return False
+
+    print("PASS: market: a CLI taker took the browser's offer")
+
+    # The browser re-reads the market and asks for the takes of its own offer.
+    if not await ui.act("market-list", confirm=False):
+        return False
+
+    if not await ui.wait_idle(ui.budget):
+        return require(False, "the market read never finished")
+
+    if not await ui.click("market-takes:" + offer_id):
+        return require(False, "the takes control was not found on the offer row")
+
+    takes = await poll(
+        ui.ws,
+        "(() => {"
+        "  const row = document.querySelector('#market-takes-rows tr');"
+        "  if (!row) { return ''; }"
+        "  const button = row.querySelector('button');"
+        f"  const command = button ? button.getAttribute('data-uicmd') : '';"
+        "  return command && command.startsWith('market-accept-take:') ? command : '';"
+        "})()",
+        ui.budget,
+    )
+
+    if not takes:
+        print(f"FAIL: the take was not listed for the offer; panel:\n"
+              f"{await ui.panel('market')}", file=sys.stderr)
+
+        return False
+
+    take_id = str(takes).split(":", 1)[1]
+
+    print(f"PASS: market: the browser listed the take ({take_id[:12]}…)")
+
+    if not await ui.act("market-accept-take:" + take_id):
+        return require(False, "accepting the take was not confirmed")
+
+    if not await ui.wait_idle(ui.budget):
+        return require(False, "accepting the take never finished")
+
+    error = await ui.last_error()
+
+    if not require(error == "", f"accepting the take was refused: {error}"):
+        return False
+
+    match_id = await ui.attr("lastEventId")
+
+    if not require(len(match_id) == 64, f"no match id was reported ({match_id!r})"):
+        return False
+
+    swap_id = await ui.selected_swap()
+
+    if not require(len(swap_id) == 12, f"accepting the take selected no swap ({swap_id!r})"):
+        return False
+
+    print(f"PASS: market: the browser accepted the take as swap {swap_id} (match {match_id[:12]}…)")
+
+    code, output = peer_swap(work, taker_key, relay_url, "accept-market-match", match_id)
+
+    if not require(code == 0, f"the CLI taker could not import the match:\n{output}"):
+        return False
+
+    print("PASS: market: the CLI taker imported the match into its own record")
+
+    return True
 
 
 async def coordination_round_trip(ui: Ui, work: Path, relay_url: str):
@@ -1704,12 +1787,15 @@ async def drive(url: str, budget: float, work: Path, relay_url: str = "") -> int
         print(f"PASS: encrypted round trip in the browser: {await ui.panel('vaulttest')}")
 
         if relay_url:
-            market = await market_round_trip(ui, relay_url)
+            offer_id = await market_round_trip(ui, relay_url)
 
-            if market is False:
+            if offer_id is False:
                 return 1
 
-            print(f"PASS: market read and published through the relay: {market}")
+            print(f"PASS: market read and published through the relay: offer {offer_id[:12]}…")
+
+            if not await market_handshake(ui, work, relay_url, offer_id):
+                return 1
         else:
             print("SKIP: no local relay was started for the market check")
 

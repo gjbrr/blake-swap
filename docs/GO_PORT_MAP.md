@@ -340,6 +340,7 @@ Five layers. Arrows are import direction; nothing lower imports anything higher.
 | `pkg/proto` | (new) | page ↔ worker request/response contract |
 | `pkg/worker`, `pkg/page` | (new / extends) | worker domain wiring (vault, engine, market, coord); the page's six views, its confirmation dialog and its busy rule |
 | `pkg/view` | (new) | engine result → view model, so the page renders instead of parsing |
+| `pkg/marketops` | (new) | the market accept path shared by the CLI and the worker: takes, accept-take, publish-match, accept-match, cancel |
 | `pkg/nodeconfig` | `tests/node_config.py` | which node a command talks to: environment, then a running rig, then conventional locations; a stopped rig is a reason, not a fallback |
 | `pkg/relaystub` | (new) | a loopback relay the suites and the browser check drive, so no test needs a public relay |
 | `cmd/blake-swap-relay` | (new) | the same relay as a binary, for a two-host run |
@@ -400,7 +401,7 @@ build rather than quietly becoming a claim.
 | M3 | `rpc`/`chain`/`fund`/`settle`/`observe` against a real regtest through the proxy | **partly done**: `rpc`, `chain`, `contract`, `fund` and `observe` are in; `settle` remains |
 | M4 | `cmd/blake-swap-cli` | the existing suites run with `$SWAP_V2` pointed at the Go binary |
 | M5 | `store`/`vault`/`coord`/`nostr` + worker domains | **done**: the worker exposes the engine's whole write surface, and `scripts/verify-browser.py` completes a full swap in the browser against a CLI counterparty in **both** protocol roles, plus a reload mid-swap |
-| M6 | `marketflow` (offer, take, match, cancel, import) + page UI | **partly done**: publishing, reading the book, takes and matches are driven from the UI; the *accept* path (take → swap → match, and match import) is still CLI-only, so the Take button is disabled rather than dead |
+| M6 | `marketflow` (offer, take, match, cancel, import) + page UI | **done for `blake-for-btc`**: the accept path moved into `pkg/marketops` and both front ends call it; the browser publishes, takes, accepts a take (creating the swap and the match), imports a match and cancels an offer, and `verify-browser.py` proves the handshake against a CLI taker. The reverse direction and `ignore-match` remain CLI-only |
 
 M4 and the orly reuse are the two big schedule wins: one gives a mechanical
 parity test (the corpus already exists), the other removes the crypto and Nostr

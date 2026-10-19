@@ -213,19 +213,28 @@ anything.
 
 ## The market accept path
 
-The browser client can publish a market offer and read the book, takes and matches, but it
-cannot complete a take: `market.accept-take`, `market.accept-match`, `market.cancel` and
-`market.ignore-match` are still CLI commands. The accept path lives in
-`cmd/blake-swap-cli` (`market_take_accept.go`, `market_accept_match.go`,
-`market_match_publish.go` and their reverse-direction siblings) and has not been moved into a
-package the worker can call.
+Implemented, for the direction a browser participant needs first. The state machine now
+lives in `pkg/marketops`, which both front ends call:
 
-Because a take that cannot be imported is a dead end, the **Take** button is rendered
-disabled, with a title that says so. A market trade today is: publish in the browser, take
-and accept with the CLI against the same swap id, settle in the browser.
+- `AcceptTake` turns a signed take into a swap, writes the two selection records durably
+  *before* announcing anything, publishes the protocol offer and the market match, and
+  treats a repeat as "already accepted" rather than as a second swap;
+- `AcceptMatch` is the taker's side: validate the match against the offer and take it names,
+  create the swap from the offer with the market's terms pinned, and bind the negotiation to
+  it — repairing a missing binding rather than refusing to work;
+- `PublishMatch`, `ReadTakeSet`, `FetchEvent` and the market evidence read are shared too.
 
-Closing it means extracting that state machine — take validation, selection records, the
-protocol offer and the match publication, and the taker's import — into a shared package and
-having the CLI render from its result rather than owning it. That is a refactor of about
-2,500 lines whose acceptance test is the CLI's own output staying byte-identical, so it was
-not attempted in the same pass as the client.
+The CLI keeps its output byte-identical by rendering from the same operations: the
+`TestCLIParityMarketWalk` comparison against the Python reference still passes, and the
+selection/binding tests moved into `pkg/marketops` with their assertions intact.
+
+The worker exposes `market.takes`, `market.matches`, `market.accept-take`,
+`market.accept-match` and `market.cancel`, so the Market screen now lists the takes on an
+offer, accepts one, imports a match, and withdraws an offer. `scripts/verify-browser.py`
+proves the handshake against a CLI taker: publish, take, list, accept, publish the match, and
+import it on the taker's side.
+
+Still not in the browser: the **reverse market direction** (`btc-for-blake`), where the
+maker is protocol Bob. Its accept path is a separate flow (`accept-reverse-market-offer`,
+`accept-market-reverse-match`) that the browser refuses with a message naming the take and
+pointing at the CLI, rather than guessing. `market.ignore-match` is also CLI-only.

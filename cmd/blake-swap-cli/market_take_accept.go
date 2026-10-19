@@ -11,8 +11,8 @@ import (
 
 	"github.com/gjbrr/blake-swap/pkg/amount"
 	"github.com/gjbrr/blake-swap/pkg/event"
-	"github.com/gjbrr/blake-swap/pkg/market"
 	"github.com/gjbrr/blake-swap/pkg/marketflow"
+	"github.com/gjbrr/blake-swap/pkg/marketops"
 	"github.com/gjbrr/blake-swap/pkg/nostr"
 	"github.com/gjbrr/blake-swap/pkg/store"
 	"github.com/gjbrr/blake-swap/pkg/swap"
@@ -47,7 +47,6 @@ func runAcceptMarketTake(ctx context.Context, engine *swap.Engine, args []string
 	}
 
 	client := marketClient()
-	now := time.Now()
 
 	takeID, err := resolveCachedPrefix(ctx, client, args[0], "market-take", "market take", true)
 
@@ -55,207 +54,97 @@ func runAcceptMarketTake(ctx context.Context, engine *swap.Engine, args []string
 		return err
 	}
 
+	//
+	// The take is fetched here rather than inside the operation, because the fetch is what
+	// prints where the event came from and the CLI has already announced the read. The
+	// operation re-validates it either way.
+	//
 	takeEvent, err := fetchEventByID(ctx, client, takeID)
 
 	if err != nil {
 		return err
 	}
 
-	if err := event.Verify(*takeEvent, now); err != nil {
-		return err
-	}
-
-	// The take's content is read before it is validated as a take, because the two
-	// refusals are different facts: a message that is not JSON is not a malformed
-	// take, it is not a take at all.
-	var message map[string]any
-
-	if err := json.Unmarshal([]byte(takeEvent.Content), &message); err != nil {
-		return fmt.Errorf("Market take content is invalid JSON")
-	}
-
-	if kind, _ := message["type"].(string); kind != "market-take" {
-		return fmt.Errorf("Referenced event is not a market take")
-	}
-
-	offerID, _ := message["offer_id"].(string)
-
-	if len(offerID) != 64 {
-		return fmt.Errorf("Market take has invalid offer_id")
-	}
-
-	directory := filepath.Join(stateDirectory(), selectionsDirectory)
-	takeSelectionPath := filepath.Join(directory, takeID+".json")
-	offerSelectionPath := filepath.Join(directory, "offer-"+offerID+".json")
-
-	// A durable selection is the record that this negotiation already happened, and it
-	// is what allows a retry to proceed past expiry: an established negotiation is not
-	// erased by the offer's lifetime running out.
-	alreadySelected := fileExists(takeSelectionPath) || fileExists(offerSelectionPath)
-
-	set, err := readTakeSet(ctx, client, offerID, 200, []event.Event{*takeEvent}, alreadySelected, alreadySelected)
+	env, err := marketEnvOrError(engine, client, func(line string) { fmt.Print(line) })
 
 	if err != nil {
 		return err
 	}
 
-	var selected *marketflow.TakeEntry
+	_, err = marketops.AcceptTake(ctx, env, takeID, takeEvent, marketops.TakeHooks{
+		Accepted: func(acceptance marketops.TakeAcceptance) {
+			if acceptance.Repeated {
+				fmt.Print(renderMarketTakeAlreadyAccepted(
+					acceptance.OfferID, acceptance.TakeID, acceptance.SwapID,
+				))
 
-	for index := range set.takes {
-		if set.takes[index].EventID == takeID {
-			selected = &set.takes[index]
+				return
+			}
 
-			break
-		}
-	}
-
-	if selected == nil {
-		return fmt.Errorf("SECURITY FAILURE: selected take did not pass market-take validation")
-	}
-
-	// In the reverse direction the offer's maker is protocol Bob and must never create
-	// Alice's secret, so that path never reaches the swap-creating code below.
-	if selected.Take.Direction == market.BTCForBlake {
-		return acceptReverseMarketTake(ctx, engine, key, client, takeAcceptInput{
-			Offer:      set.offer,
-			OfferTerms: set.listed,
-			OfferID:    offerID,
-			TakeEvent:  takeEvent,
-			TakeID:     takeID,
-			Directory:  directory,
-		})
-	}
-
-	alice := key.PublicKey()
-	bob := takeEvent.Pubkey
-
-	if set.offer.Pubkey != alice {
-		return fmt.Errorf(
-			"SECURITY FAILURE: current Alice identity did not create the referenced market offer",
-		)
-	}
-
-	if selected.Taker != bob {
-		return fmt.Errorf("SECURITY FAILURE: validated taker identity mismatch")
-	}
-
-	if err := os.MkdirAll(directory, 0o700); err != nil {
-		return err
-	}
-
-	offerSelection, err := readSelection(offerSelectionPath)
-
-	if err != nil {
-		return err
-	}
-
-	if offerSelection != nil {
-		boundTake, _ := offerSelection["take_id"].(string)
-		boundSwap, _ := offerSelection["swap_id"].(string)
-
-		if v, _ := offerSelection["offer_id"].(string); v != offerID || boundTake == "" || boundSwap == "" {
-			return fmt.Errorf("Existing market offer selection record is malformed")
-		}
-
-		if boundTake != takeID {
-			return fmt.Errorf(
-				"SECURITY FAILURE: market offer has already been accepted through a different take",
-			)
-		}
-	}
-
-	takeSelection, err := readSelection(takeSelectionPath)
-
-	if err != nil {
-		return err
-	}
-
-	if takeSelection != nil {
-		if v, _ := takeSelection["offer_id"].(string); v != offerID {
-			return fmt.Errorf("Existing market selection record is malformed")
-		}
-
-		if v, _ := takeSelection["take_id"].(string); v != takeID {
-			return fmt.Errorf("Existing market selection record is malformed")
-		}
-
-		if v, _ := takeSelection["swap_id"].(string); v == "" {
-			return fmt.Errorf("Existing market selection record is malformed")
-		}
-	}
-
-	if offerSelection != nil || takeSelection != nil {
-		return repeatAcceptMarketTake(ctx, repeatAccept{
-			OfferID:          offerID,
-			TakeID:           takeID,
-			Alice:            alice,
-			Bob:              bob,
-			OfferSelection:   offerSelection,
-			TakeSelection:    takeSelection,
-			TakePath:         takeSelectionPath,
-			OfferPath:        offerSelectionPath,
-			OfferSelectionOn: offerSelection != nil,
-			TakeSelectionOn:  takeSelection != nil,
-		})
-	}
-
-	// Fresh parameters under the same timeout policy normal swap construction uses: an
-	// accepted take is an ordinary swap that happens to have been negotiated in public.
-	created, err := engine.New(ctx, swap.NewRequest{
-		BlakeAmount: set.listed.BlakeAmount,
-		BTCSats:     set.listed.BTCSats,
-		NostrBobPub: bob,
-		Random:      randReader(),
+			fmt.Print(renderMarketTakeAccepted(
+				acceptance.OfferID, acceptance.TakeID, acceptance.SwapID,
+				acceptance.Alice, acceptance.Bob,
+				acceptance.Blake, acceptance.BTCSats,
+				acceptance.BTCTimeout, acceptance.BlakeTimeout,
+			))
+		},
+		BeforeOfferPublish: func() {
+			fmt.Print("\nPublishing normal authenticated atomic-swap offer...\n")
+		},
+		AfterOfferPublish: func(location string) {
+			fmt.Print(renderOfferPublished(
+				selectionSwapID(ctx, env, takeID), messageLocation(location),
+			))
+		},
+		BeforeMatchPublish: func() {
+			fmt.Print("\nPublishing signed market match...\n")
+		},
+		AfterMatchPublish: func(publication marketops.MatchPublication) {
+			fmt.Print(renderOutboundCached(publication.Published.ID, cacheDirectory()))
+			fmt.Print(renderRelayResults(publication.Report))
+			fmt.Print(renderMatchPublished(
+				publication.OfferID, publication.TakeID, publication.MatchID, publication.SwapID,
+			))
+			fmt.Print(renderMarketBridge(
+				publication.OfferID, publication.TakeID, publication.MatchID, publication.SwapID,
+			))
+		},
 	})
 
-	if err != nil {
-		return err
+	if reverse, ok := marketops.IsReverse(err); ok {
+		return acceptReverseMarketTake(ctx, engine, key, client, takeAcceptInput{
+			Offer:      reverse.Offer,
+			OfferTerms: reverse.Terms,
+			OfferID:    reverse.OfferID,
+			TakeEvent:  reverse.Take,
+			TakeID:     reverse.TakeID,
+			Directory:  filepath.Join(stateDirectory(), selectionsDirectory),
+		})
 	}
 
-	record := *created.Swap
+	return err
+}
 
-	selectionRecord := map[string]any{
-		"version":         1,
-		"offer_id":        offerID,
-		"take_id":         takeID,
-		"swap_id":         record.SwapID,
-		"nostr_alice_pub": alice,
-		"nostr_bob_pub":   bob,
-	}
-
-	// Durable before anything is announced: these two files are what stop a second take
-	// creating a second swap from this offer, so losing either is losing that guarantee.
-	if err := writeSelection(takeSelectionPath, selectionRecord); err != nil {
-		return err
-	}
-
-	if err := writeSelection(offerSelectionPath, selectionRecord); err != nil {
-		return err
-	}
-
-	fmt.Print(renderMarketTakeAccepted(
-		offerID, takeID, record.SwapID, alice, bob,
-		set.listed.BlakeAmount, set.listed.BTCSats, record.BTCTimeout, record.BlakeTimeout,
-	))
-
-	fmt.Print("\nPublishing normal authenticated atomic-swap offer...\n")
-
-	if err := runPublishOffer(ctx, engine, []string{record.SwapID}); err != nil {
-		return err
-	}
-
-	fmt.Print("\nPublishing signed market match...\n")
-
-	match, err := publishMarketMatch(ctx, engine, takeID)
+// selectionSwapID reads back the swap id the acceptance recorded.
+//
+// The publish announcement names the swap, and the acceptance has just written it down; this
+// reads the record rather than carrying a second copy of the same fact through the hooks.
+func selectionSwapID(ctx context.Context, env *marketops.Env, takeID string) string {
+	record, err := env.Files.Read(ctx, "selections/"+takeID+".json")
 
 	if err != nil {
-		return err
+		return ""
 	}
 
-	fmt.Print(renderMatchPublished(offerID, takeID, match.MatchID, record.SwapID))
-	fmt.Print(renderMarketBridge(offerID, takeID, match.MatchID, record.SwapID))
+	var selection map[string]any
 
-	return nil
+	if err := json.Unmarshal(record, &selection); err != nil {
+		return ""
+	}
+
+	swapID, _ := selection["swap_id"].(string)
+
+	return swapID
 }
 
 // takeAcceptInput is everything the reverse path needs from the forward one.

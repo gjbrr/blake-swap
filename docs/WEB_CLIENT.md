@@ -83,7 +83,8 @@ node are actually configured.
 **As Bob:**
 
 1. Swaps → *Accept an offer somebody sent you*: Alice's swap id and her public key. Pinning
-   her key is what makes this an acceptance of *her* offer.
+   her key is what makes this an acceptance of *her* offer. (For a market trade, the match
+   row's *Import match* does the same thing with the terms already pinned.)
 2. **Fund BTC**, then **Sync funding** after it confirms.
 3. **Receive BTC claimed**, then **Extract secret** (Bob has no secret until Alice claims),
    then **Claim BLAKE**.
@@ -133,17 +134,13 @@ for a host-side operator.
 
 ## What is not implemented
 
-**The market accept path.** The client can publish an offer, list the book, and advertise
-taking… but it cannot complete a take. The accept path — validating a take, creating the swap
-from it, publishing the protocol offer and the market match, and importing a match on the
-taker's side — lives in the CLI (`accept-market-take`, `accept-market-match`) and has not
-been moved into a package the worker can call. Because a take that cannot lead to a swap is a
-dead end, the **Take** button is rendered disabled with a title saying so, rather than
-shipping a button that cannot finish.
+**The reverse market direction.** The browser can complete a market trade in the
+`blake-for-btc` direction: take an offer, accept the take as the maker, import a match as the
+taker, and withdraw an offer. The reverse direction (`btc-for-blake`, where the maker is
+protocol Bob) has its own accept flow that is still CLI-only; the browser refuses it with a
+message naming the take rather than guessing.
 
-A market trade today is therefore: publish in the browser, take and accept with the CLI
-against the same swap id, then settle in the browser. The direct swap flow above is complete
-in both roles.
+`market.ignore-match` is also CLI-only.
 
 Also not implemented: exporting the sealed vault (a stretch goal — only the sealed blob would
 leave the browser), wallet creation from the page, and any activity log.

@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"fmt"
+	"io/fs"
 	"sort"
 	"strconv"
 	"strings"
@@ -12,8 +13,10 @@ import (
 	"github.com/gjbrr/blake-swap/pkg/event"
 	"github.com/gjbrr/blake-swap/pkg/market"
 	"github.com/gjbrr/blake-swap/pkg/marketflow"
+	"github.com/gjbrr/blake-swap/pkg/marketops"
 	"github.com/gjbrr/blake-swap/pkg/nostr"
 	"github.com/gjbrr/blake-swap/pkg/proto"
+	"github.com/gjbrr/blake-swap/pkg/swap"
 	"github.com/gjbrr/blake-swap/pkg/view"
 )
 
@@ -41,6 +44,10 @@ type marketDomain struct {
 	// dialer is the platform seam. It is injectable so the whole domain can be tested
 	// against a relay stub without a browser.
 	dialer nostr.Dialer
+	// engine builds the swap engine, which the accept path uses to create and publish the
+	// swap a take or a match produces. It is a function rather than a field because the
+	// engine is rebuilt per call from the vault, exactly as the engine domain does.
+	engine func(ctx context.Context) (*swap.Engine, error)
 	// now is the clock, for evidence-based expiry decisions.
 	now func() time.Time
 }
@@ -48,6 +55,13 @@ type marketDomain struct {
 // newMarketDomain builds the market domain over a vault and a dialer.
 func newMarketDomain(vault *vaultDomain, dialer nostr.Dialer) *marketDomain {
 	return &marketDomain{vault: vault, dialer: dialer, now: time.Now}
+}
+
+// withEngine returns the domain with the engine builder the accept path needs.
+func (d *marketDomain) withEngine(build func(context.Context) (*swap.Engine, error)) *marketDomain {
+	d.engine = build
+
+	return d
 }
 
 // Handle runs one market command.
@@ -77,6 +91,21 @@ func (d *marketDomain) Handle(ctx context.Context, request proto.Request) proto.
 
 	case "market.take":
 		return d.take(ctx, request)
+
+	case "market.takes":
+		return d.takes(ctx, request)
+
+	case "market.matches":
+		return d.matches(ctx, request)
+
+	case "market.accept-take":
+		return d.acceptTake(ctx, request)
+
+	case "market.accept-match":
+		return d.acceptMatch(ctx, request)
+
+	case "market.cancel":
+		return d.cancel(ctx, request)
 	}
 
 	return proto.Result{
@@ -482,4 +511,323 @@ func renderBrowserMarket(offers []marketflow.Entry, now int64) string {
 	out.WriteString("\n" + strconv.Itoa(len(sorted)) + " open offer(s)\n")
 
 	return out.String()
+}
+
+// ------------------------------------------------------------------ accept path ---
+
+// vaultFiles keeps the market's durable records in the vault.
+//
+// The selection records and match bindings are the receipts a negotiation rests on, so they
+// live where every other durable fact lives: sealed, in the one store the client has. The
+// names are the same ones the CLI uses, so an operator who moves between the two front ends
+// is looking at the same documents.
+type vaultFiles struct{ vault *vaultDomain }
+
+// Read implements marketops.Files.
+func (f vaultFiles) Read(ctx context.Context, name string) ([]byte, error) {
+	value, err := f.vault.readSecret(ctx, marketFilePrefix+name)
+
+	if err != nil {
+		return nil, err
+	}
+
+	if value == "" {
+		return nil, fs.ErrNotExist
+	}
+
+	return []byte(value), nil
+}
+
+// Write implements marketops.Files.
+func (f vaultFiles) Write(ctx context.Context, name string, data []byte) error {
+	return f.vault.writeSecret(ctx, marketFilePrefix+name, string(data))
+}
+
+// marketFilePrefix keeps the market's documents in their own corner of the vault.
+const marketFilePrefix = "market/"
+
+// engineFor builds the engine the accept path needs.
+func (d *marketDomain) engineFor(ctx context.Context) (*swap.Engine, error) {
+	if d.engine == nil {
+		return nil, fmt.Errorf("this worker's market domain has no engine")
+	}
+
+	return d.engine(ctx)
+}
+
+// acceptEnv builds the environment the market operations run in.
+func (d *marketDomain) acceptEnv(ctx context.Context) (*marketops.Env, *swap.Engine, error) {
+	key, err := d.identity(ctx)
+
+	if err != nil {
+		return nil, nil, err
+	}
+
+	engine, err := d.engineFor(ctx)
+
+	if err != nil {
+		return nil, nil, err
+	}
+
+	client, err := d.client(ctx)
+
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return &marketops.Env{
+		Client:   client,
+		Identity: key,
+		Records:  d.vault.store,
+		Files:    vaultFiles{vault: d.vault},
+		Engine:   engine,
+		Random:   randomReader{},
+		Now:      d.now,
+	}, engine, nil
+}
+
+// takes lists the valid takes on one of this participant's offers.
+func (d *marketDomain) takes(ctx context.Context, request proto.Request) proto.Result {
+	offerID := strings.ToLower(strings.TrimSpace(request.Args["offer_id"]))
+
+	if len(offerID) != 64 {
+		return proto.Result{
+			Command: request.Command,
+			Error:   "offer_id must be the full 64-character Nostr event ID",
+		}
+	}
+
+	env, _, err := d.acceptEnv(ctx)
+
+	if err != nil {
+		return failed(request.Command, err)
+	}
+
+	set, err := marketops.ReadTakeSet(ctx, env, offerID, 200, nil, false, false)
+
+	if err != nil {
+		return failed(request.Command, err)
+	}
+
+	read := "Nostr take read: " + strconv.Itoa(set.Candidates) + " unique event(s) from " +
+		strconv.Itoa(set.Answered) + "/" + strconv.Itoa(set.Relays) + " relay(s)"
+
+	var lines []string
+
+	for _, take := range set.Takes {
+		lines = append(lines, take.EventID+"\t"+take.Taker+"\t"+
+			take.Take.BlakeAmount.Format()+" BLAKE\t"+
+			strconv.FormatInt(take.Take.BTCSats, 10)+" sats")
+	}
+
+	text := read
+
+	if len(lines) == 0 {
+		text += "\nNo valid takes."
+	} else {
+		text += "\n" + strings.Join(lines, "\n")
+	}
+
+	market := view.Market(read, nil, nil, nil, set.Takes, nil, nil, env.Identity.Public)
+
+	return withView(proto.Result{Command: request.Command, OK: true, Text: text}, market)
+}
+
+// matches lists the verified matches that name this participant.
+func (d *marketDomain) matches(ctx context.Context, request proto.Request) proto.Result {
+	env, _, err := d.acceptEnv(ctx)
+
+	if err != nil {
+		return failed(request.Command, err)
+	}
+
+	evidence, err := marketops.MarketEvidence(ctx, env, 200)
+
+	if err != nil {
+		return failed(request.Command, err)
+	}
+
+	found := marketflow.MatchesFor(env.Identity.Public, evidence, d.now())
+
+	var lines []string
+
+	for _, match := range found {
+		lines = append(lines, match.Match.EventID+"\tswap "+match.Match.SwapID)
+	}
+
+	text := strconv.Itoa(len(found)) + " match(es)"
+
+	if len(lines) > 0 {
+		text += "\n" + strings.Join(lines, "\n")
+	}
+
+	return withView(proto.Result{Command: request.Command, OK: true, Text: text},
+		view.Market("", nil, nil, nil, nil, found, nil, env.Identity.Public))
+}
+
+// acceptTake turns a signed take into a swap, as the offer's maker.
+func (d *marketDomain) acceptTake(ctx context.Context, request proto.Request) proto.Result {
+	takeID := strings.ToLower(strings.TrimSpace(request.Args["take_id"]))
+
+	if len(takeID) != 64 {
+		return proto.Result{
+			Command: request.Command,
+			Error:   "take_id must be the full 64-character Nostr event ID",
+		}
+	}
+
+	env, _, err := d.acceptEnv(ctx)
+
+	if err != nil {
+		return failed(request.Command, err)
+	}
+
+	acceptance, err := marketops.AcceptTake(ctx, env, takeID, nil, marketops.TakeHooks{})
+
+	if reverse, ok := marketops.IsReverse(err); ok {
+		return proto.Result{
+			Command: request.Command,
+			Error: "the reverse market direction is not implemented in this client yet " +
+				"(take " + reverse.TakeID + "); the CLI can accept it",
+		}
+	}
+
+	if err != nil {
+		return failed(request.Command, err)
+	}
+
+	action := view.Action(request.Command, acceptance.SwapID, "accept-market-take")
+	action.Message = acceptance.MatchID
+	action.Details = []proto.ActionFact{
+		{Label: "offer id", Value: acceptance.OfferID},
+		{Label: "take id", Value: acceptance.TakeID},
+		{Label: "match id", Value: acceptance.MatchID},
+		{Label: "BLAKE", Value: acceptance.Blake.Format()},
+		{Label: "BTC sats", Value: strconv.FormatInt(acceptance.BTCSats, 10)},
+	}
+
+	if acceptance.Repeated {
+		action.Details = append(action.Details, proto.ActionFact{
+			Label: "note", Value: "this take had already been accepted; the existing swap was reused",
+		})
+	}
+
+	return withView(proto.Result{
+		Command: request.Command,
+		OK:      true,
+		Text: "accepted take " + acceptance.TakeID + " as swap " + acceptance.SwapID +
+			" (match " + acceptance.MatchID + ")",
+	}, action)
+}
+
+// acceptMatch imports the swap a market match binds, as the taker.
+func (d *marketDomain) acceptMatch(ctx context.Context, request proto.Request) proto.Result {
+	matchID := strings.ToLower(strings.TrimSpace(request.Args["match_id"]))
+
+	if len(matchID) != 64 {
+		return proto.Result{
+			Command: request.Command,
+			Error:   "match_id must be the full 64-character Nostr event ID",
+		}
+	}
+
+	env, _, err := d.acceptEnv(ctx)
+
+	if err != nil {
+		return failed(request.Command, err)
+	}
+
+	imported, err := marketops.AcceptMatch(ctx, env, matchID, nil, marketops.MatchHooks{})
+
+	if err != nil {
+		return failed(request.Command, err)
+	}
+
+	action := view.Action(request.Command, imported.SwapID, "accept-market-match")
+	action.Message = imported.TakeID
+	action.Details = []proto.ActionFact{
+		{Label: "match id", Value: imported.MatchID},
+		{Label: "offer id", Value: imported.OfferID},
+		{Label: "take id", Value: imported.TakeID},
+		{Label: "maker", Value: imported.Maker},
+		{Label: "BLAKE", Value: imported.Blake.Format()},
+		{Label: "BTC sats", Value: strconv.FormatInt(imported.BTCSats, 10)},
+	}
+
+	if imported.Repeated {
+		action.Details = append(action.Details, proto.ActionFact{
+			Label: "note", Value: "this match had already been imported; the existing swap was reused",
+		})
+	}
+
+	return withView(proto.Result{
+		Command: request.Command,
+		OK:      true,
+		Text:    "imported match " + imported.MatchID + " as swap " + imported.SwapID,
+	}, action)
+}
+
+// cancel publishes this participant's cancellation of an offer they made.
+func (d *marketDomain) cancel(ctx context.Context, request proto.Request) proto.Result {
+	offerID := strings.ToLower(strings.TrimSpace(request.Args["offer_id"]))
+
+	if len(offerID) != 64 {
+		return proto.Result{
+			Command: request.Command,
+			Error:   "offer_id must be the full 64-character Nostr event ID",
+		}
+	}
+
+	key, err := d.identity(ctx)
+
+	if err != nil {
+		return failed(request.Command, err)
+	}
+
+	client, err := d.client(ctx)
+
+	if err != nil {
+		return failed(request.Command, err)
+	}
+
+	env := &marketops.Env{Client: client, Identity: key, Now: d.now}
+
+	offer, err := marketops.FetchEvent(ctx, env, offerID)
+
+	if err != nil {
+		return failed(request.Command, err)
+	}
+
+	if offer.Pubkey != key.Public {
+		return proto.Result{
+			Command: request.Command,
+			Error:   "SECURITY FAILURE: current Nostr identity is not the maker of this offer",
+		}
+	}
+
+	built, _, err := marketflow.BuildCancel(key, marketflow.BuildCancelOptions{OfferID: offerID})
+
+	if err != nil {
+		return failed(request.Command, err)
+	}
+
+	report, err := client.Publish(ctx, built)
+
+	if err != nil {
+		return failed(request.Command, err)
+	}
+
+	action := view.Action(request.Command, "", "cancel-market-offer")
+	action.Message = built.ID
+	action.Sender = key.Public
+	action.Details = []proto.ActionFact{
+		{Label: "offer id", Value: offerID},
+		{Label: "relays accepted", Value: strconv.Itoa(report.Accepted) + "/" + strconv.Itoa(len(report.Relays))},
+	}
+
+	return withView(proto.Result{
+		Command: request.Command,
+		OK:      true,
+		Text:    "cancelled offer " + offerID + " (event " + built.ID + ")",
+	}, action)
 }

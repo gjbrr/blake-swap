@@ -45,8 +45,9 @@ func Domain(_ struct{}, ch Chans) {
 	// in the browser unchanged.
 	engine := newEngineDomain(vault, dialer)
 
-	// The market's connection is that dialer over the vault's relay list.
-	market := newMarketDomain(vault, dialer)
+	// The market's connection is that dialer over the vault's relay list. Its accept path
+	// also needs the engine, because accepting a take creates a swap.
+	market := newMarketDomain(vault, dialer).withEngine(engine.build)
 
 	// The settlement transport is the same dialer and the same relay list, with the
 	// seven message types the engine already knows how to build and check.

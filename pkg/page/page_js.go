@@ -97,11 +97,16 @@ const (
 // The prefixes a data-driven control may carry. The suffix is an id or an action name
 // this page itself wrote into the document.
 const (
-	cmdViewPrefix   = "view-"
-	cmdSwapAction   = "swap-action:"
-	cmdOpenSwap     = "open-swap:"
-	cmdCoordSend    = "coord-send:"
-	cmdCoordReceive = "coord-receive:"
+	cmdViewPrefix        = "view-"
+	cmdSwapAction        = "swap-action:"
+	cmdMarketTake        = "market-take:"
+	cmdMarketCancel      = "market-cancel:"
+	cmdMarketAcceptTake  = "market-accept-take:"
+	cmdMarketAcceptMatch = "market-accept-match:"
+	cmdMarketTakes       = "market-takes:"
+	cmdOpenSwap          = "open-swap:"
+	cmdCoordSend         = "coord-send:"
+	cmdCoordReceive      = "coord-receive:"
 )
 
 // The element ids are part of the page contract: index.html renders them and the
@@ -330,6 +335,8 @@ type app struct {
 	// ticker drives the light dashboard refresh; tick is its channel, nil when off.
 	ticker *time.Ticker
 	tick   <-chan time.Time
+	// marketOfferID is the offer whose takes are on screen, so an acceptance can name it.
+	marketOfferID string
 	// relays, proxy and walletNames are the configuration the Settings view shows.
 	relays      []string
 	proxy       string
@@ -517,6 +524,41 @@ func handleUI(state *app, link tinyspawn.Duplex[proto.Envelope], seq *uint32, cm
 
 	if swapID, found := strings.CutPrefix(cmd, cmdOpenSwap); found {
 		openSwap(state, link, seq, swapID, refresh)
+
+		return
+	}
+
+	if offerID, found := strings.CutPrefix(cmd, cmdMarketTakes); found {
+		state.marketOfferID = offerID
+
+		startCommand(state, link, seq, proto.Request{
+			Command: "market.takes",
+			Args:    map[string]string{"offer_id": offerID},
+		})
+
+		return
+	}
+
+	if offerID, found := strings.CutPrefix(cmd, cmdMarketTake); found {
+		beginMarketTake(state, offerID)
+
+		return
+	}
+
+	if offerID, found := strings.CutPrefix(cmd, cmdMarketCancel); found {
+		beginMarketCancel(state, offerID)
+
+		return
+	}
+
+	if takeID, found := strings.CutPrefix(cmd, cmdMarketAcceptTake); found {
+		beginMarketAcceptTake(state, takeID)
+
+		return
+	}
+
+	if matchID, found := strings.CutPrefix(cmd, cmdMarketAcceptMatch); found {
+		beginMarketAcceptMatch(state, matchID)
 
 		return
 	}
@@ -877,9 +919,15 @@ func finishCommand(
 		queueCommand(refresh, state, link, seq, proto.Request{Command: "engine.dashboard"})
 	}
 
-	// A published offer changes the book, so the book is re-read: a Market screen that did
-	// not show the offer just advertised would look like a failed publish.
-	if result.Command == "market.publish" {
+	// A market act changes the book, the takes or the matches, so all of them are re-read:
+	// a Market screen that did not show the offer it just advertised, or the take it just
+	// accepted, would look like a failed command.
+	switch result.Command {
+	case "market.publish", "market.take", "market.cancel":
+		queueCommand(refresh, state, link, seq, proto.Request{Command: "market.list"})
+
+	case "market.accept-take", "market.accept-match":
+		queueCommand(refresh, state, link, seq, proto.Request{Command: "market.matches"})
 		queueCommand(refresh, state, link, seq, proto.Request{Command: "market.list"})
 	}
 
@@ -1101,11 +1149,18 @@ func applyResult(state *app, result proto.Result) {
 		routeText(ElementMarketRelays, result.Text, "ok")
 		renderSettings(state)
 
-	case "market.publish":
+	case "market.publish", "market.take", "market.cancel", "market.accept-take",
+		"market.accept-match":
 		applyAction(state, result, ElementMarket)
 
 	case "market.list":
 		applyMarket(state, result)
+
+	case "market.takes":
+		applyTakes(state, result)
+
+	case "market.matches":
+		applyMatches(state, result)
 
 	case "coord.mode":
 		routeText(ElementCoordModeOut, result.Text, "ok")
@@ -1223,6 +1278,34 @@ func applyMarket(state *app, result proto.Result) {
 	state.market = market
 
 	renderMarket(state)
+	routeText(ElementMarket, result.Text, "ok")
+}
+
+// applyTakes records the takes of one offer and renders them.
+func applyTakes(state *app, result proto.Result) {
+	var market proto.MarketView
+
+	if err := proto.DecodeData(result, &market); err != nil {
+		return
+	}
+
+	state.market.Takes = market.Takes
+
+	renderTakes(state.market)
+	routeText(ElementMarket, result.Text, "ok")
+}
+
+// applyMatches records the matches naming this participant and renders them.
+func applyMatches(state *app, result proto.Result) {
+	var market proto.MarketView
+
+	if err := proto.DecodeData(result, &market); err != nil {
+		return
+	}
+
+	state.market.Matches = market.Matches
+
+	renderMatches(state.market)
 	routeText(ElementMarket, result.Text, "ok")
 }
 

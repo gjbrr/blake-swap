@@ -3,17 +3,15 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"math"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 
 	"github.com/gjbrr/blake-swap/pkg/event"
 	"github.com/gjbrr/blake-swap/pkg/marketflow"
+	"github.com/gjbrr/blake-swap/pkg/marketops"
 	"github.com/gjbrr/blake-swap/pkg/model"
 	"github.com/gjbrr/blake-swap/pkg/nostr"
 	"github.com/gjbrr/blake-swap/pkg/store"
@@ -36,9 +34,7 @@ func runAcceptMarketMatch(ctx context.Context, engine *swap.Engine, args []strin
 		return fmt.Errorf("accept-market-match takes one match id")
 	}
 
-	key, err := engineKey(engine)
-
-	if err != nil {
+	if _, err := engineKey(engine); err != nil {
 		return err
 	}
 
@@ -54,164 +50,37 @@ func runAcceptMarketMatch(ctx context.Context, engine *swap.Engine, args []strin
 		return fmt.Errorf("match_id must be the full 64-character Nostr event ID")
 	}
 
-	bob := key.PublicKey()
-
 	found, err := fetchEventByID(ctx, client, matchID)
 
 	if err != nil {
 		return err
 	}
 
-	item, err := validateMarketMatchFor(ctx, client, *found, bob)
+	env, err := marketEnvOrError(engine, client, func(line string) { fmt.Print(line) })
 
 	if err != nil {
 		return err
 	}
 
-	directory := filepath.Join(stateDirectory(), matchBindingDirectory)
-	bindingPath := filepath.Join(directory, item.SwapID+".json")
+	_, err = marketops.AcceptMatch(ctx, env, matchID, found, marketops.MatchHooks{
+		AfterAccept: func(result *swap.AcceptResult) {
+			fmt.Printf("accept message: %s\n", messageLocation(result.Location))
+			fmt.Print(renderOfferAccepted(
+				result.Swap.SwapID, recordPath(result.Swap.SwapID), result.Timeout,
+			))
+		},
+		AfterImport: func(imported marketops.MatchImport) {
+			if imported.Repeated {
+				fmt.Print(renderMatchAlreadyImported(imported.MatchID, imported.SwapID))
 
-	proposed := map[string]any{
-		"version":  1,
-		"offer_id": item.OfferID,
-		"take_id":  item.TakeID,
-		"swap_id":  item.SwapID,
-		"maker":    item.Maker,
-		"taker":    item.Taker,
+				return
+			}
 
-		"blake_amount": json.Number(pythonFloat(blakeFloat(item.BlakeAmount))),
-		"btc_sats":     item.BTCSats,
+			fmt.Print(renderMatchImported(imported.MatchID, imported.SwapID))
+		},
+	})
 
-		// Informational evidence only: the tuple above is the negotiation.
-		"first_match_id": matchID,
-	}
-
-	existing, err := readBinding(bindingPath)
-
-	if err != nil {
-		return err
-	}
-
-	if existing != nil {
-		if err := matchBindingConflict(existing, proposed); err != nil {
-			return err
-		}
-	}
-
-	records := store.NewFile(stateDirectory())
-
-	record, err := records.Load(ctx, item.SwapID)
-
-	if err == nil {
-		return repeatAcceptMarketMatch(ctx, repeatMatch{
-			MatchID: matchID,
-			Item:    item,
-			Bob:     bob,
-			Record:  record,
-			Store:   records,
-			Binding: existing,
-			Path:    bindingPath,
-			Write:   proposed,
-		})
-	}
-
-	if !errors.Is(err, store.ErrNotFound) {
-		return err
-	}
-
-	//
-	// No local swap yet: the offer this match names has to be accepted as an ordinary
-	// swap, with the market's terms pinned so a different offer cannot answer instead.
-	//
-	// The acceptance goes through the accept-offer command rather than through the engine
-	// directly, because that is what the reference does: the acceptance message and the
-	// timeout verification it prints belong to accepting an offer, and a second copy of
-	// them here would be a second thing to keep true.
-	//
-	if err := runAcceptOffer(ctx, engine, []string{
-		"--expected-alice-pub", item.Maker,
-		"--expected-blake-amount", item.BlakeAmount.String(),
-		"--expected-btc-sats", strconv.FormatInt(item.BTCSats, 10),
-		item.SwapID,
-	}); err != nil {
-		return err
-	}
-
-	accepted, err := records.Load(ctx, item.SwapID)
-
-	if err != nil {
-		return err
-	}
-
-	if err := pinBob(ctx, records, accepted, bob); err != nil {
-		return err
-	}
-
-	// Persist the immutable market-to-swap binding only after Bob's swap state exists:
-	// a binding that named no record would be a claim about state this machine does not
-	// have.
-	if existing == nil {
-		if err := writeBinding(bindingPath, proposed); err != nil {
-			return err
-		}
-	}
-
-	fmt.Print(renderMatchImported(matchID, item.SwapID))
-
-	return nil
-}
-
-// repeatMatch describes a match whose swap already exists locally.
-type repeatMatch struct {
-	MatchID string
-	Item    *marketflow.ParsedMatch
-	Bob     string
-	Record  *model.Swap
-	Store   store.Store
-	Binding map[string]any
-	Path    string
-	Write   map[string]any
-}
-
-// repeatAcceptMarketMatch finishes an import that was already done, or repairs it.
-//
-// Bob's record must agree with the match on every identity and on the trade, because
-// those are the facts the binding is supposed to preserve. A missing binding is the one
-// gap that is repaired: a crash between the two writes leaves a valid swap and no
-// receipt, and refusing that would make the swap unusable.
-func repeatAcceptMarketMatch(ctx context.Context, req repeatMatch) error {
-	record := req.Record
-	item := req.Item
-
-	if record.NostrAlicePub == nil || *record.NostrAlicePub != item.Maker {
-		return fmt.Errorf("SECURITY FAILURE: existing Bob swap has different Alice identity")
-	}
-
-	if record.NostrBobPub == nil {
-		if err := pinBob(ctx, req.Store, record, req.Bob); err != nil {
-			return err
-		}
-	} else if *record.NostrBobPub != req.Bob {
-		return fmt.Errorf("SECURITY FAILURE: existing Bob swap has different Bob identity")
-	}
-
-	if record.BlakeAmount() != item.BlakeAmount {
-		return fmt.Errorf("SECURITY FAILURE: existing Bob swap has different BLAKE terms")
-	}
-
-	if record.BTCSats != item.BTCSats {
-		return fmt.Errorf("SECURITY FAILURE: existing Bob swap has different BTC terms")
-	}
-
-	if req.Binding == nil {
-		if err := writeBinding(req.Path, req.Write); err != nil {
-			return err
-		}
-	}
-
-	fmt.Print(renderMatchAlreadyImported(req.MatchID, item.SwapID))
-
-	return nil
+	return err
 }
 
 // pinBob records Bob's authenticated identity on his own swap.
@@ -328,61 +197,6 @@ func writeBinding(path string, binding map[string]any) error {
 	}
 
 	return writeAtomically(path, append(encoded, '\n'))
-}
-
-// matchBindingConflict refuses a binding that describes a different negotiation.
-func matchBindingConflict(existing, proposed map[string]any) error {
-	for _, key := range []string{
-		"offer_id", "take_id", "swap_id", "maker", "taker", "blake_amount", "btc_sats",
-	} {
-		if _, ok := existing[key]; !ok {
-			return fmt.Errorf("Existing market match binding is malformed")
-		}
-	}
-
-	for _, key := range []string{"offer_id", "take_id", "swap_id", "maker", "taker"} {
-		if fmt.Sprint(existing[key]) != fmt.Sprint(proposed[key]) {
-			return fmt.Errorf(
-				"SECURITY FAILURE: existing market match binding disagrees with validated match",
-			)
-		}
-	}
-
-	if asFloat(existing["blake_amount"]) != asFloat(proposed["blake_amount"]) {
-		return fmt.Errorf(
-			"SECURITY FAILURE: existing market match binding disagrees with validated match",
-		)
-	}
-
-	if asFloat(existing["btc_sats"]) != asFloat(proposed["btc_sats"]) {
-		return fmt.Errorf(
-			"SECURITY FAILURE: existing market match binding disagrees with validated match",
-		)
-	}
-
-	return nil
-}
-
-// asFloat reads a JSON number, which is how both amounts are stored.
-func asFloat(value any) float64 {
-	switch typed := value.(type) {
-	case float64:
-		return typed
-	case json.Number:
-		parsed, err := typed.Float64()
-
-		if err != nil {
-			return math.NaN()
-		}
-
-		return parsed
-	case int64:
-		return float64(typed)
-	case int:
-		return float64(typed)
-	}
-
-	return math.NaN()
 }
 
 // renderMatchImported is the reference's confirmation for a fresh import.

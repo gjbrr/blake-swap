@@ -4,11 +4,13 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/gjbrr/blake-swap/pkg/amount"
 	"github.com/gjbrr/blake-swap/pkg/chain"
 	"github.com/gjbrr/blake-swap/pkg/contract"
 	"github.com/gjbrr/blake-swap/pkg/fund"
 	"github.com/gjbrr/blake-swap/pkg/reconcile"
 	"github.com/gjbrr/blake-swap/pkg/state"
+	"github.com/gjbrr/blake-swap/pkg/store"
 )
 
 // RecoveryPlan reports how to recover an HTLC whose keys this wallet no longer
@@ -145,6 +147,10 @@ func deref(value *string) string {
 }
 
 // DashboardEntry is one swap's line in the dashboard.
+//
+// It carries the facts a UI shows rather than only the label it shows them under: the
+// browser and the terminal render the same document, and a client that had to re-derive
+// the roles or the amounts from the record would be a second opinion about the protocol.
 type DashboardEntry struct {
 	SwapID string
 	State  state.State
@@ -156,6 +162,25 @@ type DashboardEntry struct {
 	Reason string
 	// Failed records that the report could not be built.
 	Failed bool
+
+	// Role is the protocol role this participant holds in this swap.
+	Role reconcile.Role
+	// BlakeStatus and BTCStatus are the two chains' observations.
+	BlakeStatus reconcile.Status
+	BTCStatus   reconcile.Status
+	// BlakeAmount and BTCSats are the agreed trade.
+	BlakeAmount amount.Blake
+	BTCSats     int64
+	// TxIDs are the six settlement anchors, empty when unset.
+	TxIDs map[string]string
+}
+
+// Dashboard is the whole summary, classified the way the dashboard displays it.
+type Dashboard struct {
+	Active    []DashboardEntry
+	Attention []DashboardEntry
+	Settled   []DashboardEntry
+	Archived  []DashboardEntry
 }
 
 // Dashboard summarises every local swap.
@@ -191,6 +216,19 @@ func (e *Engine) Dashboard(ctx context.Context) ([]DashboardEntry, error) {
 		entry.Action = report.NextAction
 		entry.Reason = report.Reason
 		entry.Outcome = outcomeLabel(record.State, report)
+		entry.Role = report.ProtocolRole
+		entry.BlakeStatus = report.Blake.Status
+		entry.BTCStatus = report.BTC.Status
+		entry.BlakeAmount = record.BlakeAmount()
+		entry.BTCSats = record.BTCSats
+		entry.TxIDs = map[string]string{
+			"blake_funding_txid": deref(record.BlakeFundingTxID),
+			"btc_funding_txid":   deref(record.BTCFundingTxID),
+			"btc_claim_txid":     deref(record.BTCCLaimTxID),
+			"blake_claim_txid":   deref(record.BlakeClaimTxID),
+			"btc_refund_txid":    deref(record.BTCRefundTxID),
+			"blake_refund_txid":  deref(record.BlakeRefundTxID),
+		}
 
 		entries = append(entries, entry)
 	}
@@ -245,6 +283,63 @@ func outcomeLabel(current state.State, report *reconcile.Report) string {
 	}
 
 	return fmt.Sprint(report.NextAction)
+}
+
+// Classify sorts dashboard entries into the view's three live groups.
+//
+// The classification is the decision class, not the state: a swap whose reconciliation says
+// it needs a person does not become active because its record still says BTC_FUNDED, and a
+// settled swap does not become active because it is not COMPLETE.
+func Classify(entries []DashboardEntry) Dashboard {
+	summary := Dashboard{
+		Active:    make([]DashboardEntry, 0, len(entries)),
+		Attention: make([]DashboardEntry, 0, 2),
+		Settled:   make([]DashboardEntry, 0, 2),
+	}
+
+	for _, entry := range entries {
+		switch {
+		case entry.Failed || entry.Class == reconcile.ClassManualAttention:
+			summary.Attention = append(summary.Attention, entry)
+		case entry.Class == reconcile.ClassSettled:
+			summary.Settled = append(summary.Settled, entry)
+		default:
+			summary.Active = append(summary.Active, entry)
+		}
+	}
+
+	return summary
+}
+
+// Archive lists the retired records the dashboard shows.
+//
+// A store that cannot enumerate its archive reports none rather than failing: the dashboard
+// is a summary, and an older store is not a reason to refuse to show the live swaps.
+func (e *Engine) Archive(ctx context.Context) []DashboardEntry {
+	reader, ok := e.Store.(store.ArchiveReader)
+
+	if !ok {
+		return nil
+	}
+
+	records, err := reader.Archived(ctx)
+
+	if err != nil {
+		return nil
+	}
+
+	entries := make([]DashboardEntry, 0, len(records))
+
+	for _, record := range records {
+		entries = append(entries, DashboardEntry{
+			SwapID:      record.SwapID,
+			State:       record.State,
+			BlakeAmount: record.BlakeAmount(),
+			BTCSats:     record.BTCSats,
+		})
+	}
+
+	return entries
 }
 
 // ResumeAll resumes every swap that has an action, and reports what happened.

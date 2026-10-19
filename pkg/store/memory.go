@@ -276,3 +276,31 @@ func decodeMessage(data []byte, kind string) (*Message, error) {
 
 	return nil, fmt.Errorf("invalid transport message: no body")
 }
+
+// Archived implements ArchiveReader.
+func (m *Memory) Archived(_ context.Context) ([]*model.Swap, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	names := make([]string, 0, len(m.archived))
+
+	for name := range m.archived {
+		names = append(names, name)
+	}
+
+	sort.Strings(names)
+
+	records := make([]*model.Swap, 0, len(names))
+
+	for _, name := range names {
+		record, err := decodeSwap(m.archived[name], nil)
+
+		if err != nil {
+			continue
+		}
+
+		records = append(records, record)
+	}
+
+	return records, nil
+}

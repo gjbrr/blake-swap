@@ -276,7 +276,7 @@ func run(ctx context.Context, engine *swap.Engine, command string, args []string
 	case "sync-settlement":
 		return runSync(ctx, engine, args, engine.SyncSettlement, "SETTLEMENT")
 	case "dashboard":
-		return runDashboard(ctx, engine)
+		return runDashboard(ctx, engine, args)
 	case "resume-all":
 		return runResumeAll(ctx, engine)
 	}
@@ -1497,29 +1497,211 @@ func runSync(
 }
 
 // runDashboard summarises every local swap.
-func runDashboard(ctx context.Context, engine *swap.Engine) error {
+func runDashboard(ctx context.Context, engine *swap.Engine, args []string) error {
+	flags := flag.NewFlagSet("dashboard", flag.ContinueOnError)
+
+	asJSON := flags.Bool("json", false, "emit the machine-readable dashboard")
+
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+
 	entries, err := engine.Dashboard(ctx)
 
 	if err != nil {
 		return err
 	}
 
-	fmt.Println()
-	fmt.Println("SWAP DASHBOARD")
-	fmt.Println("==============")
+	summary := swap.Classify(entries)
+	summary.Archived = engine.Archive(ctx)
 
-	if len(entries) == 0 {
-		fmt.Println("No swaps.")
+	if *asJSON {
+		encoded, err := json.MarshalIndent(dashboardJSON(summary), "", "  ")
+
+		if err != nil {
+			return err
+		}
+
+		fmt.Println(string(encoded))
 
 		return nil
 	}
 
-	for _, entry := range entries {
-		fmt.Printf("%s  %-14s %-22s %s\n",
-			entry.SwapID, entry.State, entry.Outcome, entry.Action)
-	}
+	fmt.Print(renderDashboard(summary))
 
 	return nil
+}
+
+// dashboardJSON is the reference's dashboard document.
+//
+// A dashboard is read by things other than people — a widget, a monitor, a script that
+// alerts on "needs attention" — so its shape is a contract and every field is named once,
+// here, rather than by whoever prints it.
+func dashboardJSON(summary swap.Dashboard) map[string]any {
+	item := func(entry swap.DashboardEntry) map[string]any {
+		return map[string]any{
+			"swap_id":        entry.SwapID,
+			"state":          string(entry.State),
+			"protocol_role":  string(entry.Role),
+			"decision_class": string(entry.Class),
+			"next_action":    string(entry.Action),
+			"reason":         entry.Reason,
+			"status":         entry.Outcome,
+			"action":         dashboardActionText(entry.Action),
+			"trade": map[string]any{
+				// Both amounts, as everywhere else: a UI wants the display value and a
+				// settlement wants the exact base units.
+				"blake_amount":            dashboardFloat(entry.BlakeAmount),
+				"blake_amount_base_units": int64(entry.BlakeAmount),
+				"btc_sats":                entry.BTCSats,
+			},
+			"chains": map[string]any{
+				"blake_status": string(entry.BlakeStatus),
+				"btc_status":   string(entry.BTCStatus),
+				// Solvability is not part of the record: it is a question put to the
+				// wallets, so a dashboard that reports it must have asked them.
+				"blake_solvable": nil,
+				"btc_solvable":   nil,
+			},
+			"transactions": map[string]any{
+				"blake_funding_txid": nilOrValue(entry.TxIDs["blake_funding_txid"]),
+				"btc_funding_txid":   nilOrValue(entry.TxIDs["btc_funding_txid"]),
+				"btc_claim_txid":     nilOrValue(entry.TxIDs["btc_claim_txid"]),
+				"blake_claim_txid":   nilOrValue(entry.TxIDs["blake_claim_txid"]),
+				"btc_refund_txid":    nilOrValue(entry.TxIDs["btc_refund_txid"]),
+				"blake_refund_txid":  nilOrValue(entry.TxIDs["blake_refund_txid"]),
+			},
+		}
+	}
+
+	items := func(entries []swap.DashboardEntry) []map[string]any {
+		out := make([]map[string]any, 0, len(entries))
+
+		for _, entry := range entries {
+			out = append(out, item(entry))
+		}
+
+		return out
+	}
+
+	archived := make([]map[string]any, 0, len(summary.Archived))
+
+	for _, entry := range summary.Archived {
+		archived = append(archived, map[string]any{
+			"swap_id":      entry.SwapID,
+			"state":        string(entry.State),
+			"blake_amount": dashboardFloat(entry.BlakeAmount),
+			"btc_sats":     entry.BTCSats,
+		})
+	}
+
+	return map[string]any{
+		"version":   1,
+		"active":    items(summary.Active),
+		"attention": items(summary.Attention),
+		"settled":   items(summary.Settled),
+		"archived":  archived,
+		"summary": map[string]any{
+			"active":    len(summary.Active),
+			"attention": len(summary.Attention),
+			"settled":   len(summary.Settled),
+			"archived":  len(summary.Archived),
+		},
+	}
+}
+
+// nilOrValue keeps "this swap has no such transaction" and "it has an empty one" distinct.
+//
+// The reference writes null for an absent transaction, and a client that received an empty
+// string would have to guess which of the two it was.
+func nilOrValue(value string) any {
+	if value == "" {
+		return nil
+	}
+
+	return value
+}
+
+// dashboardFloat is the display value of a BLAKE amount, as a float.
+func dashboardFloat(value amount.Blake) float64 {
+	return blakeFloat(value)
+}
+
+// dashboardActionText is the command a person would run for an action.
+func dashboardActionText(action reconcile.Action) string {
+	switch action {
+	case reconcile.ActionSyncFunding, reconcile.ActionSyncSettlement,
+		reconcile.ActionComplete, reconcile.ActionFundBTC, reconcile.ActionClaimBTC,
+		reconcile.ActionClaimBlake, reconcile.ActionRefundBTC, reconcile.ActionRefundBlake:
+		return "run resume"
+	case reconcile.ActionFundBlake:
+		return "run fund"
+	case reconcile.ActionWait:
+		return "wait"
+	case reconcile.ActionManualAttention:
+		return "inspect"
+	case reconcile.ActionNone, "":
+		return "-"
+	}
+
+	return string(action)
+}
+
+// renderDashboard is the reference's human view: three sections and an archive count.
+func renderDashboard(summary swap.Dashboard) string {
+	var out strings.Builder
+
+	out.WriteString("\n")
+	out.WriteString("BLAKE SWAP DASHBOARD\n")
+	out.WriteString("====================\n")
+
+	out.WriteString("\nACTIVE\n------\n")
+
+	if len(summary.Active) == 0 {
+		out.WriteString("No active swaps.\n")
+	} else {
+		out.WriteString("Swap          Status                    Action       Trade\n")
+		out.WriteString("------------  ------------------------  -----------  -------------------------\n")
+
+		for _, entry := range summary.Active {
+			fmt.Fprintf(&out, "%-12s  %-24s  %-11s  %s\n",
+				entry.SwapID, entry.Outcome, dashboardActionText(entry.Action),
+				tradeText(entry),
+			)
+		}
+	}
+
+	out.WriteString("\nNEEDS ATTENTION\n---------------\n")
+
+	if len(summary.Attention) == 0 {
+		out.WriteString("No swaps need manual attention.\n")
+	} else {
+		for _, entry := range summary.Attention {
+			fmt.Fprintf(&out, "%s  %s  %s\n", entry.SwapID, entry.Outcome, entry.Reason)
+		}
+	}
+
+	out.WriteString("\nSETTLED\n-------\n")
+
+	if len(summary.Settled) == 0 {
+		out.WriteString("No settled swaps.\n")
+	} else {
+		for _, entry := range summary.Settled {
+			fmt.Fprintf(&out, "%s  %s  %s\n", entry.SwapID, entry.Outcome, tradeText(entry))
+		}
+	}
+
+	if len(summary.Archived) > 0 {
+		fmt.Fprintf(&out, "\nARCHIVED\n--------\n%d archived swap(s)\n", len(summary.Archived))
+	}
+
+	return out.String()
+}
+
+// tradeText is the trade as one line.
+func tradeText(entry swap.DashboardEntry) string {
+	return pythonFloat(blakeFloat(entry.BlakeAmount)) + " BLAKE / " +
+		thousands(entry.BTCSats) + " sats"
 }
 
 // runResumeAll resumes every swap that has an action.

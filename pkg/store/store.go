@@ -260,3 +260,13 @@ func ArchiveSuperseded(ctx context.Context, st Store, keepSwapID, role string) (
 
 	return archived, nil
 }
+
+// ArchiveReader is a store that can list what it retired.
+//
+// It is separate from Store because only the dashboard needs to enumerate the archive:
+// every other command works on live records, and forcing a browser store to materialise a
+// retired list it never reads would be a cost for a question nobody asked.
+type ArchiveReader interface {
+	// Archived returns the retired records, in swap-id order.
+	Archived(ctx context.Context) ([]*model.Swap, error)
+}

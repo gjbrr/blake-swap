@@ -344,3 +344,54 @@ func syncDir(directory string) error {
 
 	return nil
 }
+
+// Archived implements ArchiveReader.
+//
+// A record that cannot be read is skipped rather than failing the listing: the dashboard is
+// a summary, and an archive entry written by an older version should not stop an operator
+// from seeing the swaps that do load.
+func (f *File) Archived(_ context.Context) ([]*model.Swap, error) {
+	directory := filepath.Join(f.base, "archive")
+
+	entries, err := os.ReadDir(directory)
+
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+
+	if err != nil {
+		return nil, err
+	}
+
+	names := make([]string, 0, len(entries))
+
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+
+		names = append(names, entry.Name())
+	}
+
+	sort.Strings(names)
+
+	records := make([]*model.Swap, 0, len(names))
+
+	for _, name := range names {
+		data, err := os.ReadFile(filepath.Join(directory, name))
+
+		if err != nil {
+			continue
+		}
+
+		record, err := decodeSwap(data, nil)
+
+		if err != nil {
+			continue
+		}
+
+		records = append(records, record)
+	}
+
+	return records, nil
+}

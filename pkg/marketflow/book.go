@@ -1,6 +1,7 @@
 package marketflow
 
 import (
+	"encoding/json"
 	"sort"
 	"time"
 
@@ -210,7 +211,109 @@ func TakesFor(offer *ListedOffer, evidence []event.Event, now time.Time) []TakeE
 			return entries[i].Event.CreatedAt > entries[j].Event.CreatedAt
 		}
 
-		return entries[i].EventID > entries[j].EventID
+		return entries[i].Event.ID > entries[j].Event.ID
+	})
+
+	return entries
+}
+
+// MatchEntry is one verified match, with the events it binds.
+type MatchEntry struct {
+	// Event is the signed match.
+	Event event.Event
+	// Match is its verified content, cross-checked against both referenced events.
+	Match ParsedMatch
+	// Offer and Take are the events it names.
+	Offer event.Event
+	Take  event.Event
+}
+
+// MatchesFor returns the verified matches that name this participant, newest first.
+//
+// A match introduces no new claims: everything in it can be re-derived from the offer
+// and tak it names, and ParseMatch re-derives all of it. So a match is only evidence
+// when *both* referenced events are present and valid, which is why this resolves them
+// from the evidence set and drops a match that cannot be resolved rather than reporting
+// it unverified.
+//
+// Nothing is fetched here. The caller decides where evidence comes from, so a relay read
+// and a cache merge are the same call.
+func MatchesFor(participant string, evidence []event.Event, now time.Time) []MatchEntry {
+	if participant == "" {
+		return nil
+	}
+
+	if now.IsZero() {
+		now = time.Now()
+	}
+
+	byID := make(map[string]event.Event, len(evidence))
+
+	for _, e := range evidence {
+		if e.ID != "" {
+			byID[e.ID] = e
+		}
+	}
+
+	seen := map[string]bool{}
+	entries := make([]MatchEntry, 0, len(evidence))
+
+	for _, candidate := range evidence {
+		if candidate.ID == "" || seen[candidate.ID] {
+			continue
+		}
+
+		if !candidate.HasTag("t", MatchTag) {
+			continue
+		}
+
+		var message map[string]any
+
+		if err := json.Unmarshal([]byte(candidate.Content), &message); err != nil {
+			continue
+		}
+
+		offerID, _ := message["offer_id"].(string)
+		takeID, _ := message["take_id"].(string)
+
+		offerEvent, ok := byID[offerID]
+
+		if !ok {
+			continue
+		}
+
+		takeEvent, ok := byID[takeID]
+
+		if !ok {
+			continue
+		}
+
+		parsed, err := ParseMatch(candidate, offerEvent, takeEvent, now)
+
+		if err != nil {
+			continue
+		}
+
+		if parsed.Maker != participant && parsed.Taker != participant {
+			continue
+		}
+
+		seen[candidate.ID] = true
+
+		entries = append(entries, MatchEntry{
+			Event: candidate,
+			Match: *parsed,
+			Offer: offerEvent,
+			Take:  takeEvent,
+		})
+	}
+
+	sort.SliceStable(entries, func(i, j int) bool {
+		if entries[i].Event.CreatedAt != entries[j].Event.CreatedAt {
+			return entries[i].Event.CreatedAt > entries[j].Event.CreatedAt
+		}
+
+		return entries[i].Event.ID > entries[j].Event.ID
 	})
 
 	return entries

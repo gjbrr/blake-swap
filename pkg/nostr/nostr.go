@@ -418,6 +418,9 @@ type Filter struct {
 	// ETags selects events referencing given event ids. It is how every reply to one
 	// offer is asked for: a take names the offer it accepts in its `e` tag.
 	ETags []string
+	// PTags selects events addressing given public keys. A match addresses the taker
+	// this way, which is how one participant's inbox is asked for.
+	PTags []string
 	DTags []string
 	// Topics selects the `#t` tags. A market read is selected this way: an offer,
 	// a cancellation and a match are all kind 1 and are told apart by their topic.
@@ -441,6 +444,10 @@ func (f Filter) request() map[string]any {
 
 	if len(f.ETags) > 0 {
 		object["#e"] = f.ETags
+	}
+
+	if len(f.PTags) > 0 {
+		object["#p"] = f.PTags
 	}
 
 	if len(f.DTags) > 0 {

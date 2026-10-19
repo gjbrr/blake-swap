@@ -140,6 +140,8 @@ func run(ctx context.Context, engine *swap.Engine, command string, args []string
 		return runMarketTakes(ctx, engine, args)
 	case "rebroadcast-nostr-event":
 		return runRebroadcastNostrEvent(ctx, args)
+	case "market-matches":
+		return runMarketMatches(ctx, engine, args)
 	case "new":
 		return runNew(ctx, engine, args)
 	case "show":

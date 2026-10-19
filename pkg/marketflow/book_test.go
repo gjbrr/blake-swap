@@ -374,6 +374,17 @@ func resignTake(t *testing.T, original event.Event, secret string, rewrite func(
 	forged := original
 	forged.Content = rewrite(forged.Content)
 
+	// A forger signs as themselves, so the event names their key and hashes to a
+	// different id. Keeping the original pubkey would fail at signing time, which would
+	// test the signer rather than the resolver.
+	identity, err := nostr.NewKey(secret)
+
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	forged.Pubkey = identity.PublicKey()
+
 	id, err := forged.ComputeID()
 
 	if err != nil {
@@ -415,5 +426,88 @@ func TestTakesForRejectsATakeThatChangesTheTerms(t *testing.T) {
 
 	if len(takes) != 1 || takes[0].EventID != f.takeEvent.ID {
 		t.Fatalf("a take that changed the terms was accepted: %+v", takes)
+	}
+}
+
+// TestMatchesForResolvesBothReferencedEvents: a match is evidence only with the offer
+// and take it names, so it is resolved from the evidence set and cross-checked.
+func TestMatchesForResolvesBothReferencedEvents(t *testing.T) {
+	f := buildStateFixture(t)
+	match := matchFor(t, f)
+	now := time.Unix(bookNow, 0)
+
+	// A second, later match, so the newest-first order is a property the test checks
+	// rather than one it happens to agree with.
+	later, _, err := BuildMatch(maker(t), BuildMatchOptions{
+		Offer:       f.offer,
+		OfferEvent:  f.offerEvent,
+		TakeEvent:   f.takeEvent,
+		Taker:       &f.take,
+		SwapID:      "aaaa00000002",
+		BlakeAmount: f.offer.BlakeAmount,
+		BTCSats:     f.offer.BTCSats,
+		CreatedAt:   1_700_000_350,
+	})
+
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, participant := range []string{f.offerEvent.Pubkey, f.takeEvent.Pubkey} {
+		matches := MatchesFor(participant, []event.Event{f.offerEvent, f.takeEvent, match, later}, now)
+
+		if len(matches) != 2 {
+			t.Fatalf("matches for %s = %d, want 2", participant[:8], len(matches))
+		}
+
+		if matches[0].Event.ID != later.ID || matches[1].Event.ID != match.ID {
+			t.Fatalf("order = %q, %q; want newest first", matches[0].Event.ID, matches[1].Event.ID)
+		}
+
+		if matches[1].Match.SwapID != "aaaa00000001" {
+			t.Fatalf("swap id = %q", matches[1].Match.SwapID)
+		}
+	}
+}
+
+// TestMatchesForDropsAMatchItCannotResolve: without both referenced events a match is a
+// claim about a match, not evidence of one.
+func TestMatchesForDropsAMatchItCannotResolve(t *testing.T) {
+	f := buildStateFixture(t)
+	match := matchFor(t, f)
+	now := time.Unix(bookNow, 0)
+
+	participants := []string{f.offerEvent.Pubkey, f.takeEvent.Pubkey}
+
+	for _, evidence := range [][]event.Event{
+		{match},               // neither referenced event present
+		{f.offerEvent, match}, // the take is missing
+		{f.takeEvent, match},  // the offer is missing
+	} {
+		for _, participant := range participants {
+			if matches := MatchesFor(participant, evidence, now); len(matches) != 0 {
+				t.Fatalf("an unresolvable match was reported: %+v", matches)
+			}
+		}
+	}
+}
+
+// TestMatchesForIgnoresOtherParticipantsAndForgedSigners: the inbox is addressed, and a
+// match that is not signed by the offer's maker is not a match.
+func TestMatchesForIgnoresOtherParticipantsAndForgedSigners(t *testing.T) {
+	f := buildStateFixture(t)
+	match := matchFor(t, f)
+	now := time.Unix(bookNow, 0)
+	evidence := []event.Event{f.offerEvent, f.takeEvent, match}
+
+	if matches := MatchesFor(strings.Repeat("99", 32), evidence, now); len(matches) != 0 {
+		t.Fatalf("a stranger's inbox listed a match: %+v", matches)
+	}
+
+	// A match with the right shape, signed by the taker instead of the maker.
+	forged := resignTake(t, match, strings.Repeat("22", 32), func(content string) string { return content })
+
+	if matches := MatchesFor(f.takeEvent.Pubkey, []event.Event{f.offerEvent, f.takeEvent, forged}, now); len(matches) != 0 {
+		t.Fatalf("a match signed by the taker was accepted: %+v", matches)
 	}
 }

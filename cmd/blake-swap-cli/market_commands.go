@@ -32,7 +32,8 @@ const (
 // demands a datadir for those would be a worse tool for no reason.
 func isIdentityOnlyCommand(command string) bool {
 	switch command {
-	case "cancel-market-offer", "inspect-market-take", "market-takes", "rebroadcast-nostr-event":
+	case "cancel-market-offer", "inspect-market-take", "market-takes", "market-matches",
+		"rebroadcast-nostr-event":
 		return true
 	}
 

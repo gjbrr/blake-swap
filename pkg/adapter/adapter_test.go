@@ -53,6 +53,7 @@ func loadFixture(t *testing.T) fixture {
 
 // TestContractMatchesTheReferenceFixture: the protocol string, the operations, the roles and
 // the portable field set are all read from the reference's document.
+// Parity: tests/implementation_adapter_tests.py, tests/moxie_adapter_smoke_tests.py
 func TestContractMatchesTheReferenceFixture(t *testing.T) {
 	document := loadFixture(t)
 

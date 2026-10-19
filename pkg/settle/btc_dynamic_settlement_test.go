@@ -30,6 +30,7 @@ func dynamicNode() *fakeNode {
 
 // TestBTCDynamicSettlementConvergesToTheMeasuredFee: the builder measures, recomputes and
 // rebuilds, and settles on the fee the measurement actually justifies.
+// Parity: tests/btc_dynamic_settlement_tests.py
 func TestBTCDynamicSettlementConvergesToTheMeasuredFee(t *testing.T) {
 	node := dynamicNode()
 

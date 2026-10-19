@@ -32,6 +32,7 @@ func pythonEvent() Event {
 	}
 }
 
+// Parity: tests/fail_closed_tests.py
 func TestEventIDMatchesPython(t *testing.T) {
 	id, err := pythonEvent().ComputeID()
 

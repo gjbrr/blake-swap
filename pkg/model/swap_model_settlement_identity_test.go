@@ -38,6 +38,7 @@ func settlementSwap(t *testing.T) *Swap {
 
 // TestSwapModelSettlementIdentityAcceptsALegacyRecord: a record from before signed hex was
 // stored is still a valid record — the absence of evidence is not a false claim.
+// Parity: tests/swap_model_settlement_identity_tests.py
 func TestSwapModelSettlementIdentityAcceptsALegacyRecord(t *testing.T) {
 	if err := settlementSwap(t).Validate(); err != nil {
 		t.Fatalf("a record without signed hex was refused: %v", err)

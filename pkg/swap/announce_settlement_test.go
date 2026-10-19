@@ -51,6 +51,7 @@ func secretClaimNode(record *model.Swap, fixture *claimFixture) *mempoolNode {
 
 // TestExtractSecretReadsThePreimageFromTheChain is the only way Bob learns the
 // secret: it is published on Bitcoin, not in a message.
+// Parity: tests/production_settlement_pending_tests.py
 func TestExtractSecretReadsThePreimageFromTheChain(t *testing.T) {
 	ctx := context.Background()
 	st := store.NewMemory()

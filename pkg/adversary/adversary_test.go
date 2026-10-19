@@ -18,6 +18,7 @@ import (
 // These values are the corpus. If this port derived a different schedule from seed 4, a run
 // that called itself the same corpus would be injecting different faults — and the agreement
 // between implementations would be a coincidence rather than a property.
+// Parity: tests/swap_seeded_adversarial_tests.py
 func TestSeededAdversarialSchedulesMatchTheReference(t *testing.T) {
 	type expected struct {
 		primary   string

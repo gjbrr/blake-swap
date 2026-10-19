@@ -193,6 +193,7 @@ func (w *fakeWallet) Decode(context.Context, string) (*chain.Tx, error) {
 // for: paying more removes an output, which lowers the requirement, which puts
 // it back. Equality is never reached, and demanding it turned a good settlement
 // into a happy-path failure.
+// Parity: tests/dynamic_settlement_builder_tests.py
 func TestBuildConvergesAcrossADustCycle(t *testing.T) {
 	node := newFakeNode(100_000)
 

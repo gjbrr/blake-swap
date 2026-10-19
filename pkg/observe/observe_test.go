@@ -371,6 +371,7 @@ func observeFake(t *testing.T, node *fakeNode, swap *model.Swap, ch chain.Chain)
 // TestObserveReportsEachState walks the vocabulary. Every status is what the
 // engine branches on, so every one of them has to be reachable, and reachable
 // for the stated reason.
+// Parity: tests/swap_bounded_scan_tests.py
 func TestObserveReportsEachState(t *testing.T) {
 	t.Run("funded", func(t *testing.T) {
 		node, swap, _ := fundedSwap(t, chain.BTC)

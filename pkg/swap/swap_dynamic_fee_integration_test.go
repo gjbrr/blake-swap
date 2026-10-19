@@ -55,6 +55,7 @@ func clearFeeEnvironment(t *testing.T) {
 
 // TestSwapDynamicFeeIntegrationTradeMinimum: 200 vB at 1.19 sat/vB is 238 sats, so the smallest
 // trade worth advertising is 239 — one satoshi above the cost of settling it.
+// Parity: tests/swap_dynamic_fee_integration_tests.py
 func TestSwapDynamicFeeIntegrationTradeMinimum(t *testing.T) {
 	clearFeeEnvironment(t)
 

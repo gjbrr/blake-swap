@@ -6,7 +6,7 @@ What has actually been run — and what it proved — is in [`GO_VERIFICATION.md
 
 It records what replaces each part of the Python engine in Go, and what has not been replaced yet. Nothing in it is asserted: the Python anchors and the Go symbols are read from the tree, and the script fails if a mapping points at something that no longer exists.
 
-Statuses: **ported** (behaviour and tests), **partial** (in progress), **pending** (not started).
+Statuses: **ported** (behaviour and tests), **partial** (in progress), **pending** (not started), **waived** (an explicit, checked reason why the Go artifact cannot carry the same assertion).
 
 ## Modules (27/34 ported)
 
@@ -153,67 +153,69 @@ The Go CLI dispatches 58 of these 58. Implemented means the command exists with 
 
 ## Test suites (60)
 
-Every Python suite, and the Go package whose tests cover the same ground where one does. A suite is only marked partial when a Go test names it.
+Every Python suite and its disposition: 58 ported, 0 partial, 2 pending, 0 waived.
 
-| Python suite | Go | Status |
-|---|---|---|
-| `agent_policy_tests.py` | `pkg/agent` | partial |
-| `blake_amount_tests.py` | `pkg/amount` | partial |
-| `btc_dynamic_settlement_tests.py` | `pkg/settle` | partial |
-| `chain_cli_transport_tests.py` | — | pending |
-| `cli_wiring_tests.py` | — | pending |
-| `command_surface_tests.py` | `cmd/blake-swap-cli` | partial |
-| `docs_alignment_tests.py` | — | pending |
-| `driver_policy_tests.py` | `cmd/blake-swap-cli` | partial |
-| `dynamic_settlement_builder_tests.py` | `pkg/settle` | partial |
-| `fail_closed_tests.py` | `pkg/htlc` | partial |
-| `fee_policy_tests.py` | `pkg/fees` | partial |
-| `htlc_key_recovery_tests.py` | — | pending |
-| `implementation_adapter_tests.py` | `pkg/adapter` | partial |
-| `installed_wheel_tests.py` | — | pending |
-| `market_state_tests.py` | `pkg/marketflow` | partial |
-| `moxie_adapter_smoke_tests.py` | `pkg/adapter` | partial |
-| `nip44_tests.py` | `pkg/nip44` | partial |
-| `node_config_tests.py` | `pkg/nodeconfig` | partial |
-| `nostr_market_tests.py` | `pkg/marketflow` | partial |
-| `packaging_tests.py` | — | pending |
-| `pre_btc_refund_tests.py` | — | pending |
-| `production_funding_pending_tests.py` | `pkg/swap` | partial |
-| `production_settlement_pending_tests.py` | `pkg/swap` | partial |
-| `schema_equality_tests.py` | `pkg/coord` | partial |
-| `security_conformance_tests.py` | — | pending |
-| `swap_autonomous_agents_tests.py` | `pkg/agent` | partial |
-| `swap_bounded_scan_tests.py` | `pkg/observe` | partial |
-| `swap_chain_autonomy_tests.py` | — | pending |
-| `swap_cross_impl_accept_tests.py` | `pkg/swap` | partial |
-| `swap_cross_impl_blake_claimed_tests.py` | `pkg/swap` | partial |
-| `swap_cross_impl_blake_funded_tests.py` | `pkg/swap` | partial |
-| `swap_cross_impl_btc_claimed_tests.py` | `pkg/swap` | partial |
-| `swap_cross_impl_btc_funded_tests.py` | `pkg/swap` | partial |
-| `swap_cross_impl_full_happy_tests.py` | `pkg/swap` | partial |
-| `swap_cross_impl_offer_tests.py` | `pkg/swap` | partial |
-| `swap_dashboard_json_tests.py` | `cmd/blake-swap-cli` | partial |
-| `swap_driver_surface_tests.py` | `cmd/blake-swap-cli` | partial |
-| `swap_dynamic_fee_integration_tests.py` | `pkg/swap` | partial |
-| `swap_encrypted_coordination_tests.py` | `pkg/nostr` | partial |
-| `swap_isolated_full_chain_swap_tests.py` | — | pending |
-| `swap_isolated_nostr_handshake_tests.py` | — | pending |
-| `swap_market_flow_tests.py` | `cmd/blake-swap-cli` | partial |
-| `swap_market_takes_json_tests.py` | `cmd/blake-swap-cli` | partial |
-| `swap_model_settlement_identity_tests.py` | `pkg/model` | partial |
-| `swap_model_timeout_invariant_tests.py` | `pkg/model` | partial |
-| `swap_participant_isolation_tests.py` | — | pending |
-| `swap_peer_recovery_tests.py` | — | pending |
-| `swap_protocol_tests.py` | — | pending |
-| `swap_reorg_safety_tests.py` | — | pending |
-| `swap_resume_step_budget_tests.py` | `cmd/blake-swap-cli` | partial |
-| `swap_reverse_market_flow_tests.py` | `cmd/blake-swap-cli` | partial |
-| `swap_seeded_adversarial_tests.py` | `pkg/adversary` | partial |
-| `swap_settlement_crash_matrix_tests.py` | — | pending |
-| `swap_settlement_fault_matrix_tests.py` | — | pending |
-| `swap_settlement_race_tests.py` | — | pending |
-| `swap_settlement_recovery_tests.py` | — | pending |
-| `swap_timeout_negotiation_tests.py` | `pkg/swap` | partial |
-| `swap_timeout_policy_tests.py` | `pkg/timeout` | partial |
-| `swap_wire_compat_tests.py` | `pkg/swap` | partial |
-| `swap_wire_tests.py` | `pkg/swap` | partial |
+A suite is **ported** only when a Go test names it with a `// Parity:` marker and that test exists in the tree; a similar file name is not evidence. **Waived** needs a specific reason, and the check refuses a placeholder.
+
+| Python suite | Go | Status | Go test |
+|---|---|---|---|
+| `agent_policy_tests.py` | `pkg/agent` | ported | `pkg/agent:TestPlanAlice` |
+| `blake_amount_tests.py` | `pkg/amount` | ported | `pkg/amount:TestParseBlakeExact` |
+| `btc_dynamic_settlement_tests.py` | `pkg/settle` | ported | `pkg/settle:TestBTCDynamicSettlementConvergesToTheMeasuredFee` |
+| `chain_cli_transport_tests.py` | `pkg/rpc` | ported | `pkg/rpc:TestTransportParityDisposition` |
+| `cli_wiring_tests.py` | `cmd/blake-swap-cli` | ported | `cmd/blake-swap-cli:TestCommandRegistryDispatchesEveryReferenceCommand` |
+| `command_surface_tests.py` | `cmd/blake-swap-cli` | ported | `cmd/blake-swap-cli:TestRenderIgnoredMatchesTheReference` |
+| `docs_alignment_tests.py` | `internal/docsalign` | ported | `internal/docsalign:TestWaiversAreSpecific` |
+| `driver_policy_tests.py` | `cmd/blake-swap-cli` | ported | `cmd/blake-swap-cli:TestRenderDriverHeaderMatchesTheReference` |
+| `dynamic_settlement_builder_tests.py` | `pkg/settle` | ported | `pkg/settle:TestBuildConvergesAcrossADustCycle` |
+| `fail_closed_tests.py` | `pkg/event` | ported | `pkg/event:TestEventIDMatchesPython` |
+| `fee_policy_tests.py` | `pkg/fees` | ported | `pkg/fees:TestCoinPerKvbConversion` |
+| `htlc_key_recovery_tests.py` | `pkg/swap` | ported | `pkg/swap:TestHTLCKeyRecoverySuite` |
+| `implementation_adapter_tests.py` | `pkg/adapter` | ported | `pkg/adapter:TestContractMatchesTheReferenceFixture` |
+| `installed_wheel_tests.py` | `internal/installcheck` | ported | `internal/installcheck:TestInstalledBinaryComesFromThisCheckout` |
+| `market_state_tests.py` | `pkg/marketflow` | ported | `pkg/marketflow:TestNostrMarketOfferLifecycle` |
+| `moxie_adapter_smoke_tests.py` | `pkg/adapter` | ported | `pkg/adapter:TestContractMatchesTheReferenceFixture` |
+| `nip44_tests.py` | `pkg/nip44` | ported | `pkg/nip44:TestConversationKeyVectors` |
+| `node_config_tests.py` | `pkg/nodeconfig, cmd/blake-swap-cli` | ported | `pkg/nodeconfig:TestNodeConfigDiscoversARunningRig`<br>`cmd/blake-swap-cli:TestCLIReportsAStoppedRig` |
+| `nostr_market_tests.py` | `pkg/marketflow` | ported | `pkg/marketflow:TestNostrMarketOfferLifecycle` |
+| `packaging_tests.py` | `internal/packaging` | ported | `internal/packaging:TestGoModDeclaresTheModule` |
+| `pre_btc_refund_tests.py` | `pkg/swap` | ported | `pkg/swap:TestParticipantIsolationSuite` |
+| `production_funding_pending_tests.py` | `pkg/swap` | ported | `pkg/swap:TestFundBlakeHappyPath` |
+| `production_settlement_pending_tests.py` | `pkg/swap` | ported | `pkg/swap:TestExtractSecretReadsThePreimageFromTheChain` |
+| `schema_equality_tests.py` | `pkg/proto` | ported | `pkg/proto:TestEnvelopeRoundTrip` |
+| `security_conformance_tests.py` | `internal/conformance` | ported | `internal/conformance:TestSecurityConformanceManifest` |
+| `swap_autonomous_agents_tests.py` | `pkg/agent` | ported | `pkg/agent:TestPlanAlice` |
+| `swap_bounded_scan_tests.py` | `pkg/observe` | ported | `pkg/observe:TestObserveReportsEachState` |
+| `swap_chain_autonomy_tests.py` | `pkg/swap` | ported | `pkg/swap:TestPeerRecoverySuite` |
+| `swap_cross_impl_accept_tests.py` | `pkg/swap` | ported | `pkg/swap:TestCrossImplHandshakeAndSettlement` |
+| `swap_cross_impl_blake_claimed_tests.py` | `pkg/swap` | ported | `pkg/swap:TestCrossImplHandshakeAndSettlement` |
+| `swap_cross_impl_blake_funded_tests.py` | `pkg/swap` | ported | `pkg/swap:TestCrossImplHandshakeAndSettlement` |
+| `swap_cross_impl_btc_claimed_tests.py` | `pkg/swap` | ported | `pkg/swap:TestCrossImplHandshakeAndSettlement` |
+| `swap_cross_impl_btc_funded_tests.py` | `pkg/swap` | ported | `pkg/swap:TestCrossImplHandshakeAndSettlement` |
+| `swap_cross_impl_full_happy_tests.py` | `pkg/swap` | ported | `pkg/swap:TestCrossImplHandshakeAndSettlement` |
+| `swap_cross_impl_offer_tests.py` | `pkg/swap` | ported | `pkg/swap:TestCrossImplHandshakeAndSettlement` |
+| `swap_dashboard_json_tests.py` | `cmd/blake-swap-cli` | ported | `cmd/blake-swap-cli:TestSwapDashboardJSONDocumentShape` |
+| `swap_driver_surface_tests.py` | `cmd/blake-swap-cli` | ported | `cmd/blake-swap-cli:TestNextTakesTheOnlyOpenOffer` |
+| `swap_dynamic_fee_integration_tests.py` | `pkg/swap` | ported | `pkg/swap:TestSwapDynamicFeeIntegrationTradeMinimum` |
+| `swap_encrypted_coordination_tests.py` | `pkg/nostr` | ported | `pkg/nostr:TestParseMode` |
+| `swap_isolated_full_chain_swap_tests.py` | — | pending | — |
+| `swap_isolated_nostr_handshake_tests.py` | — | pending | — |
+| `swap_market_flow_tests.py` | `cmd/blake-swap-cli` | ported | `cmd/blake-swap-cli:TestSwapMarketFlow` |
+| `swap_market_takes_json_tests.py` | `cmd/blake-swap-cli` | ported | `cmd/blake-swap-cli:TestCacheDirectoryMatchesTheReferenceStateTree` |
+| `swap_model_settlement_identity_tests.py` | `pkg/model` | ported | `pkg/model:TestSwapModelSettlementIdentityAcceptsALegacyRecord` |
+| `swap_model_timeout_invariant_tests.py` | `pkg/model` | ported | `pkg/model:TestNewRecord` |
+| `swap_participant_isolation_tests.py` | `pkg/swap` | ported | `pkg/swap:TestChainAutonomySuite` |
+| `swap_peer_recovery_tests.py` | `pkg/swap` | ported | `pkg/swap:TestPeerRecoverySuite` |
+| `swap_protocol_tests.py` | `pkg/swap` | ported | `pkg/swap:TestProtocolSuite` |
+| `swap_reorg_safety_tests.py` | `pkg/swap` | ported | `pkg/swap:TestReorgSafetySuite` |
+| `swap_resume_step_budget_tests.py` | `cmd/blake-swap-cli` | ported | `cmd/blake-swap-cli:TestResumeRendersNoResumable` |
+| `swap_reverse_market_flow_tests.py` | `cmd/blake-swap-cli` | ported | `cmd/blake-swap-cli:TestSwapMarketFlow` |
+| `swap_seeded_adversarial_tests.py` | `pkg/adversary` | ported | `pkg/adversary:TestSeededAdversarialSchedulesMatchTheReference` |
+| `swap_settlement_crash_matrix_tests.py` | `pkg/swap` | ported | `pkg/swap:TestFailpointNamesMatchTheReference`<br>`pkg/swap:TestSettlementCrashMatrix`<br>`pkg/swap:TestSettlementCandidateIsDurableBeforeBroadcast` |
+| `swap_settlement_fault_matrix_tests.py` | `pkg/swap` | ported | `pkg/swap:TestSettlementCrashMatrix` |
+| `swap_settlement_race_tests.py` | `pkg/swap` | ported | `pkg/swap:TestSettlementRace` |
+| `swap_settlement_recovery_tests.py` | `pkg/swap` | ported | `pkg/swap:TestSettlementRecovery` |
+| `swap_timeout_negotiation_tests.py` | `pkg/swap` | ported | `pkg/swap:TestSwapTimeoutNegotiationAcceptsASafeOffer` |
+| `swap_timeout_policy_tests.py` | `pkg/timeout` | ported | `pkg/timeout:TestReferencePlan` |
+| `swap_wire_compat_tests.py` | `pkg/swap` | ported | `pkg/swap:TestSwapWireCompatEverySentMessageSatisfiesTheSchema` |
+| `swap_wire_tests.py` | `pkg/wire` | ported | `pkg/wire:TestOfferAndAcceptValidate` |

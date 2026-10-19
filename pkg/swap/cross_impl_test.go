@@ -25,6 +25,7 @@ import (
 
 // TestCrossImplHandshakeAndSettlement runs both directions of the protocol with one
 // implementation on each side.
+// Parity: tests/swap_cross_impl_offer_tests.py, tests/swap_cross_impl_accept_tests.py, tests/swap_cross_impl_blake_funded_tests.py, tests/swap_cross_impl_btc_funded_tests.py, tests/swap_cross_impl_btc_claimed_tests.py, tests/swap_cross_impl_blake_claimed_tests.py, tests/swap_cross_impl_full_happy_tests.py
 func TestCrossImplHandshakeAndSettlement(t *testing.T) {
 	r := rigtest.Load(t)
 

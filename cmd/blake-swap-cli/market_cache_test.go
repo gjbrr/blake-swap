@@ -19,6 +19,7 @@ import (
 // evidence where they left it — a prefix that resolved yesterday cannot become
 // unresolvable because the client changed — so the directory name is part of the
 // contract, not a detail.
+// Parity: tests/swap_market_takes_json_tests.py
 func TestCacheDirectoryMatchesTheReferenceStateTree(t *testing.T) {
 	t.Setenv("BLAKE_SWAP_STATE_DIR", "/tmp/state")
 

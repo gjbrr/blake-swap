@@ -52,6 +52,7 @@ func accept() map[string]any {
 	}
 }
 
+// Parity: tests/swap_wire_tests.py
 func TestOfferAndAcceptValidate(t *testing.T) {
 	if _, err := Validate(offer(), nil); err != nil {
 		t.Fatalf("offer: %v", err)

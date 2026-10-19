@@ -70,6 +70,7 @@ func readTakes(t *testing.T, client *nostr.Client, offerID string) []event.Event
 
 // TestNostrMarketOfferLifecycle: an offer is open, a take is a valid take of it, and a
 // cancellation ends it — decided from evidence the relay actually returned.
+// Parity: tests/market_state_tests.py, tests/nostr_market_tests.py
 func TestNostrMarketOfferLifecycle(t *testing.T) {
 	stub, err := relaystub.New()
 

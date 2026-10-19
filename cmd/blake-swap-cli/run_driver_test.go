@@ -37,6 +37,7 @@ func driverReport() reconcile.Report {
 func boolPtr(value bool) *bool { return &value }
 
 // TestRenderDriverHeaderMatchesTheReference pins the driver's opening block.
+// Parity: tests/driver_policy_tests.py
 func TestRenderDriverHeaderMatchesTheReference(t *testing.T) {
 	want := "\nBLAKE SWAP AUTONOMOUS DRIVER\n" +
 		"============================\n" +

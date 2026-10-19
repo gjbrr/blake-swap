@@ -81,6 +81,7 @@ func withTimeouts(t *testing.T, st store.Store, record *model.Swap) {
 
 // TestSwapWireCompatEverySentMessageSatisfiesTheSchema runs one swap as far as the engine can
 // get without a second participant and validates every message it wrote.
+// Parity: tests/swap_wire_compat_tests.py
 func TestSwapWireCompatEverySentMessageSatisfiesTheSchema(t *testing.T) {
 	ctx := context.Background()
 	st := store.NewMemory()

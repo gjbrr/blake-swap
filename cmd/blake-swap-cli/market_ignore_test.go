@@ -35,6 +35,7 @@ func ignoreEntry(matchID, swapID string) marketflow.MatchEntry {
 }
 
 // TestRenderIgnoredMatchesTheReference pins the tombstone confirmation.
+// Parity: tests/command_surface_tests.py
 func TestRenderIgnoredMatchesTheReference(t *testing.T) {
 	matchID := strings.Repeat("ef", 32)
 

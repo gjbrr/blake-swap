@@ -5,6 +5,7 @@ import (
 	"testing"
 )
 
+// Parity: tests/schema_equality_tests.py
 func TestEnvelopeRoundTrip(t *testing.T) {
 	sent := Envelope{
 		Kind: HelloAck,

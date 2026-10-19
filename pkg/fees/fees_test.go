@@ -15,6 +15,7 @@ func rateString(t *testing.T, r decimal.Dec) string {
 	return r.String()
 }
 
+// Parity: tests/fee_policy_tests.py
 func TestCoinPerKvbConversion(t *testing.T) {
 	cases := map[string]string{
 		"0.00001000": "1",

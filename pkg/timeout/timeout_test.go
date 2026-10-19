@@ -7,6 +7,7 @@ import (
 	"github.com/gjbrr/blake-swap/pkg/decimal"
 )
 
+// Parity: tests/swap_timeout_policy_tests.py
 func TestReferencePlan(t *testing.T) {
 	p := DefaultPolicy()
 

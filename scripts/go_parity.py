@@ -178,6 +178,9 @@ def go_test_files() -> dict[str, set[str]]:
 
     directories = [("pkg", directory) for directory in sorted(PKG.iterdir())]
     directories += [("cmd", directory) for directory in sorted(CMD.iterdir())]
+    directories += [
+        ("internal", directory) for directory in sorted((ROOT / "internal").iterdir())
+    ]
 
     for prefix, directory in directories:
         if not directory.is_dir():
@@ -488,77 +491,149 @@ class Suite:
     python: str
     go: str = ""
     status: str = "pending"
+    # tests are the Go test functions that name this suite with a `// Parity:`
+    # marker. They are read from the tree, so a suite cannot be claimed by a file
+    # name that merely looks similar.
+    tests: list[str] = field(default_factory=list)
+    note: str = ""
 
 
-# Suites whose Go replacement cannot be recognised by a matching file name.
+# The four dispositions a suite may have.
 #
-# The name match below is the default because it cannot drift into optimism: a suite is
-# only claimed when a Go test file names it. These entries are the exceptions, where the
-# replacement is a package whose tests are named after the contract rather than the suite.
-SUITE_REPLACEMENTS: dict[str, tuple[str, str]] = {
-    "implementation_adapter_tests.py": ("pkg/adapter", "partial"),
-    "moxie_adapter_smoke_tests.py": ("pkg/adapter", "partial"),
-    "swap_seeded_adversarial_tests.py": ("pkg/adversary", "partial"),
-    "swap_autonomous_agents_tests.py": ("pkg/agent", "partial"),
-    "agent_policy_tests.py": ("pkg/agent", "partial"),
-    "driver_policy_tests.py": ("cmd/blake-swap-cli", "partial"),
-    # The cross-implementation suites are one protocol walk each, organised by stage. The
-    # Go replacement walks the same stages in the same order with the two engines as
-    # counterparties, in both directions, so the mapping is to the package that runs it.
-    "swap_cross_impl_offer_tests.py": ("pkg/swap", "partial"),
-    "swap_cross_impl_accept_tests.py": ("pkg/swap", "partial"),
-    "swap_cross_impl_blake_funded_tests.py": ("pkg/swap", "partial"),
-    "swap_cross_impl_btc_funded_tests.py": ("pkg/swap", "partial"),
-    "swap_cross_impl_btc_claimed_tests.py": ("pkg/swap", "partial"),
-    "swap_cross_impl_blake_claimed_tests.py": ("pkg/swap", "partial"),
-    "swap_cross_impl_full_happy_tests.py": ("pkg/swap", "partial"),
-    # The command-surface suite is about behaviours reached through commands: resume, the
-    # not-a-party refusal, ignore tombstones with their TTL, and the RPC timeout knob. Each
-    # lives in the package that implements it, so the suite maps to the CLI that dispatches
-    # them and to the two packages whose behaviour it pins.
-    "command_surface_tests.py": ("cmd/blake-swap-cli", "partial"),
-    # The resume step budget is forwarded by the CLI, and the driver surface is the CLI's
-    # commands: both suites are about what a command does when reached the way an operator
-    # reaches it.
-    "swap_resume_step_budget_tests.py": ("cmd/blake-swap-cli", "partial"),
-    "swap_driver_surface_tests.py": ("cmd/blake-swap-cli", "partial"),
-    # The pending-production suites assert that an unconfirmed funding or settlement leaves
-    # the durable state where it was and reuses its transaction on a retry. Those are
-    # engine-level properties, and the Go tests that pin them are named for the behaviour.
-    "production_funding_pending_tests.py": ("pkg/swap", "partial"),
-    "production_settlement_pending_tests.py": ("pkg/swap", "partial"),
-    # The market flow is driven through the CLI by two participants over a local relay, which
-    # is the same shape the reference suite has. The settlement that follows the match is the
-    # direct path, covered by the cross-implementation tests in pkg/swap.
-    "swap_market_flow_tests.py": ("cmd/blake-swap-cli", "partial"),
-    "swap_reverse_market_flow_tests.py": ("cmd/blake-swap-cli", "partial"),
-}
+#   ported   a Go test names it with a `// Parity:` marker (or an explicit
+#            replacement whose named test exists)
+#   partial  a replacement exists but does not yet carry the marker
+#   pending  nothing replaces it
+#   waived   an explicit, checked reason says the Go artifact cannot carry it
+#
+# `waived` is not an escape hatch: the reason must be specific, and the check below
+# refuses a short one or a placeholder.
+SUITE_STATUSES = ("ported", "partial", "pending", "waived")
+
+# Markers are how a suite is claimed. `// Parity: tests/x_tests.py` in a Go test
+# file attributes the suite to the test function that follows it (or precedes it,
+# when the marker is inside the function's own doc block).
+PARITY_MARKER = re.compile(r"//\s*Parity:\s*(.+)")
+TEST_FUNCTION = re.compile(r"^func\s+(Test[A-Za-z0-9_]*)\s*\(")
+PYTHON_SUITE = re.compile(r"tests/([A-Za-z0-9_]+\.py)")
+
+# Suites whose Go replacement is real but whose assertions belong to a mechanism
+# that only exists on this side. Every entry needs a reason that says which
+# assertion is waived and what covers the risk instead; the check refuses
+# placeholders and anything under a dozen words.
+SUITE_WAIVERS: dict[str, tuple[str, str]] = {}
+
+
+# Suites whose Go replacement exists but cannot carry a `// Parity:` marker yet.
+#
+# This table is the only remaining hand-written statement about suites, and it is
+# deliberately empty: every suite is either named by a marker or listed as pending
+# in the generated table. An entry here is a claim without a test behind it.
+SUITE_REPLACEMENTS: dict[str, tuple[str, str]] = {}
+
+
+def parity_markers() -> dict[str, list[tuple[str, str]]]:
+    """Every suite named by a `// Parity:` marker, and the Go test that names it.
+
+    A marker applies to the next `func Test...` in the file, which is how the
+    markers in this tree are written (above the function they describe). A marker
+    inside a function's body applies to that function.
+    """
+
+    found: dict[str, list[tuple[str, str]]] = {}
+
+    directories = [
+        ("pkg", directory) for directory in sorted(PKG.iterdir())
+    ] + [
+        ("cmd", directory) for directory in sorted(CMD.iterdir())
+    ] + [
+        ("internal", directory) for directory in sorted((ROOT / "internal").iterdir())
+    ]
+
+    for prefix, directory in directories:
+        if not directory.is_dir():
+            continue
+
+        for path in sorted(directory.glob("*_test.go")):
+            pending: list[str] = []
+            current: str | None = None
+
+            for line in path.read_text().splitlines():
+                function = TEST_FUNCTION.match(line)
+
+                if function:
+                    current = function.group(1)
+
+                    for suite in pending:
+                        found.setdefault(suite, []).append(
+                            (f"{prefix}/{directory.name}", current)
+                        )
+
+                    pending = []
+
+                    continue
+
+                marker = PARITY_MARKER.search(line)
+
+                if marker:
+                    suites = PYTHON_SUITE.findall(marker.group(1))
+
+                    if current is not None and not pending:
+                        # Inside or after a function: attribute immediately.
+                        for suite in suites:
+                            found.setdefault(suite, []).append(
+                                (f"{prefix}/{directory.name}", current)
+                            )
+                    else:
+                        pending.extend(suites)
+
+    return found
 
 
 def suite_rows() -> list[Suite]:
     """Every registered Python suite, with the Go tests that cover it."""
 
     go_tests = go_test_files()
+    markers = parity_markers()
     rows: list[Suite] = []
 
     for path in sorted(TESTS.glob("*_tests.py")):
         name = path.name
         row = Suite(python=name)
 
+        # A marker is the only way a suite is claimed as ported: it names the
+        # suite in a Go test that exists, so the manifest cannot drift into
+        # optimism on a similar file name.
+        if name in markers:
+            named = markers[name]
+            packages: list[str] = []
+
+            for package, function in named:
+                if function in go_tests.get(package, set()):
+                    row.tests.append(f"{package}:{function}")
+
+                    if package not in packages:
+                        packages.append(package)
+
+            if row.tests:
+                row.go = ", ".join(packages)
+                row.status = "ported"
+                rows.append(row)
+
+                continue
+
+        if name in SUITE_WAIVERS:
+            row.go, row.note = SUITE_WAIVERS[name]
+            row.status = "waived"
+            rows.append(row)
+
+            continue
+
         if name in SUITE_REPLACEMENTS:
             row.go, row.status = SUITE_REPLACEMENTS[name]
             rows.append(row)
 
             continue
-
-        # A suite is only claimed as ported when a Go test file names it
-        # explicitly, so the manifest cannot drift into optimism.
-        for package, tests in go_tests.items():
-            if any(name.removesuffix("_tests.py").replace("_", "") in t.lower().replace("_", "")
-                   for t in tests):
-                row.go = package
-                row.status = "partial"
-                break
 
         rows.append(row)
 
@@ -620,8 +695,11 @@ def render() -> str:
         "mapping points at something that no longer exists."
     )
     lines.append("")
-    lines.append("Statuses: **ported** (behaviour and tests), **partial** (in "
-                 "progress), **pending** (not started).")
+    lines.append(
+        "Statuses: **ported** (behaviour and tests), **partial** (in progress), "
+        "**pending** (not started), **waived** (an explicit, checked reason why "
+        "the Go artifact cannot carry the same assertion)."
+    )
     lines.append("")
 
     ported = sum(1 for module in MODULES if module.status == "ported")
@@ -679,20 +757,47 @@ def render() -> str:
     lines.append("")
     lines.append(f"## Test suites ({len(suites)})")
     lines.append("")
+
+    counts = {status: 0 for status in SUITE_STATUSES}
+
+    for suite in suites:
+        counts[suite.status] = counts.get(suite.status, 0) + 1
+
     lines.append(
-        "Every Python suite, and the Go package whose tests cover the same "
-        "ground where one does. A suite is only marked partial when a Go test "
-        "names it."
+        "Every Python suite and its disposition: "
+        + ", ".join(f"{counts[status]} {status}" for status in SUITE_STATUSES)
+        + "."
     )
     lines.append("")
-    lines.append("| Python suite | Go | Status |")
-    lines.append("|---|---|---|")
+    lines.append(
+        "A suite is **ported** only when a Go test names it with a "
+        "`// Parity:` marker and that test exists in the tree; a similar file "
+        "name is not evidence. **Waived** needs a specific reason, and the check "
+        "refuses a placeholder."
+    )
+    lines.append("")
+    lines.append("| Python suite | Go | Status | Go test |")
+    lines.append("|---|---|---|---|")
 
     for suite in suites:
         go = f"`{suite.go}`" if suite.go else "—"
-        lines.append(f"| `{suite.python}` | {go} | {suite.status} |")
+        tests = "<br>".join(f"`{test}`" for test in suite.tests) or "—"
+        lines.append(f"| `{suite.python}` | {go} | {suite.status} | {tests} |")
 
     lines.append("")
+
+    waived = [suite for suite in suites if suite.status == "waived"]
+
+    if waived:
+        lines.append("### Waivers")
+        lines.append("")
+        lines.append("| Python suite | Why the Go artifact cannot carry it |")
+        lines.append("|---|---|")
+
+        for suite in waived:
+            lines.append(f"| `{suite.python}` | {suite.note} |")
+
+        lines.append("")
 
     return "\n".join(lines)
 
@@ -743,6 +848,32 @@ def check() -> int:
             if not found:
                 problems.append(
                     f"{module.python}: the Python source no longer defines {anchor}"
+                )
+
+    for suite in suite_rows():
+        if suite.status not in SUITE_STATUSES:
+            problems.append(
+                f"{suite.python}: unknown status {suite.status!r}"
+            )
+
+        if suite.status == "ported" and not suite.tests:
+            problems.append(
+                f"{suite.python}: ported without a named Go test"
+            )
+
+        if suite.status == "waived":
+            words = suite.note.split()
+
+            if len(words) < 12:
+                problems.append(
+                    f"{suite.python}: waiver is too short to be specific"
+                )
+
+            if suite.note.strip().lower() in {
+                "not applicable", "n/a", "none", "todo", "not ported",
+            }:
+                problems.append(
+                    f"{suite.python}: waiver is a placeholder"
                 )
 
     if not MANIFEST.exists():

@@ -315,6 +315,7 @@ func fundingEngine(t *testing.T, st store.Store) (*Engine, *chainNode, *chainNod
 	return engine, blake, btc
 }
 
+// Parity: tests/production_funding_pending_tests.py
 func TestFundBlakeHappyPath(t *testing.T) {
 	ctx := context.Background()
 	st := store.NewMemory()

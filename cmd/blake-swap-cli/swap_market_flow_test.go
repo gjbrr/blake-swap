@@ -99,6 +99,7 @@ func marketField(t *testing.T, output, label string) string {
 }
 
 // TestSwapMarketFlow runs the marketplace path between two participants over a local relay.
+// Parity: tests/swap_market_flow_tests.py, tests/swap_reverse_market_flow_tests.py
 func TestSwapMarketFlow(t *testing.T) {
 	r := rigtest.Load(t)
 

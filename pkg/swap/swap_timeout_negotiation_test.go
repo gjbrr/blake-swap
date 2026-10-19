@@ -96,6 +96,7 @@ func acceptAsBob(t *testing.T, engine *Engine, transport *recordingTransport, se
 
 // TestSwapTimeoutNegotiationAcceptsASafeOffer: the baseline every refusal below is a mutation
 // of.
+// Parity: tests/swap_timeout_negotiation_tests.py
 func TestSwapTimeoutNegotiationAcceptsASafeOffer(t *testing.T) {
 	engine, transport := negotiationEngine(t)
 

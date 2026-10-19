@@ -127,6 +127,7 @@ func message(swapID, kind string) map[string]any {
 	}
 }
 
+// Parity: tests/swap_encrypted_coordination_tests.py
 func TestParseMode(t *testing.T) {
 	for raw, want := range map[string]Mode{
 		"":           ModeOff,

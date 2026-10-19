@@ -56,6 +56,7 @@ func unhex(t *testing.T, s string) []byte {
 	return raw
 }
 
+// Parity: tests/nip44_tests.py
 func TestConversationKeyVectors(t *testing.T) {
 	for _, vector := range conversationVectors {
 		got, err := ConversationKey(unhex(t, vector.secret), unhex(t, vector.peer))

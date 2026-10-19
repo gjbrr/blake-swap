@@ -39,6 +39,7 @@ func dashboardEntry() swap.DashboardEntry {
 }
 
 // TestSwapDashboardJSONDocumentShape: the document's every field, and the summary counts.
+// Parity: tests/swap_dashboard_json_tests.py
 func TestSwapDashboardJSONDocumentShape(t *testing.T) {
 	summary := swap.Dashboard{
 		Active:    []swap.DashboardEntry{dashboardEntry()},

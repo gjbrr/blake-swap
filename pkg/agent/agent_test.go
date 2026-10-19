@@ -15,6 +15,7 @@ import (
 //
 // The table is data, so the test reads as the table: what runs, in what order, and which
 // steps only run if the record is still in the state that justified them.
+// Parity: tests/swap_autonomous_agents_tests.py, tests/agent_policy_tests.py
 func TestPlanAlice(t *testing.T) {
 	cases := map[state.State][]Step{
 		state.Offered: {{Command: FundBlake}},

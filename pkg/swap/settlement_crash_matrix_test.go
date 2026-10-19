@@ -10,7 +10,7 @@ import (
 	"github.com/gjbrr/blake-swap/pkg/swap"
 )
 
-// Parity: tests/swap_settlement_crash_matrix_tests.py
+// Parity: tests/swap_settlement_crash_matrix_tests.py, tests/swap_settlement_fault_matrix_tests.py
 //
 // Four economic operations, each killed at three durability boundaries, then
 // restarted. The claim the matrix makes is narrow and worth stating exactly: after

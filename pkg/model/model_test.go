@@ -33,6 +33,7 @@ func seq(n byte) *fixedReader {
 	return &fixedReader{b: b}
 }
 
+// Parity: tests/swap_model_timeout_invariant_tests.py
 func TestNewRecord(t *testing.T) {
 	swap, err := New(seq(1), NewParams{
 		BlakeAmount:    amount.MustParseBlake("0.5"),

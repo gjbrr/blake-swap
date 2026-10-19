@@ -22,6 +22,7 @@ func resumeRecord(id string, current state.State) *model.Swap {
 }
 
 // TestResumeRendersNoResumable: an empty queue says so, and names what is blocking.
+// Parity: tests/swap_resume_step_budget_tests.py
 func TestResumeRendersNoResumable(t *testing.T) {
 	blocked := resumeItem{
 		record: resumeRecord("aaaa00000001", state.Offered),

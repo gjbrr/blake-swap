@@ -254,6 +254,11 @@ port work:
   change the script the drill is about. The refund spend itself is proven end to end by the
   settlement and pre-Bitcoin refund suites, on wallets that existed when the HTLC was
   funded.
+- **Rig-driven packages must not run concurrently.** The suites in
+  `internal/rigsuites` and the CLI's parity walk both drive the one regtest rig: mining
+  blocks and funding HTLCs from two packages at once makes each of them describe a
+  different world, and the failures look like protocol errors. `make test` and CI pass
+  `-p 1`, which runs one package at a time.
 - **The go tool's package timeout is shorter than this repository's rig suites.** A single
   `go test ./pkg/... ./cmd/...` on a machine without the rig skips them and finishes in a
   minute; with the rig up, `internal/rigsuites` alone runs for longer than the ten minutes

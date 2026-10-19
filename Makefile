@@ -64,7 +64,7 @@ verify: wasm
 	./scripts/verify-hello.sh
 
 test:
-	$(GO) test -timeout 45m $(NATIVE_PKGS)
+	$(GO) test -p 1 -timeout 45m $(NATIVE_PKGS)
 
 # Run the value-layer tests compiled to wasm. This is how a package that
 # accidentally depends on something TinyGo lacks gets caught here rather than

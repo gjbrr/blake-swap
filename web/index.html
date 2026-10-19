@@ -122,6 +122,26 @@
         <pre id="engine" aria-live="polite">not read</pre>
       </section>
 
+      <section class="panel">
+        <h2>Market</h2>
+        <p class="hint">
+          The marketplace, read and written over the browser's own relay
+          connection. Offers are signed by the vault's identity, so the page can
+          advertise and take without ever handing a key to a node.
+        </p>
+        <input id="relays" class="field" type="text" placeholder="wss://relay.example" autocomplete="off" spellcheck="false">
+        <button type="button" data-uicmd="market-set-relays">Set relays</button>
+        <button type="button" data-uicmd="market-relays">Read relays</button>
+        <button type="button" data-uicmd="market-list">Read market</button>
+        <input id="market-blake" class="field" type="text" placeholder="BLAKE amount" autocomplete="off" spellcheck="false">
+        <input id="market-sats" class="field" type="text" placeholder="sats" autocomplete="off" spellcheck="false">
+        <input id="market-minutes" class="field" type="text" placeholder="minutes (60)" autocomplete="off" spellcheck="false">
+        <button type="button" data-uicmd="market-publish">Publish offer</button>
+        <input id="market-offer-id" class="field" type="text" placeholder="offer id to take" autocomplete="off" spellcheck="false">
+        <button type="button" data-uicmd="market-take">Take offer</button>
+        <pre id="market" aria-live="polite">not read</pre>
+      </section>
+
       <dl class="rows">
         <div class="row">
           <dt>page</dt>

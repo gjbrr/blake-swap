@@ -110,7 +110,7 @@ func TestEngineStatusThroughTheProxy(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	result := handleCommand(context.Background(), nil, engine, body)
+	result := handleCommand(context.Background(), nil, engine, nil, body)
 
 	if !result.OK {
 		t.Fatalf("result = %+v", result)

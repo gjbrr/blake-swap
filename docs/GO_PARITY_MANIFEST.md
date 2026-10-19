@@ -39,7 +39,7 @@ Statuses: **ported** (behaviour and tests), **partial** (in progress), **pending
 | `src/swap_v2.py (CLI)` | `cmd/blake-swap-cli (missing)` | partial | the drop-in CLI: the implemented commands with the reference's arguments and environment; `market`, `market-state` and `market-state --json` are byte-identical to the reference on live relay evidence, and `show` and `list` are byte-identical to it on real records written by each implementation, the verified-event cache is the reference's `nostr-event-cache` and is read by both implementations in either direction, and `run` is byte-identical to the reference on a live swap, the market publish, cancel, take, match, accept, import and bridge confirmations plus the accept-offer block and the prefix refusals are pinned byte for byte by tests, and every settlement command now takes the client's `--fee-rate`, which outranks the environment; the rest of the output text is not yet |
 | `(new)` | `pkg/vault` | ported | passphrase KDF and record encryption with the NIP-44 primitives |
 | `(new)` | `pkg/proxy` | ported | the node RPC proxy: credentials stay server-side, the method allowlist and a per-address rate limit are the boundary |
-| `(new)` | `pkg/worker` | partial | the browser worker's domains: the event loop, the encrypted-state domain, the read-only engine domain it drives through the app server's proxy, and the command dispatcher |
+| `(new)` | `pkg/worker` | partial | the browser worker's domains: the event loop, the encrypted-state domain, the read-only engine domain it drives through the app server's proxy, the market domain that reads, publishes and takes over the browser's own WebSocket, and the command dispatcher |
 | `(new)` | `pkg/client` | partial | the browser client's encrypted state: a store.Store whose records are sealed with a passphrase-derived key before they reach IndexedDB, with a pluggable entropy source |
 | `src/swap_v2.py (seeded adversarial corpus scheduler)` | `pkg/adversary` | partial | the corpus's language-independent scheduler: the documented SHA-256 derivation, the stage vocabulary it chooses at, the fault profiles, and the rule that no seed may degenerate into the happy path; replaying the generated events against a live pair remains the reference harness's |
 | `(new)` | `pkg/adapter` | partial | the portable participant interface `blake-swap-adapter-v1`: capabilities, role-pinned commands and the portable state projection, served one JSON request per process; the pair orchestration and seeded scenario scheduling remain the reference harness's |
@@ -78,7 +78,7 @@ Statuses: **ported** (behaviour and tests), **partial** (in progress), **pending
 | `main` | — | `pkg/cmd/blake-swap-cli` |
 | — | `Seal`, `Open`, `DeriveKey` | `pkg/vault` |
 | `run_chain_cli`, `chain_dispatch` | `Proxy`, `Config`, `Endpoint`, `DefaultAllowlist` | `pkg/proxy` |
-| — | `NewVaultDomain`, `Domain`, `Chans` | `pkg/worker` |
+| — | `NewVaultDomain`, `Domain`, `Chans`, `SecretRelays`, `DefaultRelays` | `pkg/worker` |
 | `load_swap`, `save_swap`, `atomic_write_json` | `Encrypted`, `Create`, `Open`, `KV`, `Memory` | `pkg/client` |
 | `deterministic_schedule_choice`, `build_fault_schedule`, `DEFAULT_SEEDS` | `Choice`, `Build`, `Corpus`, `Schedule`, `DefaultSeeds`, `FaultProfiles`, `FaultVocabulary`, `Paths` | `pkg/adversary` |
 | `PARTICIPANT_ADAPTER_SURFACE`, `PythonParticipantAdapter`, `SwapImplementationPair` | `Capabilities`, `Handle`, `PortableState`, `Decode`, `Encode`, `Protocol`, `Operations`, `Roles`, `PortableFields` | `pkg/adapter` |

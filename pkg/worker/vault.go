@@ -425,7 +425,7 @@ func decodeSwap(encoded string) (*model.Swap, error) {
 // It exists so the worker's loop has one place that knows how a command becomes a
 // result, and so a new domain is a case in a dispatch rather than a second protocol.
 func handleCommand(
-	ctx context.Context, vault *vaultDomain, engine *engineDomain, body string,
+	ctx context.Context, vault *vaultDomain, engine *engineDomain, market *marketDomain, body string,
 ) proto.Result {
 	request, err := proto.DecodeRequest(body)
 
@@ -441,6 +441,15 @@ func handleCommand(
 		return vault.handle(ctx, request)
 	case strings.HasPrefix(request.Command, "engine."):
 		return engine.Handle(ctx, request)
+	case strings.HasPrefix(request.Command, "market."):
+		if market == nil {
+			return proto.Result{
+				Command: request.Command,
+				Error:   "this worker has no market domain",
+			}
+		}
+
+		return market.Handle(ctx, request)
 	}
 
 	return proto.Result{

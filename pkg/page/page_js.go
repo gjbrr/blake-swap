@@ -47,6 +47,14 @@ const (
 	UICmdEngineList      UICmd = "engine-list"
 	UICmdEngineDashboard UICmd = "engine-dashboard"
 	UICmdEngineShow      UICmd = "engine-show"
+
+	// The market's controls: the relay list, a read, and the two acts that change
+	// the marketplace. They are the same commands the CLI's market subcommands run.
+	UICmdMarketRelays    UICmd = "market-relays"
+	UICmdMarketSetRelays UICmd = "market-set-relays"
+	UICmdMarketList      UICmd = "market-list"
+	UICmdMarketPublish   UICmd = "market-publish"
+	UICmdMarketTake      UICmd = "market-take"
 )
 
 // The vault is the page's front door: nothing else can store a record or read a
@@ -81,10 +89,11 @@ const (
 	// round trip has succeeded in this browser.
 	VaultVerifiedAttribute = "data-vault-verified"
 
-	// The panels the engine and its two dependencies report into.
+	// The panels the engine and its two dependencies report into, and the market's.
 	ElementIdentity = "identity"
 	ElementProxy    = "proxy"
 	ElementEngine   = "engine"
+	ElementMarket   = "market"
 
 	// The inputs a command's arguments are read from. A control carries the id of
 	// the input it feeds in data-uidata, so one click handler serves all of them.
@@ -93,11 +102,19 @@ const (
 	InputSwapID         = "swap-id"
 	InputPassphrase     = "passphrase"
 
+	// The market's inputs: where to read from, what to advertise, and what to take.
+	InputRelays       = "relays"
+	InputMarketBlake  = "market-blake"
+	InputMarketSats   = "market-sats"
+	InputMarketMinute = "market-minutes"
+	InputMarketOffer  = "market-offer-id"
+
 	// Markers set once a command of that family has succeeded here. They are what
 	// the headless check asserts, so it never has to read presentation text.
 	IdentityVerifiedAttribute = "data-identity-set"
 	ProxyVerifiedAttribute    = "data-proxy-set"
 	EngineVerifiedAttribute   = "data-engine-verified"
+	MarketVerifiedAttribute   = "data-market-verified"
 
 	// VaultOpenAttribute tracks whether the vault is unlocked. Unlike the others it is
 	// cleared again on a lock, because a marker that only ever turns on would claim the
@@ -139,6 +156,15 @@ var panels = map[string]panel{
 	"engine.list":      {element: ElementEngine},
 	"engine.show":      {element: ElementEngine},
 	"engine.dashboard": {element: ElementEngine},
+
+	// The market's read proves the relay connection works, so it sets the marker;
+	// publishing and taking report into the same panel because they are the same
+	// conversation.
+	"market.relays":     {element: ElementMarket},
+	"market.set-relays": {element: ElementMarket},
+	"market.list":       {element: ElementMarket, marker: MarketVerifiedAttribute},
+	"market.publish":    {element: ElementMarket},
+	"market.take":       {element: ElementMarket},
 }
 
 // Domain is the page's event loop. It runs until Stop is closed.
@@ -266,6 +292,34 @@ func uiRequest(cmd UICmd) (proto.Request, bool) {
 		return proto.Request{
 			Command: "engine.show",
 			Args:    map[string]string{"swap_id": inputValue(InputSwapID)},
+		}, true
+
+	case UICmdMarketRelays:
+		return proto.Request{Command: "market.relays"}, true
+
+	case UICmdMarketSetRelays:
+		return proto.Request{
+			Command: "market.set-relays",
+			Args:    map[string]string{"relays": inputValue(InputRelays)},
+		}, true
+
+	case UICmdMarketList:
+		return proto.Request{Command: "market.list"}, true
+
+	case UICmdMarketPublish:
+		return proto.Request{
+			Command: "market.publish",
+			Args: map[string]string{
+				"blake":   inputValue(InputMarketBlake),
+				"sats":    inputValue(InputMarketSats),
+				"minutes": inputValue(InputMarketMinute),
+			},
+		}, true
+
+	case UICmdMarketTake:
+		return proto.Request{
+			Command: "market.take",
+			Args:    map[string]string{"offer_id": inputValue(InputMarketOffer)},
 		}, true
 	}
 

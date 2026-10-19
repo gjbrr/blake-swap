@@ -9,6 +9,7 @@ import (
 
 	"git.smesh.lol/tiny-spawn"
 
+	"github.com/gjbrr/blake-swap/pkg/nostr"
 	"github.com/gjbrr/blake-swap/pkg/platform"
 	"github.com/gjbrr/blake-swap/pkg/proto"
 )
@@ -37,6 +38,12 @@ func Domain(_ struct{}, ch Chans) {
 	// with the instance.
 	vault := NewVaultDomain(platform.NewIndexedDB("blake-swap", "vault"), platform.Reader{})
 	engine := newEngineDomain(vault)
+
+	// The market's connection is the browser's own WebSocket: the same relay client the
+	// CLI uses, over the platform seam, with the vault's identity as the signer.
+	market := newMarketDomain(vault, func(ctx context.Context, url string) (nostr.Conn, error) {
+		return platform.DialWebSocket(ctx, url)
+	})
 
 	ctx := context.Background()
 
@@ -68,7 +75,7 @@ func Domain(_ struct{}, ch Chans) {
 
 				consoleLog("worker: command received (seq " + itoa(e.Seq) + ")")
 
-				result := handleCommand(ctx, vault, engine, e.Body)
+				result := handleCommand(ctx, vault, engine, market, e.Body)
 
 				consoleLog("worker: command finished (ok=" + boolText(result.OK) +
 					", " + itoa(uint32(time.Since(started).Milliseconds())) + " ms)")

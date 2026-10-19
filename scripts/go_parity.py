@@ -447,8 +447,8 @@ MODULES: list[Module] = [
     ),
     Module(
         "(new)", "pkg/worker", "partial",
-        "the browser worker's domains: the event loop, the encrypted-state domain, the read-only engine domain it drives through the app server's proxy, and the command dispatcher",
-        ["NewVaultDomain", "Domain", "Chans"],
+        "the browser worker's domains: the event loop, the encrypted-state domain, the read-only engine domain it drives through the app server's proxy, the market domain that reads, publishes and takes over the browser's own WebSocket, and the command dispatcher",
+        ["NewVaultDomain", "Domain", "Chans", "SecretRelays", "DefaultRelays"],
         [],
     ),
     Module(

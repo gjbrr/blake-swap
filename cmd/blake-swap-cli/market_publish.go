@@ -4,6 +4,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -94,10 +95,15 @@ func runPublishMarketOffer(ctx context.Context, engine *swap.Engine, args []stri
 		return err
 	}
 
-	if _, err := marketClient().Publish(ctx, built); err != nil {
+	report, err := marketClient().Publish(ctx, built)
+
+	if err != nil {
 		return err
 	}
 
+	if err := reportPublished(ctx, built, report); err != nil {
+		return err
+	}
 	fmt.Print(renderPublishedOffer(built.ID, key.PublicKey(), offer, *minutes))
 
 	return nil
@@ -159,7 +165,13 @@ func runCancelMarketOffer(ctx context.Context, engine *swap.Engine, args []strin
 		return err
 	}
 
-	if _, err := client.Publish(ctx, built); err != nil {
+	report, err := client.Publish(ctx, built)
+
+	if err != nil {
+		return err
+	}
+
+	if err := reportPublished(ctx, built, report); err != nil {
 		return err
 	}
 
@@ -234,4 +246,54 @@ func renderCancelledOffer(offerID, cancelID, maker string) string {
 	out.WriteString("PASS: cancellation was signed by the original offer maker\n")
 
 	return out.String()
+}
+
+// renderOutboundCached is the reference's block for a signed event it just wrote to
+// its own cache.
+func renderOutboundCached(eventID, directory string) string {
+	return "\nNostr outbound event cached:\n" + eventID + "\n" +
+		"cache: " + filepath.Join(directory, eventID+".json") + "\n"
+}
+
+// renderRelayResults is the reference's per-relay publish report.
+func renderRelayResults(report nostr.Report) string {
+	var out strings.Builder
+
+	out.WriteString("\nNOSTR RELAY RESULTS\n")
+	out.WriteString("===================\n")
+
+	for _, relay := range report.Relays {
+		state := "REJECTED"
+
+		if relay.Accepted {
+			state = "ACCEPTED"
+		}
+
+		out.WriteString(relay.Relay + ": " + state + "\n")
+	}
+
+	out.WriteString("\n")
+	fmt.Fprintf(&out, "PASS: %d of %d relay(s) accepted the identical signed event\n",
+		report.Accepted, len(report.Relays))
+
+	return out.String()
+}
+
+// reportPublished caches a signed event and reports where it went.
+//
+// The cache write comes first: a relay read is a discovery window, and an event this
+// participant published must stay resolvable from this machine after the window
+// closes. Every market command that publishes prints these two blocks, which is why
+// this is one function rather than a copy per command.
+func reportPublished(ctx context.Context, published event.Event, report nostr.Report) error {
+	cache := dirCache{dir: cacheDirectory()}
+
+	if err := cache.Put(ctx, published); err != nil {
+		return err
+	}
+
+	fmt.Print(renderOutboundCached(published.ID, cacheDirectory()))
+	fmt.Print(renderRelayResults(report))
+
+	return nil
 }

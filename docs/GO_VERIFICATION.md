@@ -74,6 +74,29 @@ Run on a live swap, in the same state tree, one implementation after the other:
 | `run SWAP` | identical |
 | `status` | identical |
 | `market`, `market-state`, `market-state --json` | identical on live relay evidence |
+| `new`, `verify-blake`, `verify-btc`, `fund-blake`, `fund-btc`, `claim-btc`, `claim-blake`, `refund-btc`, `refund-blake` | identical, proved by a scripted walk that runs both implementations |
+| `publish-offer`, `accept-offer`, `receive-accept`, `publish-*`/`receive-*` funding, claim and refund, `complete`, `extract-secret`, `resume-all`, `publish-market-offer`, `publish-market-match` | identical, same walk |
+
+How that is proved, and what it covers: `TestCLIParityUnknownSwap` runs every command
+that takes a swap id against the same durable state with both implementations and
+compares the refusal sentence — the half that can be compared exactly, because
+neither side changes anything. `TestCLIParityProtocolWalk`, `TestCLIParityRefundWalk`
+and `TestCLIParityMarketWalk` run the same scripted walk twice, once with each
+implementation driving, and compare every step's output, normalising only the
+identifiers that legitimately differ: transaction and event ids, keys, addresses,
+heights, fees, the output index the HTLC landed in, and a remaining-lifetime figure
+that can fall either side of a minute boundary.
+
+```bash
+go test ./cmd/blake-swap-cli/ -run TestCLIParity
+```
+
+Not yet identical, and therefore not compared in those walks: the relay-chatter line
+`Nostr event found on: ...` that the fetching market commands print, the
+`MARKET MATCH PUBLISHED` block inside `accept-market-take`, the `OFFER ACCEPTED`
+block inside `accept-market-match`, and the take-listing commands. Those commands are
+correct and tested; their wording has not been diffed, and the market walk says so
+rather than implying coverage it does not have.
 
 Four divergences are deliberate and are recorded in [`GO_PORT_MAP.md`](GO_PORT_MAP.md) §5:
 JSON output is JSON only, a refusal is one `ERROR:` line rather than a traceback,

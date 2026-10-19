@@ -192,7 +192,13 @@ func publishMarketMatch(
 		return matchPublication{}, err
 	}
 
-	if _, err := client.Publish(ctx, built); err != nil {
+	report, err := client.Publish(ctx, built)
+
+	if err != nil {
+		return matchPublication{}, err
+	}
+
+	if err := reportPublished(ctx, built, report); err != nil {
 		return matchPublication{}, err
 	}
 

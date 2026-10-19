@@ -174,8 +174,30 @@ func readMarket(ctx context.Context, limit int) (marketRead, error) {
 		}
 	}
 
-	events := append([]event.Event{}, report.Events...)
-	events = append(events, cachedEvents(ctx, client.Cache)...)
+	// The relay's copy and the cached copy of one event are the same evidence, so the
+	// merge is by id. Appending both would double every offer this participant has
+	// seen before, which shows up first as a wrong count and then as a book with the
+	// same offer twice in it.
+	seen := make(map[string]bool, len(report.Events))
+	events := make([]event.Event, 0, len(report.Events))
+
+	for _, e := range report.Events {
+		if seen[e.ID] {
+			continue
+		}
+
+		seen[e.ID] = true
+		events = append(events, e)
+	}
+
+	for _, e := range cachedEvents(ctx, client.Cache) {
+		if seen[e.ID] {
+			continue
+		}
+
+		seen[e.ID] = true
+		events = append(events, e)
+	}
 
 	return marketRead{events: events, answered: report.Answered, relays: report.Relays}, nil
 }

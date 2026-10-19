@@ -65,8 +65,31 @@ type Message struct {
 	Path string
 }
 
-// ErrNotFound is returned when a record or message does not exist.
+// ErrNotFound is matched when a record or message does not exist.
+//
+// It is a sentinel to match on, not a phrase to print: the messages that carry it
+// are the reference's, word for word, because a refusal is part of the command
+// surface an operator reads.
 var ErrNotFound = fmt.Errorf("not found")
+
+// notFound is an error whose text is exactly what the reference says, and which
+// still matches ErrNotFound under errors.Is.
+//
+// Wrapping ErrNotFound with %w would append its own words to the message, which is
+// how a port ends up saying "record X: not found" where the reference says
+// "No swap found: X".
+type notFound struct{ message string }
+
+func (e notFound) Error() string { return e.message }
+
+// Is makes errors.Is(err, ErrNotFound) true for every not-found error this package
+// builds, so callers keep branching on the sentinel rather than on the text.
+func (e notFound) Is(target error) bool { return target == ErrNotFound }
+
+// notFoundError builds one not-found error with the reference's wording.
+func notFoundError(format string, args ...any) error {
+	return notFound{message: fmt.Sprintf(format, args...)}
+}
 
 // ValidateRole refuses a role the protocol does not have.
 func ValidateRole(role string) error {

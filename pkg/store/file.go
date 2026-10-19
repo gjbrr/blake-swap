@@ -86,7 +86,7 @@ func (f *File) Load(_ context.Context, swapID string) (*model.Swap, error) {
 	data, err := os.ReadFile(f.recordPath(swapID))
 
 	if errors.Is(err, fs.ErrNotExist) {
-		return nil, fmt.Errorf("%s record %s: %w", swapID, swapID, ErrNotFound)
+		return nil, notFoundError("No swap found: %s", swapID)
 	}
 
 	if err != nil {
@@ -151,7 +151,7 @@ func (f *File) Archive(_ context.Context, role, swapID string) error {
 
 	if _, err := os.Stat(source); err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			return fmt.Errorf("%s: %w", swapID, ErrNotFound)
+			return notFoundError("No swap found: %s", swapID)
 		}
 
 		return err
@@ -217,7 +217,7 @@ func (f *File) ReceiveMessage(_ context.Context, swapID, kind string) (*Message,
 	data, err := os.ReadFile(path)
 
 	if errors.Is(err, fs.ErrNotExist) {
-		return nil, fmt.Errorf("No %s message: %s: %w", kind, swapID, ErrNotFound)
+		return nil, notFoundError("No %s message: %s", kind, swapID)
 	}
 
 	if err != nil {

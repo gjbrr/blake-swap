@@ -112,7 +112,13 @@ func runTakeMarketOffer(ctx context.Context, engine *swap.Engine, args []string)
 		return err
 	}
 
-	if _, err := client.Publish(ctx, built); err != nil {
+	published, err := client.Publish(ctx, built)
+
+	if err != nil {
+		return err
+	}
+
+	if err := reportPublished(ctx, built, published); err != nil {
 		return err
 	}
 

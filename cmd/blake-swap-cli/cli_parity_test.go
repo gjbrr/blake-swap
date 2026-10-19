@@ -87,6 +87,9 @@ var volatile = []*regexp.Regexp{
 	// walk fund different addresses. What is comparable is that the address and the
 	// expected address agree.
 	regexp.MustCompile(`\bbcrt1[a-z0-9]+`),
+	// A remaining lifetime is a clock difference: two runs a fraction of a second
+	// apart can land either side of a minute boundary.
+	regexp.MustCompile(`\b\d+[smhd]\b`),
 	// Which output index the HTLC landed in depends on how the node assembled the
 	// funding transaction, and both indexes are valid. The engine's own verification
 	// is what proves the right output was read, and the command succeeding is that
@@ -256,6 +259,13 @@ func TestCLIParityUnknownSwap(t *testing.T) {
 	// it and the port must accept it.
 	for _, command := range []string{"sync-funding", "sync-settlement"} {
 		p.compareRefusals(t, command, command, missing, "--role", "alice")
+	}
+
+	// A match this participant has never seen is refused, and the refusal is
+	// comparable. Ignoring a match that already has local state is a different
+	// refusal, covered by the market walk's ordering.
+	for _, command := range []string{"ignore-match", "take-market-offer"} {
+		p.compareRefusals(t, command, command, strings.Repeat("00", 32))
 	}
 
 	// `next` with no argument is discovery and takes no id; `next SWAP_ID` is this

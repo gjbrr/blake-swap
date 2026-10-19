@@ -433,7 +433,7 @@ MODULES: list[Module] = [
     ),
     Module(
         "src/swap_v2.py (CLI)", "cmd/blake-swap-cli", "partial",
-        "the drop-in CLI: every command with the reference's arguments and environment, plus `next` with no argument as discovery and `next SWAP_ID` as an extension. Byte-identical to the reference on live evidence: `show`, `list`, `status`, `reconcile` (human and JSON), `dashboard` (human and JSON), `resume` (with and without a prefix), `run`, `market`, `market-state` (human and JSON). The remaining gap is output text for the commands not in that list: they are correct and tested, and their wording has not been diffed against the reference",
+        "the drop-in CLI: every command with the reference's arguments and environment, plus `next` with no argument as discovery and `next SWAP_ID` as an extension. Byte-identical to the reference, proved command by command by a scripted walk that runs both implementations: `show`, `list`, `status`, `reconcile`, `dashboard`, `resume`, `run`, `market`, `market-state`, `new`, `publish-offer`, `accept-offer`, `receive-accept`, every funding, claim and refund publish and receive, `verify-blake`, `verify-btc`, `fund-blake`, `fund-btc`, `claim-btc`, `claim-blake`, `refund-btc`, `refund-blake`, `complete`, `extract-secret`, `resume-all`, `publish-market-offer`, `publish-market-match`. The four market commands that fetch by id still print their relay chatter differently; they are correct and tested, and that wording is the remaining gap",
         [], ["main"],
     ),
     Module(

@@ -38,7 +38,7 @@ Statuses: **ported** (behaviour and tests), **partial** (in progress), **pending
 | `src/swap_v2.py (commands)` | `pkg/swap` | ported | the 58 commands as a Go API: the full settlement lifecycle, refunds, the offer/accept handshake, the market commands, and the reporting/recovery/resume paths; a Go participant completes real swaps and refunds against the Python reference in both directions, and both implementations agree about the protocol report. Output-text parity is tracked on the CLI row, not here |
 | `src/swap_agent.py` | `pkg/agent` | ported | the autonomous participant's step table, the conditional steps it re-reads the record for, and the failure budget that stops it; the CLI's `agent` command is the equivalent of the reference's separate script |
 | `src/swap_v2.py (market flow)` | `pkg/marketflow` | ported | market events: offer, take, cancel and match are built, parsed and validated the same way; state is derived from evidence, for one offer and for a whole book of them; the market commands that drive it are in the CLI |
-| `src/swap_v2.py (CLI)` | `cmd/blake-swap-cli` | partial | the drop-in CLI: every command with the reference's arguments and environment, plus `next` with no argument as discovery and `next SWAP_ID` as an extension. Byte-identical to the reference on live evidence: `show`, `list`, `status`, `reconcile` (human and JSON), `dashboard` (human and JSON), `resume` (with and without a prefix), `run`, `market`, `market-state` (human and JSON). The remaining gap is output text for the commands not in that list: they are correct and tested, and their wording has not been diffed against the reference |
+| `src/swap_v2.py (CLI)` | `cmd/blake-swap-cli` | partial | the drop-in CLI: every command with the reference's arguments and environment, plus `next` with no argument as discovery and `next SWAP_ID` as an extension. Byte-identical to the reference, proved command by command by a scripted walk that runs both implementations: `show`, `list`, `status`, `reconcile`, `dashboard`, `resume`, `run`, `market`, `market-state`, `new`, `publish-offer`, `accept-offer`, `receive-accept`, every funding, claim and refund publish and receive, `verify-blake`, `verify-btc`, `fund-blake`, `fund-btc`, `claim-btc`, `claim-blake`, `refund-btc`, `refund-blake`, `complete`, `extract-secret`, `resume-all`, `publish-market-offer`, `publish-market-match`. The four market commands that fetch by id still print their relay chatter differently; they are correct and tested, and that wording is the remaining gap |
 | `(new)` | `pkg/vault` | ported | passphrase KDF and record encryption with the NIP-44 primitives |
 | `(new)` | `pkg/proxy` | ported | the node RPC proxy: credentials stay server-side, the method allowlist and a per-address rate limit are the boundary |
 | `(new)` | `pkg/worker` | ported | the browser worker's domains: the event loop, the encrypted-state domain, the read-only engine domain it drives through the app server's proxy, the market domain that reads, publishes and takes over the browser's own WebSocket, the coordination domain that publishes and receives all seven settlement message types over a relay with sender pinning and fail-closed decryption, and the command dispatcher |
@@ -164,7 +164,7 @@ A suite is **ported** only when a Go test names it with a `// Parity:` marker an
 | `btc_dynamic_settlement_tests.py` | `pkg/settle` | ported | `pkg/settle:TestBTCDynamicSettlementConvergesToTheMeasuredFee` |
 | `chain_cli_transport_tests.py` | `pkg/rpc` | ported | `pkg/rpc:TestTransportParityDisposition` |
 | `cli_wiring_tests.py` | `cmd/blake-swap-cli` | ported | `cmd/blake-swap-cli:TestCommandRegistryDispatchesEveryReferenceCommand` |
-| `command_surface_tests.py` | `cmd/blake-swap-cli` | ported | `cmd/blake-swap-cli:TestRenderIgnoredMatchesTheReference` |
+| `command_surface_tests.py` | `cmd/blake-swap-cli` | ported | `cmd/blake-swap-cli:TestCLIParityUnknownSwap`<br>`cmd/blake-swap-cli:TestCLIParityProtocolWalk`<br>`cmd/blake-swap-cli:TestRenderIgnoredMatchesTheReference` |
 | `docs_alignment_tests.py` | `internal/docsalign` | ported | `internal/docsalign:TestWaiversAreSpecific` |
 | `driver_policy_tests.py` | `cmd/blake-swap-cli` | ported | `cmd/blake-swap-cli:TestRenderDriverHeaderMatchesTheReference` |
 | `dynamic_settlement_builder_tests.py` | `pkg/settle` | ported | `pkg/settle:TestBuildConvergesAcrossADustCycle` |
@@ -195,18 +195,18 @@ A suite is **ported** only when a Go test names it with a `// Parity:` marker an
 | `swap_cross_impl_full_happy_tests.py` | `internal/rigsuites` | ported | `internal/rigsuites:TestCrossImplHandshakeAndSettlement` |
 | `swap_cross_impl_offer_tests.py` | `internal/rigsuites` | ported | `internal/rigsuites:TestCrossImplHandshakeAndSettlement` |
 | `swap_dashboard_json_tests.py` | `cmd/blake-swap-cli` | ported | `cmd/blake-swap-cli:TestSwapDashboardJSONDocumentShape` |
-| `swap_driver_surface_tests.py` | `cmd/blake-swap-cli` | ported | `cmd/blake-swap-cli:TestNextTakesTheOnlyOpenOffer` |
+| `swap_driver_surface_tests.py` | `cmd/blake-swap-cli` | ported | `cmd/blake-swap-cli:TestCLIParityUnknownSwap`<br>`cmd/blake-swap-cli:TestNextTakesTheOnlyOpenOffer` |
 | `swap_dynamic_fee_integration_tests.py` | `pkg/swap` | ported | `pkg/swap:TestSwapDynamicFeeIntegrationTradeMinimum` |
 | `swap_encrypted_coordination_tests.py` | `pkg/nostr` | ported | `pkg/nostr:TestParseMode` |
 | `swap_isolated_full_chain_swap_tests.py` | `internal/rigsuites` | ported | `internal/rigsuites:TestIsolatedNostrHandshakeSuite`<br>`internal/rigsuites:TestIsolatedFullChainSwapSuite` |
 | `swap_isolated_nostr_handshake_tests.py` | `internal/rigsuites` | ported | `internal/rigsuites:TestIsolatedNostrHandshakeSuite` |
-| `swap_market_flow_tests.py` | `cmd/blake-swap-cli` | ported | `cmd/blake-swap-cli:TestSwapMarketFlow` |
-| `swap_market_takes_json_tests.py` | `cmd/blake-swap-cli` | ported | `cmd/blake-swap-cli:TestCacheDirectoryMatchesTheReferenceStateTree` |
+| `swap_market_flow_tests.py` | `cmd/blake-swap-cli` | ported | `cmd/blake-swap-cli:TestCLIParityMarketWalk`<br>`cmd/blake-swap-cli:TestSwapMarketFlow` |
+| `swap_market_takes_json_tests.py` | `cmd/blake-swap-cli` | ported | `cmd/blake-swap-cli:TestCLIParityMarketWalk`<br>`cmd/blake-swap-cli:TestCacheDirectoryMatchesTheReferenceStateTree` |
 | `swap_model_settlement_identity_tests.py` | `pkg/model` | ported | `pkg/model:TestSwapModelSettlementIdentityAcceptsALegacyRecord` |
 | `swap_model_timeout_invariant_tests.py` | `pkg/model` | ported | `pkg/model:TestNewRecord` |
 | `swap_participant_isolation_tests.py` | `internal/rigsuites` | ported | `internal/rigsuites:TestChainAutonomySuite` |
 | `swap_peer_recovery_tests.py` | `internal/rigsuites` | ported | `internal/rigsuites:TestPeerRecoverySuite` |
-| `swap_protocol_tests.py` | `internal/rigsuites` | ported | `internal/rigsuites:TestProtocolSuite` |
+| `swap_protocol_tests.py` | `cmd/blake-swap-cli, internal/rigsuites` | ported | `cmd/blake-swap-cli:TestCLIParityProtocolWalk`<br>`internal/rigsuites:TestProtocolSuite` |
 | `swap_reorg_safety_tests.py` | `internal/rigsuites` | ported | `internal/rigsuites:TestReorgSafetySuite` |
 | `swap_resume_step_budget_tests.py` | `cmd/blake-swap-cli` | ported | `cmd/blake-swap-cli:TestResumeRendersNoResumable` |
 | `swap_reverse_market_flow_tests.py` | `cmd/blake-swap-cli` | ported | `cmd/blake-swap-cli:TestSwapMarketFlow` |

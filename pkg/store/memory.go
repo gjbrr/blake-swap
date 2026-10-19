@@ -73,7 +73,7 @@ func (m *Memory) Load(_ context.Context, swapID string) (*model.Swap, error) {
 	m.mu.Unlock()
 
 	if !found {
-		return nil, fmt.Errorf("%s record %s: %w", swapID, swapID, ErrNotFound)
+		return nil, notFoundError("No swap found: %s", swapID)
 	}
 
 	return decodeSwap(data, nil)
@@ -117,7 +117,7 @@ func (m *Memory) Archive(_ context.Context, role, swapID string) error {
 	data, found := m.records[swapID]
 
 	if !found {
-		return fmt.Errorf("%s: %w", swapID, ErrNotFound)
+		return notFoundError("No swap found: %s", swapID)
 	}
 
 	m.archived[swapID] = data
@@ -178,7 +178,7 @@ func (m *Memory) ReceiveMessage(_ context.Context, swapID, kind string) (*Messag
 	m.mu.Unlock()
 
 	if !found {
-		return nil, fmt.Errorf("No %s message: %s: %w", kind, swapID, ErrNotFound)
+		return nil, notFoundError("No %s message: %s", kind, swapID)
 	}
 
 	message, err := decodeMessage(data, kind)

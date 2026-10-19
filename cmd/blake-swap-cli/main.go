@@ -1332,13 +1332,6 @@ func runComplete(ctx context.Context, engine *swap.Engine, args []string) error 
 	fmt.Print(renderComplete(*role, record.SwapID, record.State))
 
 	return nil
-
-	fmt.Println("SWAP COMPLETE")
-	fmt.Println("=============")
-	fmt.Println("swap id:", positional[0])
-	fmt.Println("role:  ", *role)
-
-	return nil
 }
 
 // runReconcile prints the protocol report, as JSON or as text.

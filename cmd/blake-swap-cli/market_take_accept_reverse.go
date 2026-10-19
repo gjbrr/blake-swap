@@ -181,7 +181,13 @@ func acceptReverseMarketTake(
 		return err
 	}
 
-	if _, err := client.Publish(ctx, built); err != nil {
+	report, err := client.Publish(ctx, built)
+
+	if err != nil {
+		return err
+	}
+
+	if err := reportPublished(ctx, built, report); err != nil {
 		return err
 	}
 

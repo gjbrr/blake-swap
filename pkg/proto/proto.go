@@ -69,6 +69,43 @@ type Result struct {
 	Text string `json:"text,omitempty"`
 	// Error names the failure when OK is false.
 	Error string `json:"error,omitempty"`
+	// Data is the structured view of the command's result, when it has one.
+	//
+	// Text stays because the CLI's output is a contract of its own and because a
+	// terminal, a log and a bug report all want one line; Data exists because the page
+	// must not parse that line. A command with a view returns both, and the view is the
+	// authority for the UI.
+	Data json.RawMessage `json:"data,omitempty"`
+}
+
+// WithData attaches a view to a result.
+//
+// A view that cannot be encoded is a programming error, not an operator's problem: the
+// result keeps its text and loses its data rather than failing a command that already
+// succeeded. The error is reported so a test can assert it never happens in practice.
+func WithData(r Result, v any) (Result, error) {
+	encoded, err := json.Marshal(v)
+
+	if err != nil {
+		return r, fmt.Errorf("encode %s view: %w", r.Command, err)
+	}
+
+	r.Data = encoded
+
+	return r, nil
+}
+
+// DecodeData parses a result's view into v.
+func DecodeData(r Result, v any) error {
+	if len(r.Data) == 0 {
+		return fmt.Errorf("%s result has no data", r.Command)
+	}
+
+	if err := json.Unmarshal(r.Data, v); err != nil {
+		return fmt.Errorf("decode %s view: %w", r.Command, err)
+	}
+
+	return nil
 }
 
 // EncodeRequest renders a request as a command body.

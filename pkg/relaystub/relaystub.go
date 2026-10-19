@@ -59,8 +59,12 @@ type Stub struct {
 //
 // The caller closes it. A started-but-unclosed listening socket leaks a file descriptor per
 // test, which shows up much later as "too many open files" in an unrelated suite.
-func New() (*Stub, error) {
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
+func New() (*Stub, error) { return Listen("127.0.0.1:0") }
+
+// Listen starts a relay on one address. An empty address means a loopback port chosen by the
+// kernel, which is what a test wants; a fixed one is what a two-host run wants.
+func Listen(address string) (*Stub, error) {
+	listener, err := net.Listen("tcp", address)
 
 	if err != nil {
 		return nil, err

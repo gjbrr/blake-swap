@@ -570,7 +570,50 @@ python3 scripts/wire_inventory.py   # regenerate the wire message inventory
 
 ---
 
-## 15. Safety summary
+## 15. A local relay, and the market path across both implementations
+
+A swap between two hosts needs one shared thing: a relay. Testing against a
+public relay makes the result depend on somebody else's retention policy and
+rate limits, and it makes a regtest walkthrough need the internet for no
+protocol reason.
+
+`cmd/blake-swap-relay` is a local relay for exactly that:
+
+```bash
+./bin/blake-swap-relay -addr 127.0.0.1:7781
+# NOSTR RELAY
+# url: ws://127.0.0.1:7781
+```
+
+Point both participants at it:
+
+```bash
+export BLAKE_SWAP_NOSTR_RELAYS=ws://127.0.0.1:7781
+```
+
+It holds events in memory for the life of the process, has no authentication
+and no persistence, and does not verify signatures — every client in this
+protocol verifies what it reads, which is where the obligation belongs. It is a
+test utility, not a relay to run for real money.
+
+The complete market handshake has been run across the two implementations over
+this relay, with the Python engine as the taker and the Go engine as the maker:
+
+| Step | Who | Command | Result |
+|---|---|---|---|
+| 1 | Go maker | `publish-market-offer --blake 10 --sats 50000` | offer on the local relay |
+| 2 | Python taker | `take-market-offer <offer>` | signed take published |
+| 3 | Go maker | `accept-market-take <take>` | swap created, protocol offer and match published |
+| 4 | Python taker | `accept-market-match <match>` | swap imported, `v1.5` timeouts independently validated |
+
+Step 4 reported "Bob independently validated v1.5 timeout safety" from the
+match the Go engine signed, which is the property that matters: the two
+implementations agree about the negotiation without sharing a line of code, and
+neither side learns the other's secret.
+
+---
+
+## 16. Safety summary
 
 - Both hosts must run the **same** commit.
 - Both hosts must pass `blake-health` and `blake-peer-health` before

@@ -210,3 +210,22 @@ They exist so that the compatibility suites test a second implementation
 rather than the engine against itself. Any wire change must be reflected
 there in the same commit, or the evidence they provide stops meaning
 anything.
+
+## The market accept path
+
+The browser client can publish a market offer and read the book, takes and matches, but it
+cannot complete a take: `market.accept-take`, `market.accept-match`, `market.cancel` and
+`market.ignore-match` are still CLI commands. The accept path lives in
+`cmd/blake-swap-cli` (`market_take_accept.go`, `market_accept_match.go`,
+`market_match_publish.go` and their reverse-direction siblings) and has not been moved into a
+package the worker can call.
+
+Because a take that cannot be imported is a dead end, the **Take** button is rendered
+disabled, with a title that says so. A market trade today is: publish in the browser, take
+and accept with the CLI against the same swap id, settle in the browser.
+
+Closing it means extracting that state machine — take validation, selection records, the
+protocol offer and the match publication, and the taker's import — into a shared package and
+having the CLI render from its result rather than owning it. That is a refactor of about
+2,500 lines whose acceptance test is the CLI's own output staying byte-identical, so it was
+not attempted in the same pass as the client.

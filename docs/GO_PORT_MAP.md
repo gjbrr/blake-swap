@@ -338,7 +338,8 @@ Five layers. Arrows are import direction; nothing lower imports anything higher.
 | `cmd/blake-swap-cli` | `argparse` + `main()` | drop-in CLI: parsing, dispatch, output, exit codes |
 | `cmd/server` | (new) | static hosting, `/rpc/{btc,blake}` proxy, config, auth token. Built as `bin/blake-swap-app` |
 | `pkg/proto` | (new) | page ↔ worker request/response contract |
-| `pkg/worker`, `pkg/page` | (new / extends) | worker domain wiring (vault, engine, market, coord); page presentation |
+| `pkg/worker`, `pkg/page` | (new / extends) | worker domain wiring (vault, engine, market, coord); the page's six views, its confirmation dialog and its busy rule |
+| `pkg/view` | (new) | engine result → view model, so the page renders instead of parsing |
 | `pkg/nodeconfig` | `tests/node_config.py` | which node a command talks to: environment, then a running rig, then conventional locations; a stopped rig is a reason, not a fallback |
 | `pkg/relaystub` | (new) | a loopback relay the suites and the browser check drive, so no test needs a public relay |
 | `cmd/blake-swap-relay` | (new) | the same relay as a binary, for a two-host run |
@@ -398,8 +399,8 @@ build rather than quietly becoming a claim.
 | M2 | `reconcile`, `htlc`, `psbt` | the 12-action table and witness classifier match Python on recorded fixtures |
 | M3 | `rpc`/`chain`/`fund`/`settle`/`observe` against a real regtest through the proxy | **partly done**: `rpc`, `chain`, `contract`, `fund` and `observe` are in; `settle` remains |
 | M4 | `cmd/blake-swap-cli` | the existing suites run with `$SWAP_V2` pointed at the Go binary |
-| M5 | `store`/`vault`/`coord`/`nostr` + worker domains | two browser instances complete a swap on regtest; `store`, `nostr`, `coord` and the worker's coordination transport are in, the funding and settlement commands remain read-only |
-| M6 | `marketflow` (offer, take, match, cancel, import) + page UI | the whole market cycle driven from the UI |
+| M5 | `store`/`vault`/`coord`/`nostr` + worker domains | **done**: the worker exposes the engine's whole write surface, and `scripts/verify-browser.py` completes a full swap in the browser against a CLI counterparty in **both** protocol roles, plus a reload mid-swap |
+| M6 | `marketflow` (offer, take, match, cancel, import) + page UI | **partly done**: publishing, reading the book, takes and matches are driven from the UI; the *accept* path (take → swap → match, and match import) is still CLI-only, so the Take button is disabled rather than dead |
 
 M4 and the orly reuse are the two big schedule wins: one gives a mechanical
 parity test (the corpus already exists), the other removes the crypto and Nostr

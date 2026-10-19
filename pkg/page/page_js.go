@@ -991,6 +991,7 @@ func applyResult(state *app, result proto.Result) {
 		routeText(ElementVault, result.Text, "ok")
 
 	case "vault.create", "vault.unlock":
+		setInputValue(InputPassphrase, "")
 		state.unlocked = true
 		markVaultOpen(true)
 		setVaultChip("unlocked", "ok")
@@ -1007,6 +1008,13 @@ func applyResult(state *app, result proto.Result) {
 
 	case "identity.set":
 		routeText(panelFor(result.Command), result.Text, "ok")
+
+		//
+		// The secret has been sealed by the worker, so the field it was typed into is
+		// cleared: a value left in an input is a secret on screen, in the accessibility
+		// tree and in whatever a screenshot keeps.
+		//
+		setInputValue(InputIdentitySecret, "")
 		setIdentitySecretOnce("")
 
 	case "identity.generate":

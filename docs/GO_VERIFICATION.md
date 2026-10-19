@@ -158,6 +158,34 @@ The browser check drives the page the way a person does and asserts document mar
 than scraping text. Its market step and its coordination steps use the browser's own
 `WebSocket`: no CLI-side socket, no proxy, no node.
 
+### The browser can settle a whole swap, in either role
+
+`scripts/verify-browser.py` now drives the product rather than the cockpit. It starts a
+loopback relay and the app server in front of the live rig, then:
+
+| Scenario | What it proves |
+|---|---|
+| browser Alice, CLI Bob | create, publish, accept, receive, fund BLAKE, receive Bitcoin funding, claim Bitcoin, receive the BLAKE claim, complete — with the checkpoint asserted after every step and both sides' transaction ids recorded |
+| browser Bob, CLI Alice | the same swap with the roles reversed, in the **same vault and the same wallets**: the wallet is not the role |
+| reload in the middle | the vault locks, unlocking restores the dashboard **and the selected swap** from the sealed store, and the next action is still the right one |
+| refusals | an action the engine refuses is shown in its own words; an unknown swap is refused; a dead relay is an error rather than an empty market; a triple click sends one command |
+
+The worker's write surface is the engine's, not a second protocol: create, publish, accept,
+receive, fund, verify, claim, refund, extract, complete, sync, resume, recovery plan, watch,
+refresh, dashboard, list, show, reconcile, next, and the ten announce/receive commands, each
+returning the engine's answer plus a structured view. The page renders the view; it never
+parses the CLI's text, and it never formats an amount.
+
+Two rules are asserted rather than described:
+
+- **one command at a time.** The document carries `data-busy` and `data-commands-sent`, and
+  the check triple-clicks a control and proves one command left the page. That check also
+  found a real bug: a refused command used to queue a refresh, so a failed read of a swap that
+  does not exist queued another read of it, forever.
+- **a refusal is shown, not swallowed.** The action helpers fail a scenario when the inline
+  error is non-empty, so a confirmed dialog that the engine refused cannot be mistaken for
+  success.
+
 ### The browser can carry a settlement message
 
 The worker's coordination domain publishes and receives all seven settlement message types
@@ -278,7 +306,9 @@ port work:
 | `make wasmtest` | exit 0: every WASM-testable package under TinyGo |
 | `tinygo test -target=wasm ./pkg/keys ./pkg/event ./pkg/nostr ./pkg/nip44 ./pkg/coord` | pass, all five packages |
 | `make wasm` | pass, both modules |
-| `python3 scripts/verify-browser.py` | exit 0: hello, boot gate, encrypted self-test, vault, identity, market relays/publish/list/take, coordination a–f, settlement transport round trip, proxy, engine heights |
+| `go test ./internal/fuzz/` (seeds) | pass: model, wire, proto, market, keys and NIP-44 parsers, including the empty-key and one-byte-key cases |
+| `go test -fuzz=Fuzz... -fuzztime 15s` (six targets) | ~2.3M executions, no panic |
+| `python3 scripts/verify-browser.py` | exit 0, 46 PASS: hello, boot gate, encrypted self-test, vault, identity, relays/proxy/wallets, market read and publish, coordination a–f, settlement transport round trip, engine heights, **browser-Alice full swap, browser-Bob full swap, reload mid-swap, four refusal paths** |
 | `python3 scripts/go_parity.py --check` | `parity manifest: current` |
 | `.venv/bin/python tests/docs_alignment_tests.py` | 11 checks, 0 failures |
 | `.venv/bin/python tests/cli_wiring_tests.py` | 58 subcommands, 0 failures |

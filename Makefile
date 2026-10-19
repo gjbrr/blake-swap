@@ -5,7 +5,7 @@
 #
 #   make          build both wasm instances and copy the loader
 #   make server   build the development server binary (also TinyGo)
-#   make serve    build everything, then run the server
+#   make serve    build everything, then run the server against the local rig
 #   make verify   build, then prove the worker's greeting reaches the page
 #   make test     native Go tests (packages that are not wasm-only)
 #   make clean    remove generated wasm, the server binary and the loader
@@ -57,8 +57,13 @@ $(SERVER): $(SOURCES) $(LOADER)
 	@mkdir -p $(BIN)
 	$(TINYGO) build -o $@ ./cmd/server
 
-serve: wasm server
-	$(SERVER) -addr 127.0.0.1:8787 -dir $(WEB)
+# The development loop: build the app and serve it against the running rig.
+#
+# It delegates to scripts/serve-dev.sh, which reads the rig's own description so nobody
+# copies four paths by hand. `make serve ARGS="--addr 127.0.0.1:9000"` passes options
+# through.
+serve:
+	./scripts/serve-dev.sh $(ARGS)
 
 verify: wasm
 	./scripts/verify-hello.sh

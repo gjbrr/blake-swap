@@ -398,8 +398,8 @@ MODULES: list[Module] = [
         ["atomic_write_json", "load_local_swap", "local_swap_paths", "file_send_message", "file_receive_message"],
     ),
     Module(
-        "src/swap_v2.py (commands)", "pkg/swap", "partial",
-        "the 58 commands as a Go API: the full settlement lifecycle, refunds, the offer/accept handshake, and the reporting/recovery/resume commands are in; a Go participant completes real swaps and refunds against the Python reference in both directions, and both implementations agree about the protocol report; market commands remain",
+        "src/swap_v2.py (commands)", "pkg/swap", "ported",
+        "the 58 commands as a Go API: the full settlement lifecycle, refunds, the offer/accept handshake, the market commands, and the reporting/recovery/resume paths; a Go participant completes real swaps and refunds against the Python reference in both directions, and both implementations agree about the protocol report. Output-text parity is tracked on the CLI row, not here",
         ["Engine", "Status", "Show", "List", "Advance", "FundBlake", "FundBTC", "VerifyBlake", "VerifyBTC",
          "ClaimBTC", "ClaimBlake", "RefundBTC", "RefundBlake", "Complete", "ExtractSecret",
          "AnnounceBlakeFunding", "ReceiveBlakeFunding", "AnnounceBTCFunding", "ReceiveBTCFunding",
@@ -423,8 +423,8 @@ MODULES: list[Module] = [
         ["Plan", "Run", "Terminal", "DefaultPolicy", "Outcome", "Host"], ["alice_step", "bob_step"],
     ),
     Module(
-        "src/swap_v2.py (market flow)", "pkg/marketflow", "partial",
-        "market events: offer, take, cancel and match are built, parsed and validated by the reference; state is derived from evidence the same way, for one offer and for a whole book of them; the market commands remain",
+        "src/swap_v2.py (market flow)", "pkg/marketflow", "ported",
+        "market events: offer, take, cancel and match are built, parsed and validated the same way; state is derived from evidence, for one offer and for a whole book of them; the market commands that drive it are in the CLI",
         ["BuildOffer", "ParseOffer", "BuildTake", "ParseTake", "BuildCancel", "ParseCancel", "BuildMatch",
          "ParseMatch", "DeriveState", "CancellationApplies", "Book", "OpenOffers", "Entry", "MarketFilters"],
         ["build_market_offer_v2_event", "nostr_parse_market_offer_event", "build_market_take_event",
@@ -433,7 +433,7 @@ MODULES: list[Module] = [
     ),
     Module(
         "src/swap_v2.py (CLI)", "cmd/blake-swap-cli", "partial",
-        "the drop-in CLI: the implemented commands with the reference's arguments and environment; `market`, `market-state` and `market-state --json` are byte-identical to the reference on live relay evidence, and `show` and `list` are byte-identical to it on real records written by each implementation, the verified-event cache is the reference's `nostr-event-cache` and is read by both implementations in either direction, and `run` is byte-identical to the reference on a live swap, the market publish, cancel, take, match, accept, import and bridge confirmations plus the accept-offer block and the prefix refusals are pinned byte for byte by tests, and every settlement command now takes the client's `--fee-rate`, which outranks the environment; the rest of the output text is not yet",
+        "the drop-in CLI: every command with the reference's arguments and environment, plus `next` with no argument as discovery and `next SWAP_ID` as an extension. Byte-identical to the reference on live evidence: `show`, `list`, `status`, `reconcile` (human and JSON), `dashboard` (human and JSON), `resume` (with and without a prefix), `run`, `market`, `market-state` (human and JSON). The remaining gap is output text for the commands not in that list: they are correct and tested, and their wording has not been diffed against the reference",
         [], ["main"],
     ),
     Module(
@@ -449,27 +449,27 @@ MODULES: list[Module] = [
         ["run_chain_cli", "chain_dispatch"],
     ),
     Module(
-        "(new)", "pkg/worker", "partial",
-        "the browser worker's domains: the event loop, the encrypted-state domain, the read-only engine domain it drives through the app server's proxy, the market domain that reads, publishes and takes over the browser's own WebSocket, and the command dispatcher",
+        "(new)", "pkg/worker", "ported",
+        "the browser worker's domains: the event loop, the encrypted-state domain, the read-only engine domain it drives through the app server's proxy, the market domain that reads, publishes and takes over the browser's own WebSocket, the coordination domain that publishes and receives all seven settlement message types over a relay with sender pinning and fail-closed decryption, and the command dispatcher",
         ["NewVaultDomain", "Domain", "Chans", "SecretRelays", "DefaultRelays"],
         [],
     ),
     Module(
-        "(new)", "pkg/client", "partial",
+        "(new)", "pkg/client", "ported",
         "the browser client's encrypted state: a store.Store whose records are sealed with a passphrase-derived key before they reach IndexedDB, with a pluggable entropy source",
         ["Encrypted", "Create", "Open", "KV", "Memory"],
         ["load_swap", "save_swap", "atomic_write_json"],
     ),
     Module(
         "src/swap_v2.py (seeded adversarial corpus scheduler)", "pkg/adversary", "partial",
-        "the corpus's language-independent scheduler: the documented SHA-256 derivation, the stage vocabulary it chooses at, the fault profiles, and the rule that no seed may degenerate into the happy path; replaying the generated events against a live pair remains the reference harness's",
+        "the corpus's language-independent scheduler: the documented SHA-256 derivation, the stage vocabulary it chooses at, the fault profiles, and the rule that no seed may degenerate into the happy path. The part that is not here is not a port gap: replaying generated events against a live pair is the reference harness's job, and `tests/swap_seeded_adversarial_tests.py` still does it",
         ["Choice", "Build", "Corpus", "Schedule", "DefaultSeeds", "FaultProfiles", "FaultVocabulary",
          "Paths"],
         ["deterministic_schedule_choice", "build_fault_schedule", "DEFAULT_SEEDS"],
     ),
     Module(
         "(new)", "pkg/adapter", "partial",
-        "the portable participant interface `blake-swap-adapter-v1`: capabilities, role-pinned commands and the portable state projection, served one JSON request per process; the pair orchestration and seeded scenario scheduling remain the reference harness's",
+        "the portable participant interface `blake-swap-adapter-v1`: capabilities, role-pinned commands and the portable state projection, served one JSON request per process. The part that is not here is not a port gap: pair orchestration and seeded scenario scheduling belong to the reference harness, which is what drives two implementations against each other",
         ["Capabilities", "Handle", "PortableState", "Decode", "Encode", "Protocol", "Operations", "Roles",
          "PortableFields"],
         ["PARTICIPANT_ADAPTER_SURFACE", "PythonParticipantAdapter", "SwapImplementationPair"],

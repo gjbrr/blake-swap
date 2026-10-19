@@ -650,6 +650,49 @@ func assertState(t *testing.T, r *rig, s *side, messages, id, want string) {
 	}
 }
 
+// recordField reads one field from a participant's stored record.
+func recordField(t *testing.T, s *side, id, field string) (any, bool) {
+	t.Helper()
+
+	raw, err := os.ReadFile(filepath.Join(s.state, id+".json"))
+
+	if err != nil {
+		t.Fatalf("reading %s's record: %v", s.name, err)
+	}
+
+	var record map[string]any
+
+	if err := json.Unmarshal(raw, &record); err != nil {
+		t.Fatalf("decoding %s's record: %v", s.name, err)
+	}
+
+	value, present := record[field]
+
+	return value, present
+}
+
+// assertFieldPresent requires a field to be stored with a non-empty value.
+func assertFieldPresent(t *testing.T, s *side, messages, id, field string) {
+	t.Helper()
+
+	value, present := recordField(t, s, id, field)
+
+	if !present || value == nil || fmt.Sprint(value) == "" {
+		t.Fatalf("%s did not record %s", s.name, field)
+	}
+}
+
+// assertFieldAbsent requires a field to be absent or null.
+func assertFieldAbsent(t *testing.T, s *side, messages, id, field string) {
+	t.Helper()
+
+	value, present := recordField(t, s, id, field)
+
+	if present && value != nil && fmt.Sprint(value) != "" {
+		t.Fatalf("%s recorded %s, which it must not have", s.name, field)
+	}
+}
+
 // TestCrossImplRecordIsReadableByPython is the cheapest interop check, and the one
 // that fails first when a field name drifts: a record written by the Go engine must
 // load in the Python engine.
@@ -689,5 +732,99 @@ print("blake base units:", record.blake_amount_base_units)
 
 	if !strings.Contains(string(loaded), "python loaded: "+id) {
 		t.Fatalf("Python did not load the record:\n%s", loaded)
+	}
+}
+
+// TestCrossImplStageByStage asserts the protocol's checkpoints one message at a time.
+//
+// The reference's cross-implementation suites are organised by stage — offer, accept, BLAKE
+// funded, Bitcoin funded, Bitcoin claimed, BLAKE claimed, the whole happy path — because a
+// counterpoint that agrees at the end can still have agreed for the wrong reasons. This walks
+// the same stages in the same order, in both directions, and asserts what each side believes
+// after every message rather than only at the end.
+func TestCrossImplStageByStage(t *testing.T) {
+	r := loadRig(t)
+
+	for _, dir := range directions() {
+		t.Run(dir.name, func(t *testing.T) {
+			messages := t.TempDir()
+
+			alice, bob := sides(t, dir)
+
+			// Stage 1: offer. Alice writes it; Bob's accept must refuse anything but the
+			// Alice identity the offer names.
+			output := run(t, r, alice, messages, "new", "--blake", "0.001", "--sats", "25000")
+			id := swapID(t, output)
+
+			assertState(t, r, alice, messages, id, "OFFERED")
+
+			run(t, r, alice, messages, "publish-offer", id)
+
+			// Stage 2: accept. Bob consumes the offer and pins Alice's identity from the
+			// message itself, so the pairing is authenticated rather than configured.
+			run(t, r, bob, messages, "accept-offer", id, "--expected-alice-pub", alice.public)
+
+			assertState(t, r, bob, messages, id, "OFFERED")
+
+			run(t, r, alice, messages, "receive-accept", id)
+
+			// Alice now knows Bob's two contract keys and nothing else, which is the
+			// property the accept message exists to carry. `show` renders the reference's
+			// print_swap, which does not list contract keys, so the record itself is read:
+			// the claim here is about what is stored, not about what is displayed.
+			assertFieldPresent(t, alice, messages, id, "blake_bob_pub")
+			assertFieldPresent(t, alice, messages, id, "btc_bob_pub")
+
+			// And nothing in Alice's record may be Bob's secret: she has the hashlock.
+			assertFieldAbsent(t, alice, messages, id, "revealed_secret_hex")
+
+			// Stage 3: BLAKE funded. Alice funds and announces; Bob validates the
+			// announcement against the chain rather than trusting it.
+			run(t, r, alice, messages, "fund-blake", id)
+
+			assertState(t, r, alice, messages, id, "BLAKE_FUNDED")
+
+			run(t, r, alice, messages, "publish-blake-funded", id)
+			run(t, r, bob, messages, "receive-blake-funded", id)
+
+			assertState(t, r, bob, messages, id, "BLAKE_FUNDED")
+
+			// Stage 4: Bitcoin funded. Bob funds only after independently checking the
+			// BLAKE leg, and Alice then verifies his announcement the same way.
+			run(t, r, bob, messages, "fund-btc", id)
+
+			assertState(t, r, bob, messages, id, "BTC_FUNDED")
+
+			run(t, r, bob, messages, "publish-btc-funded", id)
+			run(t, r, alice, messages, "receive-btc-funded", id)
+
+			assertState(t, r, alice, messages, id, "BTC_FUNDED")
+
+			// Stage 5: Bitcoin claimed. Alice reveals the preimage in the claim, which is
+			// how Bob learns the secret — there is no message that carries it.
+			run(t, r, alice, messages, "claim-btc", id)
+
+			assertState(t, r, alice, messages, id, "BTC_CLAIMED")
+
+			run(t, r, alice, messages, "publish-btc-claimed", id)
+			run(t, r, bob, messages, "receive-btc-claimed", id)
+
+			// Stage 6: BLAKE claimed. Bob recovers the secret from the Bitcoin chain, not
+			// from Alice, then claims with it.
+			run(t, r, bob, messages, "extract-secret", id)
+			run(t, r, bob, messages, "claim-blake", id)
+
+			assertState(t, r, bob, messages, id, "BLAKE_CLAIMED")
+
+			run(t, r, bob, messages, "publish-blake-claimed", id)
+			run(t, r, alice, messages, "receive-blake-claimed", id)
+
+			// Stage 7: complete. Alice's record closes; Bob's stays at BLAKE_CLAIMED
+			// because the BLAKE claim is his last protocol act.
+			run(t, r, alice, messages, "complete", id)
+
+			assertState(t, r, alice, messages, id, "COMPLETE")
+			assertState(t, r, bob, messages, id, "BLAKE_CLAIMED")
+		})
 	}
 }

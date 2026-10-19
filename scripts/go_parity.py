@@ -502,6 +502,16 @@ SUITE_REPLACEMENTS: dict[str, tuple[str, str]] = {
     "swap_autonomous_agents_tests.py": ("pkg/agent", "partial"),
     "agent_policy_tests.py": ("pkg/agent", "partial"),
     "driver_policy_tests.py": ("cmd/blake-swap-cli", "partial"),
+    # The cross-implementation suites are one protocol walk each, organised by stage. The
+    # Go replacement walks the same stages in the same order with the two engines as
+    # counterparties, in both directions, so the mapping is to the package that runs it.
+    "swap_cross_impl_offer_tests.py": ("pkg/swap", "partial"),
+    "swap_cross_impl_accept_tests.py": ("pkg/swap", "partial"),
+    "swap_cross_impl_blake_funded_tests.py": ("pkg/swap", "partial"),
+    "swap_cross_impl_btc_funded_tests.py": ("pkg/swap", "partial"),
+    "swap_cross_impl_btc_claimed_tests.py": ("pkg/swap", "partial"),
+    "swap_cross_impl_blake_claimed_tests.py": ("pkg/swap", "partial"),
+    "swap_cross_impl_full_happy_tests.py": ("pkg/swap", "partial"),
 }
 
 

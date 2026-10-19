@@ -522,6 +522,11 @@ SUITE_REPLACEMENTS: dict[str, tuple[str, str]] = {
     # reaches it.
     "swap_resume_step_budget_tests.py": ("cmd/blake-swap-cli", "partial"),
     "swap_driver_surface_tests.py": ("cmd/blake-swap-cli", "partial"),
+    # The pending-production suites assert that an unconfirmed funding or settlement leaves
+    # the durable state where it was and reuses its transaction on a retry. Those are
+    # engine-level properties, and the Go tests that pin them are named for the behaviour.
+    "production_funding_pending_tests.py": ("pkg/swap", "partial"),
+    "production_settlement_pending_tests.py": ("pkg/swap", "partial"),
 }
 
 

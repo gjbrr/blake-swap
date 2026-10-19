@@ -51,6 +51,33 @@ type Config struct {
 	Password string
 	// Timeout is the per-attempt RPC timeout.
 	TimeoutMilliseconds int
+	// RetryAttempts is how many times a read-only method may be attempted. Zero
+	// means the transport's default.
+	RetryAttempts int
+	// RetryBackoffMilliseconds is the delay before the second attempt, doubled
+	// for each one after it. A negative value is refused rather than clamped.
+	RetryBackoffMilliseconds int
+	// RetryMaxBackoffMilliseconds bounds that doubling.
+	RetryMaxBackoffMilliseconds int
+}
+
+// client builds the RPC client this configuration describes.
+func (c Config) client(transport rpc.Transport) *rpc.Client {
+	client := &rpc.Client{Transport: transport}
+
+	if c.RetryAttempts > 0 {
+		client.MaxAttempts = c.RetryAttempts
+	}
+
+	if c.RetryBackoffMilliseconds > 0 {
+		client.Backoff = time.Duration(c.RetryBackoffMilliseconds) * time.Millisecond
+	}
+
+	if c.RetryMaxBackoffMilliseconds > 0 {
+		client.MaxBackoff = time.Duration(c.RetryMaxBackoffMilliseconds) * time.Millisecond
+	}
+
+	return client
 }
 
 // timeout is the per-attempt deadline, zero meaning none.
@@ -89,7 +116,7 @@ func New(name Chain, cfg Config) (*Node, error) {
 
 	return &Node{
 		Chain:  name,
-		Client: &rpc.Client{Transport: transport},
+		Client: cfg.client(transport),
 		config: cfg,
 	}, nil
 }
@@ -107,11 +134,9 @@ func (n *Node) WithWallet(wallet string) *Node {
 		config.URL = walletURL(n.config.URL, wallet)
 		copied.config = config
 
-		copied.Client = &rpc.Client{
-			Transport: platform.NewTransport(
-				config.URL, config.User, config.Password, config.timeout(),
-			),
-		}
+		copied.Client = config.client(platform.NewTransport(
+			config.URL, config.User, config.Password, config.timeout(),
+		))
 	}
 
 	return &copied
@@ -1237,4 +1262,84 @@ const defaultRPCTimeout = 120 * time.Second
 // testable and so a future platform has one place to change.
 func env(name string) string {
 	return strings.TrimSpace(os.Getenv(name))
+}
+
+// RetryPolicy is how many times a read-only RPC may be attempted, and how long
+// to wait between attempts.
+//
+// The allowlist itself is not configurable: which methods may be retried is a
+// safety property, not a preference. Only the count and the delays are knobs.
+type RetryPolicy struct {
+	// Attempts is the first attempt plus its retries.
+	Attempts int
+	// Backoff is the delay before the second attempt, doubled after that.
+	Backoff time.Duration
+	// MaxBackoff bounds the doubling.
+	MaxBackoff time.Duration
+}
+
+// RetryFromEnv reads the retry policy from the environment.
+//
+// The defaults and the validation are the reference's: three attempts, a one
+// second backoff capped at thirty, a non-integer or out-of-range value refused
+// rather than clamped. Clamping would silently give an operator a policy they did
+// not ask for, which on a read that is being retried is how a slow node becomes a
+// hung one.
+func RetryFromEnv() (RetryPolicy, error) {
+	policy := RetryPolicy{Attempts: 3, Backoff: time.Second, MaxBackoff: 30 * time.Second}
+
+	if raw := env("BLAKE_SWAP_RPC_MAX_ATTEMPTS"); raw != "" {
+		attempts, err := strconv.Atoi(raw)
+
+		if err != nil {
+			return policy, fmt.Errorf("BLAKE_SWAP_RPC_MAX_ATTEMPTS must be an integer")
+		}
+
+		if attempts < 1 {
+			return policy, fmt.Errorf("BLAKE_SWAP_RPC_MAX_ATTEMPTS must be at least 1")
+		}
+
+		policy.Attempts = attempts
+	}
+
+	cap, err := secondsFromEnv("BLAKE_SWAP_RPC_MAX_RETRY_BACKOFF_SECONDS", 30)
+
+	if err != nil {
+		return policy, err
+	}
+
+	policy.MaxBackoff = cap
+
+	backoff, err := secondsFromEnv("BLAKE_SWAP_RPC_RETRY_BACKOFF_SECONDS", 1)
+
+	if err != nil {
+		return policy, err
+	}
+
+	// The reference returns the smaller of the two, so a large base cannot
+	// outgrow its own cap.
+	policy.Backoff = min(backoff, cap)
+
+	return policy, nil
+}
+
+// secondsFromEnv reads a non-negative duration in seconds.
+func secondsFromEnv(name string, fallback float64) (time.Duration, error) {
+	raw := env(name)
+
+	if raw == "" {
+		return time.Duration(fallback * float64(time.Second)), nil
+	}
+
+	value, err := strconv.ParseFloat(raw, 64)
+
+	if err != nil {
+		return 0, fmt.Errorf("%s must be a number", name)
+	}
+
+	if value < 0 {
+		return 0, fmt.Errorf("%s must not be negative", name)
+	}
+
+	return time.Duration(value * float64(time.Second)), nil
 }

@@ -530,7 +530,7 @@ func (r *Rig) Exec(
 
 	cmd := exec.Command(binary, command...)
 	cmd.Dir = r.Repo
-	cmd.Env = append(r.Env(s, messages), extraEnv...)
+	cmd.Env = overrideEnv(r.Env(s, messages), extraEnv)
 
 	output, err := cmd.CombinedOutput()
 
@@ -563,6 +563,55 @@ func (r *Rig) RunPythonScript(t *testing.T, s *Side, messages, script string, ex
 	}
 
 	return string(output)
+}
+
+// overrideEnv applies extra environment to a base environment, replacing any
+// earlier value for the same name.
+//
+// Appending is not enough: a child process takes the *first* match for a name, so
+// an appended override would be silently ignored and the test would exercise the
+// default it thought it had replaced.
+func overrideEnv(base, extra []string) []string {
+	if len(extra) == 0 {
+		return base
+	}
+
+	replaced := make(map[string]bool, len(extra))
+	merged := make([]string, 0, len(base)+len(extra))
+
+	for _, entry := range base {
+		name, _, ok := strings.Cut(entry, "=")
+
+		if ok && replaced[name] {
+			continue
+		}
+
+		if ok {
+			for _, candidate := range extra {
+				if other, _, ok := strings.Cut(candidate, "="); ok && other == name {
+					replaced[name] = true
+					merged = append(merged, candidate)
+
+					goto next
+				}
+			}
+		}
+
+		merged = append(merged, entry)
+
+	next:
+	}
+
+	for _, candidate := range extra {
+		name, _, ok := strings.Cut(candidate, "=")
+
+		if ok && !replaced[name] {
+			replaced[name] = true
+			merged = append(merged, candidate)
+		}
+	}
+
+	return merged
 }
 
 // swapIDPattern matches the identifier each CLI prints.
@@ -1010,7 +1059,7 @@ func (r *Rig) Command(
 
 	command := exec.Command(binary, args...)
 	command.Dir = r.Repo
-	command.Env = append(r.Env(s, messages), extraEnv...)
+	command.Env = overrideEnv(r.Env(s, messages), extraEnv)
 
 	return command
 }

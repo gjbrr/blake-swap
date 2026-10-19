@@ -191,7 +191,7 @@ Every Python suite, and the Go package whose tests cover the same ground where o
 | `swap_cross_impl_full_happy_tests.py` | `pkg/swap` | partial |
 | `swap_cross_impl_offer_tests.py` | `pkg/swap` | partial |
 | `swap_dashboard_json_tests.py` | `cmd/blake-swap-cli` | partial |
-| `swap_driver_surface_tests.py` | — | pending |
+| `swap_driver_surface_tests.py` | `cmd/blake-swap-cli` | partial |
 | `swap_dynamic_fee_integration_tests.py` | `pkg/swap` | partial |
 | `swap_encrypted_coordination_tests.py` | `pkg/nostr` | partial |
 | `swap_isolated_full_chain_swap_tests.py` | — | pending |
@@ -204,7 +204,7 @@ Every Python suite, and the Go package whose tests cover the same ground where o
 | `swap_peer_recovery_tests.py` | — | pending |
 | `swap_protocol_tests.py` | — | pending |
 | `swap_reorg_safety_tests.py` | — | pending |
-| `swap_resume_step_budget_tests.py` | — | pending |
+| `swap_resume_step_budget_tests.py` | `cmd/blake-swap-cli` | partial |
 | `swap_reverse_market_flow_tests.py` | — | pending |
 | `swap_seeded_adversarial_tests.py` | `pkg/adversary` | partial |
 | `swap_settlement_crash_matrix_tests.py` | — | pending |

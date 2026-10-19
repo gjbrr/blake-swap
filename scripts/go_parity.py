@@ -517,6 +517,11 @@ SUITE_REPLACEMENTS: dict[str, tuple[str, str]] = {
     # lives in the package that implements it, so the suite maps to the CLI that dispatches
     # them and to the two packages whose behaviour it pins.
     "command_surface_tests.py": ("cmd/blake-swap-cli", "partial"),
+    # The resume step budget is forwarded by the CLI, and the driver surface is the CLI's
+    # commands: both suites are about what a command does when reached the way an operator
+    # reaches it.
+    "swap_resume_step_budget_tests.py": ("cmd/blake-swap-cli", "partial"),
+    "swap_driver_surface_tests.py": ("cmd/blake-swap-cli", "partial"),
 }
 
 

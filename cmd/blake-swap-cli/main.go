@@ -1340,9 +1340,16 @@ func handOverToDriver(
 ) error {
 	fmt.Print(renderResuming(item, attention))
 
-	args := []string{item.record.SwapID, "--max-steps", strconv.Itoa(maxSteps)}
+	return runDriver(ctx, engine, driverHandoffArgs(item.record.SwapID, maxSteps))
+}
 
-	return runDriver(ctx, engine, args)
+// driverHandoffArgs is what resume passes to the driver.
+//
+// The budget is forwarded explicitly because the caller asked for it: a resume that silently
+// used the driver's default would ignore the one knob an operator has over how much the
+// automatic path may do in one invocation.
+func driverHandoffArgs(swapID string, maxSteps int) []string {
+	return []string{swapID, "--max-steps", strconv.Itoa(maxSteps)}
 }
 
 // renderNoResumable is what an empty resume queue prints.

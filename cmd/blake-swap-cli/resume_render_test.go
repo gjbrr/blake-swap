@@ -193,3 +193,22 @@ func TestResumeHandsOffOnlyLiveSwaps(t *testing.T) {
 		}
 	}
 }
+
+// TestResumeForwardsTheStepBudget: the resume command's --max-steps reaches the driver
+// explicitly, because a resume that silently used the driver's default would ignore the one
+// knob an operator has over how much the automatic path may do in one invocation.
+func TestResumeForwardsTheStepBudget(t *testing.T) {
+	args := driverHandoffArgs("aaaa00000001", 1)
+
+	want := []string{"aaaa00000001", "--max-steps", "1"}
+
+	if len(args) != len(want) {
+		t.Fatalf("args = %v", args)
+	}
+
+	for index := range want {
+		if args[index] != want[index] {
+			t.Fatalf("args = %v, want %v", args, want)
+		}
+	}
+}

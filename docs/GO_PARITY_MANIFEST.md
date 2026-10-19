@@ -82,7 +82,7 @@ Statuses: **ported** (behaviour and tests), **partial** (in progress), **pending
 
 ## CLI commands (58)
 
-The Go CLI dispatches 47 of these 58. Implemented means the command exists with the reference's arguments and environment; it does not by itself mean the output text is identical, which is tracked per command in the module table above.
+The Go CLI dispatches 48 of these 58. Implemented means the command exists with the reference's arguments and environment; it does not by itself mean the output text is identical, which is tracked per command in the module table above.
 
 | Command | Go | Status |
 |---|---|---|
@@ -137,7 +137,7 @@ The Go CLI dispatches 47 of these 58. Implemented means the command exists with 
 | `watch-htlc` | `run` | implemented |
 | `recovery-plan` | `run` | implemented |
 | `reconcile` | `run` | implemented |
-| `ignore-match` | — | pending |
+| `ignore-match` | `run` | implemented |
 | `next` | `run` | implemented |
 | `dashboard` | `run` | implemented |
 | `dismiss` | — | pending |

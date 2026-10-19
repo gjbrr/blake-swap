@@ -142,6 +142,8 @@ func run(ctx context.Context, engine *swap.Engine, command string, args []string
 		return runRebroadcastNostrEvent(ctx, args)
 	case "market-matches":
 		return runMarketMatches(ctx, engine, args)
+	case "ignore-match":
+		return runIgnoreMatch(ctx, engine, args)
 	case "new":
 		return runNew(ctx, engine, args)
 	case "show":

@@ -36,50 +36,12 @@ func runMarketMatches(ctx context.Context, engine *swap.Engine, args []string) e
 	}
 
 	me := key.PublicKey()
-	client := marketClient()
-	now := time.Now()
 
-	report, err := client.FetchReport(ctx, nostr.Filter{
-		Kinds:  []int{1},
-		Topics: []string{marketflow.MatchTag},
-		PTags:  []string{me},
-		Limit:  *limit,
-	})
+	matches, err := fetchMatches(ctx, key, *limit)
 
 	if err != nil {
 		return err
 	}
-
-	evidence := append([]event.Event{}, report.Events...)
-	evidence = append(evidence, cachedEvents(ctx, client.Cache)...)
-
-	for _, found := range report.Events {
-		if err := client.Cache.Put(ctx, found); err != nil {
-			return err
-		}
-	}
-
-	// The dependencies a match names but this read did not return: a relay may hold a
-	// match and not its offer, and the match is not evidence until both are present.
-	missing := missingReferences(evidence)
-
-	if len(missing) > 0 {
-		dependencies, err := client.FetchMany(ctx, nostr.Filter{Kinds: []int{1}, Ids: missing})
-
-		if err != nil {
-			return err
-		}
-
-		for _, found := range dependencies {
-			if err := client.Cache.Put(ctx, found); err != nil {
-				return err
-			}
-		}
-
-		evidence = append(evidence, dependencies...)
-	}
-
-	matches := marketflow.MatchesFor(me, evidence, now)
 
 	fmt.Print(renderMarketMatches(me, matches))
 
@@ -170,4 +132,55 @@ func renderMarketMatches(me string, matches []marketflow.MatchEntry) string {
 	out.WriteString("PASS: market terms preserved\n")
 
 	return out.String()
+}
+
+// fetchMatches reads the matches addressed to one identity, resolving the offer and take
+// each one names. It is shared by every command whose subject is a match.
+func fetchMatches(
+	ctx context.Context, key *nostr.Key, limit int,
+) ([]marketflow.MatchEntry, error) {
+	me := key.PublicKey()
+	client := marketClient()
+
+	report, err := client.FetchReport(ctx, nostr.Filter{
+		Kinds:  []int{1},
+		Topics: []string{marketflow.MatchTag},
+		PTags:  []string{me},
+		Limit:  limit,
+	})
+
+	if err != nil {
+		return nil, err
+	}
+
+	evidence := append([]event.Event{}, report.Events...)
+	evidence = append(evidence, cachedEvents(ctx, client.Cache)...)
+
+	for _, found := range report.Events {
+		if err := client.Cache.Put(ctx, found); err != nil {
+			return nil, err
+		}
+	}
+
+	// The dependencies a match names but this read did not return: a relay may hold a
+	// match and not its offer, and the match is not evidence until both are present.
+	missing := missingReferences(evidence)
+
+	if len(missing) > 0 {
+		dependencies, err := client.FetchMany(ctx, nostr.Filter{Kinds: []int{1}, Ids: missing})
+
+		if err != nil {
+			return nil, err
+		}
+
+		for _, found := range dependencies {
+			if err := client.Cache.Put(ctx, found); err != nil {
+				return nil, err
+			}
+		}
+
+		evidence = append(evidence, dependencies...)
+	}
+
+	return marketflow.MatchesFor(me, evidence, time.Now()), nil
 }

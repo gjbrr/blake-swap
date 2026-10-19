@@ -25,6 +25,7 @@ import (
 	"github.com/gjbrr/blake-swap/pkg/coord"
 	"github.com/gjbrr/blake-swap/pkg/fund"
 	"github.com/gjbrr/blake-swap/pkg/model"
+	"github.com/gjbrr/blake-swap/pkg/nodeconfig"
 	"github.com/gjbrr/blake-swap/pkg/nostr"
 	"github.com/gjbrr/blake-swap/pkg/reconcile"
 	"github.com/gjbrr/blake-swap/pkg/state"
@@ -2354,29 +2355,46 @@ func buildEngine() (*swap.Engine, func(), error) {
 	return engine, cleanup, nil
 }
 
-// nodeFromDatadir builds a node from a regtest datadir.
+// nodeFromDatadir builds a node from a resolved datadir.
 //
 // The reference engine shells out to bitcoin-cli; this one speaks RPC, so it needs
 // the port from bitcoin.conf and the cookie the node wrote. Both are what a
 // datadir already contains, which keeps the configuration surface identical.
+//
+// Which datadir is decided by pkg/nodeconfig, and the order is the reference
+// harness's: an explicit environment variable, then a test rig that says it is
+// running, then the conventional locations. A rig that has been stopped is
+// reported as stopped rather than silently standing in for whatever datadir
+// happens to exist: connecting to an unrelated node is a worse answer than
+// saying the rig is down.
 func nodeFromDatadir(ch chain.Chain) (*chain.Node, error) {
-	envName := "BLAKE_SWAP_BTC_DATADIR"
+	config := nodeconfig.Resolve(nodeconfig.Options{})
 
-	if ch == chain.Blake {
-		envName = "BLAKE_SWAP_BLAKE_DATADIR"
+	configured := config.Blake
+	envName := nodeconfig.BlakeEnvDatadir
+	label := "BLAKE"
+
+	if ch == chain.BTC {
+		configured = config.BTC
+		envName = nodeconfig.BTCEnvDatadir
+		label = "Bitcoin"
 	}
 
-	datadir := os.Getenv(envName)
+	datadir := configured.Datadir
 
 	if datadir == "" {
-		home, err := os.UserHomeDir()
+		reasons := make([]string, 0, 2)
 
-		if err != nil {
-			return nil, err
+		if config.RigPresent && !config.RigRunning {
+			reasons = append(reasons,
+				"the scripts/test-nodes rig is stopped; start it with "+
+					"`scripts/test-nodes start`")
 		}
 
-		// The test rig publishes its datadirs; a real deployment sets the variable.
-		datadir = filepath.Join(home, ".blake-swap-test", string(ch))
+		reasons = append(reasons, fmt.Sprintf("%s datadir unresolved; set %s",
+			label, envName))
+
+		return nil, fmt.Errorf("%s node: %s", label, strings.Join(reasons, "; "))
 	}
 
 	port, err := rpcPort(datadir)

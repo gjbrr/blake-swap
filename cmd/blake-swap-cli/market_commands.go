@@ -33,7 +33,7 @@ const (
 func isIdentityOnlyCommand(command string) bool {
 	switch command {
 	case "cancel-market-offer", "inspect-market-take", "market-takes", "market-matches",
-		"ignore-match", "rebroadcast-nostr-event":
+		"ignore-match", "publish-market-match", "rebroadcast-nostr-event":
 		return true
 	}
 

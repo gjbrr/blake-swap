@@ -146,6 +146,8 @@ func run(ctx context.Context, engine *swap.Engine, command string, args []string
 		return runIgnoreMatch(ctx, engine, args)
 	case "dismiss":
 		return runDismiss(ctx, engine, args)
+	case "publish-market-match":
+		return runPublishMarketMatch(ctx, engine, args)
 	case "new":
 		return runNew(ctx, engine, args)
 	case "show":

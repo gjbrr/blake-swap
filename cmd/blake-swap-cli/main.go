@@ -97,6 +97,7 @@ commands:
   show SWAP_ID | list | status
   advance SWAP_ID STATE --role ROLE     (BLAKE_SWAP_TEST_MODE=1 only)
   accept-take OFFER_ID
+  accept-match [MATCH_ID_OR_PREFIX]
   accept-market-take TAKE_ID
   accept-market-match MATCH_ID
   accept-reverse-market-match MATCH_ID
@@ -160,6 +161,8 @@ func run(ctx context.Context, engine *swap.Engine, command string, args []string
 		return runAcceptMarketMatch(ctx, engine, args)
 	case "accept-reverse-market-match":
 		return runAcceptReverseMarketMatch(ctx, engine, args)
+	case "accept-match":
+		return runAcceptMatch(ctx, engine, args)
 	case "new":
 		return runNew(ctx, engine, args)
 	case "show":

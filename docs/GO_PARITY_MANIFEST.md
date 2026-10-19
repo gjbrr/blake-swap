@@ -82,7 +82,7 @@ Statuses: **ported** (behaviour and tests), **partial** (in progress), **pending
 
 ## CLI commands (58)
 
-The Go CLI dispatches 54 of these 58. Implemented means the command exists with the reference's arguments and environment; it does not by itself mean the output text is identical, which is tracked per command in the module table above.
+The Go CLI dispatches 55 of these 58. Implemented means the command exists with the reference's arguments and environment; it does not by itself mean the output text is identical, which is tracked per command in the module table above.
 
 | Command | Go | Status |
 |---|---|---|
@@ -113,7 +113,7 @@ The Go CLI dispatches 54 of these 58. Implemented means the command exists with 
 | `market-matches` | `run` | implemented |
 | `accept-reverse-market-match` | `run` | implemented |
 | `accept-reverse-swap-offer` | — | pending |
-| `accept-match` | — | pending |
+| `accept-match` | `run` | implemented |
 | `accept-market-match` | `run` | implemented |
 | `take-market-offer` | `run` | implemented |
 | `cancel-market-offer` | `run` | implemented |

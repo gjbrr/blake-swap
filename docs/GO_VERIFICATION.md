@@ -309,7 +309,7 @@ port work:
 | `make wasm` | pass, both modules |
 | `go test ./internal/fuzz/` (seeds) | pass: model, wire, proto, market, keys and NIP-44 parsers, including the empty-key and one-byte-key cases |
 | `go test -fuzz=Fuzz... -fuzztime 15s` (six targets) | ~2.3M executions, no panic |
-| `python3 scripts/verify-browser.py` | exit 0, 49 PASS: hello, boot gate, encrypted self-test, vault, identity, relays/proxy/wallets, market read and publish, coordination a–f, settlement transport round trip, engine heights, **browser-Alice full swap, browser-Bob full swap, reload mid-swap, four refusal paths, market handshake** |
+| `python3 scripts/verify-browser.py` | exit 0, 50 PASS: hello, boot gate, encrypted self-test, vault, identity, relays/proxy/wallets, market read and publish, coordination a–f, settlement transport round trip, engine heights, **browser-Alice full swap, browser-Bob full swap, reload mid-swap, four refusal paths, market handshake** |
 | `python3 scripts/go_parity.py --check` | `parity manifest: current` |
 | `.venv/bin/python tests/docs_alignment_tests.py` | 11 checks, 0 failures |
 | `.venv/bin/python tests/cli_wiring_tests.py` | 58 subcommands, 0 failures |

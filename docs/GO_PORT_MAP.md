@@ -361,6 +361,15 @@ data-model work entirely.
    node sent. A float would turn `0.1` into a nearby number and the engine
    would compare its own records against the wrong amount.
 
+8. **Two output divergences are deliberate, and both are about machine
+   readability rather than protocol content.** `market-takes --json` prints
+   only the JSON document; the reference prints a human "Nostr take read:"
+   line on stdout first, which makes the flag's own output unparseable. And a
+   refusal is reported as `ERROR: <message>` with the reference's message
+   text; the reference often raises an uncaught exception instead, so the same
+   words arrive wrapped in a traceback. The message bodies are byte-identical,
+   which is what a test or an operator reads.
+
 Open, deliberately: the passphrase UX (when it is asked, and what happens on a
 wrong one), whether the server also proxies relays, and whether the CLI shim
 ships in the browser bundle or only on hosts (it should be host-only).

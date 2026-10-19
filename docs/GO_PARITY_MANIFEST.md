@@ -197,7 +197,7 @@ Every Python suite, and the Go package whose tests cover the same ground where o
 | `swap_isolated_full_chain_swap_tests.py` | — | pending |
 | `swap_isolated_nostr_handshake_tests.py` | — | pending |
 | `swap_market_flow_tests.py` | — | pending |
-| `swap_market_takes_json_tests.py` | — | pending |
+| `swap_market_takes_json_tests.py` | `cmd/blake-swap-cli` | partial |
 | `swap_model_settlement_identity_tests.py` | `pkg/model` | partial |
 | `swap_model_timeout_invariant_tests.py` | `pkg/model` | partial |
 | `swap_participant_isolation_tests.py` | — | pending |

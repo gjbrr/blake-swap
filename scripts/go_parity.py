@@ -27,6 +27,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 SRC = ROOT / "src"
 PKG = ROOT / "pkg"
+CMD = ROOT / "cmd"
 TESTS = ROOT / "tests"
 MANIFEST = ROOT / "docs" / "GO_PARITY_MANIFEST.md"
 
@@ -166,11 +167,22 @@ def go_symbols(directory: Path) -> set[str]:
 
 
 def go_test_files() -> dict[str, set[str]]:
-    """Go test functions per package directory under pkg/."""
+    """Go test functions per package directory, under pkg/ and under cmd/.
+
+    The CLI packages are included because several Python suites are about the command
+    surface rather than a library: their Go replacements live beside the dispatcher, and a
+    manifest that could not see them would keep reporting them as unported.
+    """
 
     tests: dict[str, set[str]] = {}
 
-    for directory in sorted(PKG.iterdir()):
+    directories = [("pkg", directory) for directory in sorted(PKG.iterdir())]
+    directories += [("cmd", directory) for directory in sorted(CMD.iterdir())]
+
+    for prefix, directory in directories:
+        if not directory.is_dir():
+            continue
+
         names: set[str] = set()
 
         for path in directory.glob("*_test.go"):
@@ -181,7 +193,7 @@ def go_test_files() -> dict[str, set[str]]:
                     names.add(match.group(1))
 
         if names:
-            tests[directory.name] = names
+            tests[f"{prefix}/{directory.name}"] = names
 
     return tests
 
@@ -514,7 +526,7 @@ def suite_rows() -> list[Suite]:
         for package, tests in go_tests.items():
             if any(name.removesuffix("_tests.py").replace("_", "") in t.lower().replace("_", "")
                    for t in tests):
-                row.go = f"pkg/{package}"
+                row.go = package
                 row.status = "partial"
                 break
 

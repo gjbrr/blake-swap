@@ -361,6 +361,17 @@ async def market_round_trip(ws, budget: float, relay_url: str):
                 "document.getElementById('market').innerText.includes('MARKET OFFER PUBLISHED') ? 'true' : ''",
                 budget,
             )
+
+            # Read the id out of the panel while it is still the publish answer: the next
+            # command replaces this text, and the market view only shows prefixes.
+            await evaluate(ws, (
+                "(() => {"
+                "  const match = document.getElementById('market').innerText"
+                "    .match(/offer id:\\s*([0-9a-f]{64})/);"
+                "  window.__offerId = match ? match[1] : '';"
+                "  return window.__offerId;"
+                "})()"
+            ), [300])
         else:
             ready = await poll(
                 ws,
@@ -377,10 +388,47 @@ async def market_round_trip(ws, budget: float, relay_url: str):
 
         print(f"PASS: market {step} completed")
 
+    # Take the offer that was just advertised. Reading the id out of the panel is what a
+    # person does too: the market view is where the id comes from.
+    clicked = await evaluate(ws, (
+        "(() => {"
+        "  if (!window.__offerId) { return 'no-offer'; }"
+        "  document.getElementById('market-offer-id').value = window.__offerId;"
+        "  document.querySelector(\"[data-uicmd='market-take']\").click();"
+        "  return 'clicked';"
+        "})()"
+    ), [900])
+
+    if clicked != "clicked":
+        print(f"FAIL: no offer id was captured to take ({clicked})", file=sys.stderr)
+
+        return False
+
+    taken = await poll(
+        ws,
+        "document.getElementById('market').innerText.includes('MARKET OFFER TAKEN') ? 'true' : ''",
+        budget,
+    )
+
+    if taken != "true":
+        panel = await evaluate(ws, "document.getElementById('market').innerText", [900])
+        worker = await evaluate(ws, "document.getElementById('worker-status').innerText", [200])
+
+        print(
+            f"FAIL: the market take step never completed; panel:\n{panel}\nworker: {worker}",
+            file=sys.stderr,
+        )
+
+        return False
+
+    print("PASS: market take completed")
+
+    # The panel now holds the take's answer; the market view was asserted at the list
+    # step, before the take replaced it.
     text = await evaluate(ws, "document.getElementById('market').innerText", [900])
 
-    if "open offer(s)" not in text:
-        print(f"FAIL: the market panel reported no market view:\n{text}", file=sys.stderr)
+    if "MARKET OFFER TAKEN" not in text:
+        print(f"FAIL: the market panel did not confirm the take:\n{text}", file=sys.stderr)
 
         return False
 

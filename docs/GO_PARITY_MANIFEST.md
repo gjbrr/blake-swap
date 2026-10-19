@@ -167,7 +167,7 @@ Every Python suite, and the Go package whose tests cover the same ground where o
 | `htlc_key_recovery_tests.py` | — | pending |
 | `implementation_adapter_tests.py` | `pkg/adapter` | partial |
 | `installed_wheel_tests.py` | — | pending |
-| `market_state_tests.py` | — | pending |
+| `market_state_tests.py` | `pkg/marketflow` | partial |
 | `moxie_adapter_smoke_tests.py` | `pkg/adapter` | partial |
 | `nip44_tests.py` | — | pending |
 | `node_config_tests.py` | — | pending |

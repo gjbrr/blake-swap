@@ -78,6 +78,7 @@ renders as a descriptor containing `pk(None)`.
 | refund both legs | `pkg/swap` `TestCrossImplRefundBothLegs`, both directions | pass |
 | a Go record loads in Python | `pkg/swap` `TestCrossImplRecordIsReadableByPython` | pass |
 | market handshake, Go maker and Python taker, over a local relay | `cmd/blake-swap-relay` + both CLIs, recorded in [`REGTEST_TWO_HOST.md`](REGTEST_TWO_HOST.md) §15 | pass |
+| market handshake, **both sides Go**, over a local relay | `cmd/blake-swap-cli` `TestSwapMarketFlow` | pass |
 | the protocol report agrees | `pkg/swap` `assertReconcileAgrees` | pass |
 
 The market handshake is the one worth pointing at: the Python engine took a Go offer, the Go
@@ -95,7 +96,7 @@ the reference's eight default schedules (seeds 4, 17, 184467, 20261004 × claim/
 
 Recorded here rather than left to be inferred from the manifest:
 
-- **22 of the 60 reference suites are not mapped to a Go replacement.** Most are rig-driven
+- **20 of the 60 reference suites are not mapped to a Go replacement.** Most are rig-driven
   integration suites — the settlement crash, fault, race and recovery matrices, the isolated
   full-chain swap, the reorg and peer-recovery suites, the banned/adversarial schedulers — that
   drive a full two-chain swap with injected faults. Their Go counterparts would be integration

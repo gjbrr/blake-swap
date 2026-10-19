@@ -198,7 +198,7 @@ Every Python suite, and the Go package whose tests cover the same ground where o
 | `swap_encrypted_coordination_tests.py` | `pkg/nostr` | partial |
 | `swap_isolated_full_chain_swap_tests.py` | — | pending |
 | `swap_isolated_nostr_handshake_tests.py` | — | pending |
-| `swap_market_flow_tests.py` | — | pending |
+| `swap_market_flow_tests.py` | `cmd/blake-swap-cli` | partial |
 | `swap_market_takes_json_tests.py` | `cmd/blake-swap-cli` | partial |
 | `swap_model_settlement_identity_tests.py` | `pkg/model` | partial |
 | `swap_model_timeout_invariant_tests.py` | `pkg/model` | partial |
@@ -207,7 +207,7 @@ Every Python suite, and the Go package whose tests cover the same ground where o
 | `swap_protocol_tests.py` | — | pending |
 | `swap_reorg_safety_tests.py` | — | pending |
 | `swap_resume_step_budget_tests.py` | `cmd/blake-swap-cli` | partial |
-| `swap_reverse_market_flow_tests.py` | — | pending |
+| `swap_reverse_market_flow_tests.py` | `cmd/blake-swap-cli` | partial |
 | `swap_seeded_adversarial_tests.py` | `pkg/adversary` | partial |
 | `swap_settlement_crash_matrix_tests.py` | — | pending |
 | `swap_settlement_fault_matrix_tests.py` | — | pending |

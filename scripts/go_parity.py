@@ -527,6 +527,11 @@ SUITE_REPLACEMENTS: dict[str, tuple[str, str]] = {
     # engine-level properties, and the Go tests that pin them are named for the behaviour.
     "production_funding_pending_tests.py": ("pkg/swap", "partial"),
     "production_settlement_pending_tests.py": ("pkg/swap", "partial"),
+    # The market flow is driven through the CLI by two participants over a local relay, which
+    # is the same shape the reference suite has. The settlement that follows the match is the
+    # direct path, covered by the cross-implementation tests in pkg/swap.
+    "swap_market_flow_tests.py": ("cmd/blake-swap-cli", "partial"),
+    "swap_reverse_market_flow_tests.py": ("cmd/blake-swap-cli", "partial"),
 }
 
 

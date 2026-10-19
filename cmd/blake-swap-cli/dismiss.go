@@ -120,7 +120,7 @@ func dismissRefusal(record *model.Swap, report *reconcile.Report) error {
 		{"Bitcoin", report.BTC.Status},
 	} {
 		switch chain.status {
-		case reconcile.Funded, reconcile.Spent, reconcile.Unknown:
+		case reconcile.Funded, reconcile.Spent, reconcile.NotEvaluated:
 			return fmt.Errorf("Refusing to dismiss: %s status is '%s'", chain.name, chain.status)
 		case reconcile.Absent:
 			continue

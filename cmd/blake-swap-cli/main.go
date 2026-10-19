@@ -1589,7 +1589,7 @@ func reportJSON(report *reconcile.Report) map[string]any {
 		readiness["reasons"] = report.Readiness.Reasons
 	}
 
-	return map[string]any{
+	document := map[string]any{
 		"swap_id":             report.SwapID,
 		"participant_pubkey":  report.ParticipantPubkey,
 		"protocol_role":       string(report.ProtocolRole),
@@ -1603,22 +1603,33 @@ func reportJSON(report *reconcile.Report) map[string]any {
 			"source":       report.Secret.Source,
 			"hash_matches": report.Secret.HashMatches,
 		},
-		"heights": map[string]any{
-			"blake": report.Heights.Blake,
-			"btc":   report.Heights.BTC,
-		},
-		"timeouts": map[string]any{
-			"blake":                  report.Timeouts.BlakeTimeout,
-			"btc":                    report.Timeouts.BTCTimeout,
-			"blake_blocks_remaining": report.Timeouts.BlakeBlocksRemaining,
-			"btc_blocks_remaining":   report.Timeouts.BTCBlocksRemaining,
-		},
 		"blake":       observation(report.Blake),
 		"btc":         observation(report.BTC),
 		"next_action": string(report.NextAction),
 		"reason":      report.Reason,
-		"readiness":   readiness,
+		"read_only":   true,
 	}
+
+	// A negotiation that is not ready was not observed, so it has no heights, no
+	// timeouts and no readiness: those are facts about a handshake that never
+	// completed. Reporting zeros for them would read as a real measurement.
+	if report.NegotiationStatus != "ready" {
+		return document
+	}
+
+	document["heights"] = map[string]any{
+		"blake": report.Heights.Blake,
+		"btc":   report.Heights.BTC,
+	}
+	document["timeouts"] = map[string]any{
+		"blake":                  report.Timeouts.BlakeTimeout,
+		"btc":                    report.Timeouts.BTCTimeout,
+		"blake_blocks_remaining": report.Timeouts.BlakeBlocksRemaining,
+		"btc_blocks_remaining":   report.Timeouts.BTCBlocksRemaining,
+	}
+	document["readiness"] = readiness
+
+	return document
 }
 
 // printReconcile is the human form of the report.
@@ -1644,14 +1655,24 @@ func printReconcile(report *reconcile.Report) {
 	fmt.Println()
 	fmt.Println("TIMEOUT DISTANCE")
 	fmt.Println("----------------")
-	fmt.Println("BTC blocks:  ", report.Timeouts.BTCBlocksRemaining)
-	fmt.Println("BLAKE blocks:", report.Timeouts.BlakeBlocksRemaining)
+
+	// The distances are measurements, and a swap whose handshake never completed was not
+	// measured. Printing zeros here would read as "the deadlines are already reached".
+	if report.NegotiationStatus != "ready" {
+		fmt.Println("not evaluated")
+	} else {
+		fmt.Println("BTC blocks:  ", report.Timeouts.BTCBlocksRemaining)
+		fmt.Println("BLAKE blocks:", report.Timeouts.BlakeBlocksRemaining)
+	}
 	fmt.Println()
-	fmt.Println("DECISION")
-	fmt.Println("--------")
-	fmt.Println("class:      ", report.DecisionClass)
-	fmt.Println("next action:", report.NextAction)
-	fmt.Println("reason:     ", report.Reason)
+	fmt.Println("NEXT SAFE ACTION")
+	fmt.Println("----------------")
+	fmt.Println(report.NextAction)
+	fmt.Println()
+	fmt.Println("reason:")
+	fmt.Println(report.Reason)
+	fmt.Println()
+	fmt.Println("PASS: reconciliation was read-only; no funds or messages were sent")
 
 	if report.Readiness.Checked {
 		fmt.Println()
@@ -1667,9 +1688,9 @@ func printReconcile(report *reconcile.Report) {
 		for _, reason := range report.Readiness.Reasons {
 			fmt.Println("reason:", reason)
 		}
-	}
 
-	fmt.Println()
+		fmt.Println()
+	}
 }
 
 // chainObservation renders one chain's answer.
@@ -1892,7 +1913,7 @@ func dashboardJSON(summary swap.Dashboard) map[string]any {
 			"trade": map[string]any{
 				// Both amounts, as everywhere else: a UI wants the display value and a
 				// settlement wants the exact base units.
-				"blake_amount":            dashboardFloat(entry.BlakeAmount),
+				"blake_amount":            json.Number(pythonFloat(dashboardFloat(entry.BlakeAmount))),
 				"blake_amount_base_units": int64(entry.BlakeAmount),
 				"btc_sats":                entry.BTCSats,
 			},
@@ -2032,9 +2053,21 @@ func renderDashboard(summary swap.Dashboard) string {
 		}
 	}
 
-	if len(summary.Archived) > 0 {
-		fmt.Fprintf(&out, "\nARCHIVED\n--------\n%d archived swap(s)\n", len(summary.Archived))
+	out.WriteString("\nARCHIVED\n--------\n")
+
+	if len(summary.Archived) == 0 {
+		out.WriteString("No archived swaps.\n")
+	} else {
+		for _, entry := range summary.Archived {
+			fmt.Fprintf(&out, "%s  %s  %s\n", entry.SwapID, entry.Outcome, tradeText(entry))
+		}
 	}
+
+	fmt.Fprintf(&out, "\nSUMMARY\n-------\n")
+	fmt.Fprintf(&out, "active:     %d\n", len(summary.Active))
+	fmt.Fprintf(&out, "attention:  %d\n", len(summary.Attention))
+	fmt.Fprintf(&out, "settled:    %d\n", len(summary.Settled))
+	fmt.Fprintf(&out, "archived:   %d\n", len(summary.Archived))
 
 	return out.String()
 }

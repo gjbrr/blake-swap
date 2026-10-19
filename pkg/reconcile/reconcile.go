@@ -47,8 +47,13 @@ const (
 	// PendingSpend means a settlement transaction is broadcast and awaiting
 	// confirmation.
 	PendingSpend Status = "pending-spend"
-	// Unknown means the observation failed; that is never actionable.
-	Unknown Status = "unknown"
+	// NotEvaluated is a chain nobody has asked about yet.
+	//
+	// It is not a failure and not an absence: a report built before the chains are
+	// consulted says "not evaluated" so a client can tell "we did not look" from "we
+	// looked and there is nothing there". The reference spells it the same way, and a
+	// client parsing the report reads the string, not the constant's name.
+	NotEvaluated Status = "not-evaluated"
 	// Invalid means the chain data did not make sense for this swap.
 	Invalid Status = "invalid"
 	// Ambiguous means a spend exists but cannot be classified safely.
@@ -177,13 +182,13 @@ func Decide(swap *model.Swap, role Role, blake, btc Observation, h Heights) Deci
 	}
 
 	switch blake.Status {
-	case Unknown, Invalid, Ambiguous:
+	case NotEvaluated, Invalid, Ambiguous:
 		return decide(ActionManualAttention,
 			"BLAKE observation is "+string(blake.Status))
 	}
 
 	switch btc.Status {
-	case Unknown, Invalid, Ambiguous:
+	case NotEvaluated, Invalid, Ambiguous:
 		return decide(ActionManualAttention,
 			"Bitcoin observation is "+string(btc.Status))
 	}
@@ -622,6 +627,53 @@ type Report struct {
 	Readiness         Readiness
 }
 
+// SecretOf is what this participant can say about the secret S.
+//
+// It is a fact about the record, not about the chains, so it is available even when the
+// negotiation is not ready — and the reference reports it in that case too. A dashboard that
+// said "we know nothing" about a swap whose secret is sitting in the record would be hiding
+// the one thing that makes recovery possible.
+func SecretOf(swap *model.Swap, role Role) Secret {
+	var secret Secret
+
+	if swap == nil {
+		secret.Source = "none"
+
+		return secret
+	}
+
+	secretValue := ""
+	secret.Source = "none"
+
+	switch {
+	case role == Alice && swap.SecretHex != nil:
+		secretValue = *swap.SecretHex
+		secret.Source = "locally-generated"
+	case role == Bob && swap.RevealedSecretHex != nil:
+		secretValue = *swap.RevealedSecretHex
+		secret.Source = "recovered-from-bitcoin"
+	}
+
+	if secretValue == "" {
+		return secret
+	}
+
+	secret.Known = true
+
+	raw, err := hex.DecodeString(secretValue)
+
+	if err == nil && len(raw) == 32 {
+		sum := sha256.Sum256(raw)
+		matches := hex.EncodeToString(sum[:]) == swap.SecretHash
+		secret.HashMatches = &matches
+	} else {
+		matches := false
+		secret.HashMatches = &matches
+	}
+
+	return secret
+}
+
 // Secret is what this participant knows about S.
 type Secret struct {
 	Known       bool
@@ -642,34 +694,7 @@ type Timeouts struct {
 func Build(in Input) Report {
 	status, reason := NegotiationStatus(in.Swap)
 
-	var secret Secret
-
-	secretValue := ""
-	secret.Source = "none"
-
-	switch {
-	case in.Role == Alice && in.Swap.SecretHex != nil:
-		secretValue = *in.Swap.SecretHex
-		secret.Source = "locally-generated"
-	case in.Role == Bob && in.Swap.RevealedSecretHex != nil:
-		secretValue = *in.Swap.RevealedSecretHex
-		secret.Source = "recovered-from-bitcoin"
-	}
-
-	if secretValue != "" {
-		secret.Known = true
-
-		raw, err := hex.DecodeString(secretValue)
-
-		if err == nil && len(raw) == 32 {
-			sum := sha256.Sum256(raw)
-			matches := hex.EncodeToString(sum[:]) == in.Swap.SecretHash
-			secret.HashMatches = &matches
-		} else {
-			matches := false
-			secret.HashMatches = &matches
-		}
-	}
+	secret := SecretOf(in.Swap, in.Role)
 
 	report := Report{
 		SwapID:            in.Swap.SwapID,

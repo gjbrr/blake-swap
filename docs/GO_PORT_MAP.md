@@ -361,7 +361,7 @@ data-model work entirely.
    node sent. A float would turn `0.1` into a nearby number and the engine
    would compare its own records against the wrong amount.
 
-8. **Two output divergences are deliberate, and both are about machine
+8. **Three output divergences are deliberate.** Two are about machine
    readability rather than protocol content.** `market-takes --json` prints
    only the JSON document; the reference prints a human "Nostr take read:"
    line on stdout first, which makes the flag's own output unparseable. And a

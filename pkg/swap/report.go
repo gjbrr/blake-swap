@@ -40,6 +40,34 @@ func (e *Engine) Reconcile(ctx context.Context, swapID string) (*reconcile.Repor
 	}
 
 	//
+	// A negotiation that is not ready is reported without asking the chains anything:
+	// the reference does the same, and the reason is not only cost. "We did not look"
+	// and "we looked and found nothing" are different facts, and a report that
+	// observed a swap whose handshake never completed would say the second when it
+	// meant the first.
+	//
+	negotiation, negotiationReason := reconcile.NegotiationStatus(swap)
+
+	if negotiation != "ready" {
+		return &reconcile.Report{
+			SwapID:            swap.SwapID,
+			ParticipantPubkey: me,
+			ProtocolRole:      reportRole,
+			Counterparty:      peer,
+			CheckpointState:   swap.State,
+			NegotiationStatus: negotiation,
+			NegotiationReason: negotiationReason,
+			DecisionClass:     reconcile.ClassManualAttention,
+			NextAction:        reconcile.ActionManualAttention,
+			Blake:             reconcile.Observation{Status: reconcile.NotEvaluated},
+			BTC:               reconcile.Observation{Status: reconcile.NotEvaluated},
+			Heights:           heights,
+			Reason:            negotiationReason,
+			Secret:            reconcile.SecretOf(swap, reportRole),
+		}, nil
+	}
+
+	//
 	// The wallet facts only matter for a funding action, so they are read after the
 	// decision names one. Asking for both wallets up front would fail a report about
 	// a swap that needs no wallet at all.
@@ -338,14 +366,14 @@ func (e *Engine) observeLeg(
 	node := e.nodeFor(ch)
 
 	if node == nil {
-		return reconcile.Observation{Status: reconcile.Unknown, Reason: "no node configured"}, nil
+		return reconcile.Observation{Status: reconcile.NotEvaluated, Reason: "no node configured"}, nil
 	}
 
 	observation, err := observe.Observe(ctx, node, swap, ch, e.observeConfig(ch))
 
 	if err != nil {
 		return reconcile.Observation{
-			Status: reconcile.Unknown, Reason: err.Error(),
+			Status: reconcile.NotEvaluated, Reason: err.Error(),
 		}, nil
 	}
 

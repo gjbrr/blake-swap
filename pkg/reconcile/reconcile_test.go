@@ -113,7 +113,7 @@ func TestDecideTable(t *testing.T) {
 			name:  "an unknown BLAKE observation is never actionable",
 			setup: func(s *model.Swap) {},
 			role:  Bob,
-			blake: Observation{Status: Unknown, Reason: "rpc down"},
+			blake: Observation{Status: NotEvaluated, Reason: "rpc down"},
 			btc:   absent(),
 			want:  ActionManualAttention,
 		},

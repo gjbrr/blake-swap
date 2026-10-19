@@ -212,3 +212,81 @@ func TestSwapDashboardHumanView(t *testing.T) {
 		}
 	}
 }
+
+// TestReconcileJSONOmitsWhatWasNotMeasured: a negotiation that is not ready was not observed,
+// so its heights, timeouts and readiness are absent rather than zero.
+//
+// A zero in those fields reads as a measurement — "the deadlines are already reached" — when
+// the truth is that nobody looked. The secret is different: it is a fact about the record, so
+// it is reported even then.
+func TestReconcileJSONOmitsWhatWasNotMeasured(t *testing.T) {
+	known := true
+
+	report := &reconcile.Report{
+		SwapID:            "aaaa00000001",
+		CheckpointState:   state.Offered,
+		DecisionClass:     reconcile.ClassManualAttention,
+		NextAction:        reconcile.ActionManualAttention,
+		NegotiationStatus: "missing-bob-identity",
+		NegotiationReason: "swap has no blake_bob_pub",
+		Reason:            "swap has no blake_bob_pub",
+		Blake:             reconcile.Observation{Status: reconcile.NotEvaluated},
+		BTC:               reconcile.Observation{Status: reconcile.NotEvaluated},
+		Secret:            reconcile.Secret{Known: true, Source: "locally-generated", HashMatches: &known},
+	}
+
+	document := reportJSON(report)
+
+	for _, absent := range []string{"heights", "timeouts", "readiness"} {
+		if _, present := document[absent]; present {
+			t.Errorf("%s was reported for an unobserved swap", absent)
+		}
+	}
+
+	if document["read_only"] != true {
+		t.Fatalf("read_only = %v", document["read_only"])
+	}
+
+	chains := document["blake"].(map[string]any)
+
+	if chains["status"] != "not-evaluated" {
+		t.Fatalf("blake status = %v, want not-evaluated", chains["status"])
+	}
+
+	secret := document["secret"].(map[string]any)
+
+	if secret["source"] != "locally-generated" || secret["known"] != true {
+		t.Fatalf("the record's own secret was hidden: %v", secret)
+	}
+
+	// A ready negotiation reports the measurements, because it made them.
+	report.NegotiationStatus = "ready"
+	report.Heights = reconcile.Heights{Blake: 10, BTC: 20}
+	report.Readiness = reconcile.Readiness{Checked: true}
+
+	ready := reportJSON(report)
+
+	if _, present := ready["heights"]; !present {
+		t.Fatal("a ready report omitted its heights")
+	}
+}
+
+// TestDashboardRendersTheSummary: the summary counts are what a person scans for, so every
+// section is printed even when it is empty.
+func TestDashboardRendersTheSummary(t *testing.T) {
+	text := renderDashboard(swap.Classify(nil))
+
+	for _, want := range []string{
+		"ARCHIVED\n--------\n",
+		"No archived swaps.\n",
+		"SUMMARY\n-------\n",
+		"active:     0\n",
+		"attention:  0\n",
+		"settled:    0\n",
+		"archived:   0\n",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("dashboard is missing %q:\n%s", want, text)
+		}
+	}
+}

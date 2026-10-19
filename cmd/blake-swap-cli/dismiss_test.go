@@ -43,7 +43,7 @@ func TestDismissRefusalRefusesAnythingWithMoneyAtRisk(t *testing.T) {
 	cases := map[string]reconcile.Status{
 		"funded":        reconcile.Funded,
 		"spent":         reconcile.Spent,
-		"unknown":       reconcile.Unknown,
+		"unknown":       reconcile.NotEvaluated,
 		"pending":       reconcile.Pending,
 		"pending-spend": reconcile.PendingSpend,
 		"invalid":       reconcile.Invalid,

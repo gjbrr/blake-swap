@@ -28,7 +28,9 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/gjbrr/blake-swap/pkg/keys"
 )
@@ -987,5 +989,170 @@ func (r *Rig) AssertNoNewMessages(t *testing.T, messages string, before []string
 	if strings.Join(before, ",") != strings.Join(after, ",") {
 		t.Fatalf("%s published a coordination message:\n before: %v\n after:  %v",
 			what, before, after)
+	}
+}
+
+// Command builds one engine invocation that the caller starts itself.
+//
+// The settlement race suite needs two processes released at the same instant, so
+// the harness cannot own the wait.
+func (r *Rig) Command(
+	t *testing.T, s *Side, messages string, extraEnv []string, args ...string,
+) *exec.Cmd {
+	t.Helper()
+
+	binary := r.CLI
+
+	if s.Name == "python" {
+		binary = r.Python
+		args = append([]string{filepath.Join(r.Repo, "src", "swap_v2.py")}, args...)
+	}
+
+	command := exec.Command(binary, args...)
+	command.Dir = r.Repo
+	command.Env = append(r.Env(s, messages), extraEnv...)
+
+	return command
+}
+
+// RestartNode stops one chain's node and starts it again with extra arguments.
+//
+// The waits are bounded readiness checks, not sleeps that paper over a race: a
+// node that is stopped is not ready, and one that has not finished loading its
+// chain cannot answer. Each loop has a hard deadline and reports what it was
+// waiting for.
+//
+// A restart also unloads wallets that were loaded after the node started, so the
+// harness re-ensures them: a test that restarted a node should not fail because of
+// which wallets the node happened to have at boot.
+func (r *Rig) RestartNode(t *testing.T, which string, extraArgs ...string) {
+	t.Helper()
+
+	r.restart(t, which, extraArgs...)
+}
+
+// restart stops and starts one node.
+func (r *Rig) restart(t *testing.T, which string, extraArgs ...string) {
+	t.Helper()
+
+	cli, datadir := r.chain(which)
+	daemon := filepath.Join(filepath.Dir(cli), "bitcoind")
+
+	if _, err := os.Stat(daemon); err != nil {
+		t.Fatalf("the %s node binary is not beside its CLI: %v", which, err)
+	}
+
+	if _, err := r.node(cli, datadir, "stop"); err != nil {
+		t.Fatalf("stopping the %s node: %v", which, err)
+	}
+
+	// RPC stops answering well before the node has finished shutting down, and the
+	// mempool dump is written late in the shutdown. Waiting for the data directory's
+	// lock is waiting for the actual end of the process, which is what makes
+	// deleting the dump afterwards deterministic.
+	waitForDatadirRelease(t, which, datadir)
+
+	// RPC stops answering before the node has released its data directory, so a
+	// launch attempted at that moment fails on the lock. The launch is retried
+	// against a deadline rather than after a fixed sleep: what is being waited for
+	// is the lock being released, which is observable and bounded.
+	deadline := time.Now().Add(90 * time.Second)
+
+	var last error
+
+	for {
+		command := exec.Command(daemon, append([]string{"-datadir=" + datadir, "-daemon"}, extraArgs...)...)
+
+		output, err := command.CombinedOutput()
+
+		if err == nil {
+			break
+		}
+
+		last = fmt.Errorf("%w\n%s", err, output)
+
+		if time.Now().After(deadline) {
+			t.Fatalf("starting the %s node: %v", which, last)
+		}
+
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	deadline = time.Now().Add(90 * time.Second)
+
+	for {
+		if _, err := r.node(cli, datadir, "getblockcount"); err == nil {
+			break
+		}
+
+		if time.Now().After(deadline) {
+			t.Fatalf("the %s node did not come back within 90s", which)
+		}
+
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	WalletReady(t, r)
+}
+
+// waitForDatadirRelease blocks until the node has released its data directory.
+//
+// The node holds an exclusive flock on <datadir>/.lock for its whole life. Taking
+// that lock is therefore the observable end of the process, and it is the only
+// thing that has to be waited for: RPC going quiet happens first.
+func waitForDatadirRelease(t *testing.T, which, datadir string) {
+	t.Helper()
+
+	lockPath := filepath.Join(datadir, ".lock")
+	deadline := time.Now().Add(90 * time.Second)
+
+	for {
+		handle, err := os.OpenFile(lockPath, os.O_RDWR|os.O_CREATE, 0o600)
+
+		if err == nil {
+			err = syscall.Flock(int(handle.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+
+			if err == nil {
+				_ = syscall.Flock(int(handle.Fd()), syscall.LOCK_UN)
+				_ = handle.Close()
+
+				return
+			}
+
+			_ = handle.Close()
+		}
+
+		if time.Now().After(deadline) {
+			t.Fatalf("the %s node did not release %s within 90s", which, lockPath)
+		}
+
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// WalletReady loads the wallets this harness needs, without touching capital.
+func WalletReady(t *testing.T, r *Rig) {
+	t.Helper()
+
+	for _, chain := range []struct {
+		cli     string
+		datadir string
+	}{
+		{r.BTCCLI, r.BTCDatadir},
+		{r.BlakeCLI, r.BlakeDatadir},
+	} {
+		loaded, err := r.node(chain.cli, chain.datadir, "listwallets")
+
+		if err != nil {
+			t.Fatalf("listwallets: %v", err)
+		}
+
+		for _, wallet := range []string{"alice", "bob", "alice-watch", "bob-watch"} {
+			if strings.Contains(loaded, `"`+wallet+`"`) {
+				continue
+			}
+
+			_, _ = r.node(chain.cli, chain.datadir, "loadwallet", wallet)
+		}
 	}
 }

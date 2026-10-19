@@ -35,8 +35,12 @@ type Error struct {
 	Data    string
 }
 
+// Error renders the node's answer. It does not repeat the method: every caller
+// that reports one of these already prefixes it with the call it made, and
+// "getnewaddress: getnewaddress: node error -18" is a worse sentence than the same
+// fact said once.
 func (e *Error) Error() string {
-	out := fmt.Sprintf("%s: node error %d: %s", e.Method, e.Code, e.Message)
+	out := fmt.Sprintf("node error %d: %s", e.Code, e.Message)
 
 	if e.Data != "" {
 		out += " (" + e.Data + ")"

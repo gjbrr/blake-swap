@@ -278,3 +278,102 @@ func TestParticipantIsolationSuite(t *testing.T) {
 	// And Bob still cannot perform Alice's BLAKE funding with his own key.
 	r.Expect(t, bob, messages, "protocol requires alice", "fund-blake", id)
 }
+
+// Parity: tests/pre_btc_refund_tests.py
+//
+// Alice funds BLAKE and Bob never funds Bitcoin. Until BLAKE's own timelock she
+// has no way out and must not pretend to; after it she refunds directly, and both
+// participants converge on BLAKE_REFUNDED without a Bitcoin leg ever existing and
+// without a settlement message from Alice.
+func TestPreBTCRefundSuite(t *testing.T) {
+	r := rigtest.Load(t)
+
+	alice, bob, messages, id := r.SetupGoSwap(t)
+
+	r.Run(t, alice, messages, "fund-blake", id)
+	r.Run(t, alice, messages, "publish-blake-funded", id)
+	r.Run(t, bob, messages, "receive-blake-funded", id)
+
+	btcTimeout := r.FieldInt(t, alice, messages, id, "btc_timeout")
+	blakeTimeout := r.FieldInt(t, alice, messages, id, "blake_timeout")
+
+	if blakeTimeout <= btcTimeout {
+		t.Fatalf("the BLAKE timeout %d is not after Bitcoin's %d", blakeTimeout, btcTimeout)
+	}
+
+	// Before her own timelock Alice waits. There is nothing to claim and nothing
+	// to refund, and a refusal is the honest answer.
+	r.Expect(t, alice, messages, "", "refund-blake", id)
+
+	r.AssertState(t, alice, messages, id, "BLAKE_FUNDED")
+
+	// The CLTV is a BLAKE height, so the deadline is reached by mining that chain.
+	// A refund attempted before it is refused by the chain and by the engine.
+	r.MineTo(t, "blake", alice.Role, blakeTimeout-1)
+
+	r.Expect(t, alice, messages, "", "refund-blake", id)
+
+	r.AssertState(t, alice, messages, id, "BLAKE_FUNDED")
+
+	// After it, she refunds directly with no Bitcoin leg in existence.
+	r.MineTo(t, "blake", alice.Role, blakeTimeout)
+
+	// A refund submitted exactly at its CLTV height can be final for the next
+	// block rather than this one, so the reported settlement is legitimately
+	// pending. Mining a block and asking again adopts the transaction the record
+	// already names; it does not sign a second one.
+	output := r.Run(t, alice, messages, "refund-blake", id)
+
+	before, _ := rigtest.RecordField(t, alice, id, "blake_refund_txid")
+
+	if strings.Contains(output, "BLAKE_FUNDED") {
+		r.Mine(t, "blake", alice.Role, 1)
+		r.Run(t, alice, messages, "refund-blake", id)
+
+		after, _ := rigtest.RecordField(t, alice, id, "blake_refund_txid")
+
+		if after != before {
+			t.Fatalf("the confirming retry signed a second refund: %v -> %v", before, after)
+		}
+	}
+
+	r.AssertState(t, alice, messages, id, "BLAKE_REFUNDED")
+
+	blakeTxID, blakeVout := fundingOutpoint(t, alice, id, "blake")
+
+	if utxo := r.Node(t, "blake", "gettxout", blakeTxID,
+		fmt.Sprint(blakeVout)); strings.TrimSpace(utxo) != "" {
+		t.Fatal("the BLAKE HTLC is unspent after a refund")
+	}
+
+	// Bob still says BLAKE_FUNDED, and only the chain can tell him otherwise: the
+	// report names the recovery, and the autonomous path performs it without any
+	// message from Alice.
+	report := r.ReconcileJSON(t, bob, messages, id)
+
+	leg, _ := report["blake"].(map[string]any)
+
+	if status, _ := leg["status"].(string); status != "spent" {
+		t.Fatalf("Bob does not observe the confirmed BLAKE spend: %v", status)
+	}
+
+	if branch, _ := leg["branch"].(string); branch != "refund" {
+		t.Fatalf("Bob does not identify the refund branch: %v", branch)
+	}
+
+	if action, _ := report["next_action"].(string); action != "sync-settlement" {
+		t.Fatalf("Bob is not offered a chain-derived settlement sync: %v", action)
+	}
+
+	r.Run(t, bob, messages, "resume", id)
+
+	r.AssertState(t, bob, messages, id, "BLAKE_REFUNDED")
+
+	for _, side := range []*rigtest.Side{alice, bob} {
+		final := r.ReconcileJSON(t, side, messages, id)
+
+		if checkpoint, _ := final["checkpoint_state"].(string); checkpoint != "BLAKE_REFUNDED" {
+			t.Fatalf("%s converged on %q, want BLAKE_REFUNDED", side.Name, checkpoint)
+		}
+	}
+}

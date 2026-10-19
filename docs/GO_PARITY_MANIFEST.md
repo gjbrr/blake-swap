@@ -154,7 +154,7 @@ Every Python suite, and the Go package whose tests cover the same ground where o
 | Python suite | Go | Status |
 |---|---|---|
 | `agent_policy_tests.py` | — | pending |
-| `blake_amount_tests.py` | — | pending |
+| `blake_amount_tests.py` | `pkg/amount` | partial |
 | `btc_dynamic_settlement_tests.py` | — | pending |
 | `chain_cli_transport_tests.py` | — | pending |
 | `cli_wiring_tests.py` | — | pending |
@@ -169,7 +169,7 @@ Every Python suite, and the Go package whose tests cover the same ground where o
 | `installed_wheel_tests.py` | — | pending |
 | `market_state_tests.py` | `pkg/marketflow` | partial |
 | `moxie_adapter_smoke_tests.py` | `pkg/adapter` | partial |
-| `nip44_tests.py` | — | pending |
+| `nip44_tests.py` | `pkg/nip44` | partial |
 | `node_config_tests.py` | — | pending |
 | `nostr_market_tests.py` | — | pending |
 | `packaging_tests.py` | — | pending |

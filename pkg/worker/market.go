@@ -14,6 +14,7 @@ import (
 	"github.com/gjbrr/blake-swap/pkg/marketflow"
 	"github.com/gjbrr/blake-swap/pkg/nostr"
 	"github.com/gjbrr/blake-swap/pkg/proto"
+	"github.com/gjbrr/blake-swap/pkg/view"
 )
 
 // SecretRelays is the vault value holding the market's relay list.
@@ -59,11 +60,11 @@ func (d *marketDomain) Handle(ctx context.Context, request proto.Request) proto.
 			return failed(request.Command, err)
 		}
 
-		return proto.Result{
+		return withView(proto.Result{
 			Command: request.Command,
 			OK:      true,
 			Text:    "relays: " + strings.Join(relays, ", "),
-		}
+		}, proto.MarketView{Relays: relays})
 
 	case "market.set-relays":
 		return d.setRelays(ctx, request)
@@ -143,13 +144,32 @@ func (d *marketDomain) list(ctx context.Context, request proto.Request) proto.Re
 
 	open := marketflow.OpenOffers(entries)
 
-	return proto.Result{
+	read := "Nostr market read: " + strconv.Itoa(len(report.Events)) + " unique event(s) from " +
+		strconv.Itoa(report.Answered) + "/" + strconv.Itoa(report.Relays) + " relay(s)"
+
+	// The view says which offers are this participant's, which is what decides whether the
+	// Market screen offers to take or to wait for a take.
+	me := ""
+
+	if key, err := d.identity(ctx); err == nil {
+		me = key.Public
+	}
+
+	var mine []marketflow.Entry
+
+	for _, entry := range entries {
+		if me != "" && entry.Offer.Maker == me {
+			mine = append(mine, entry)
+		}
+	}
+
+	relays, _ := d.relayList(ctx)
+
+	return withView(proto.Result{
 		Command: request.Command,
 		OK:      true,
-		Text: "Nostr market read: " + strconv.Itoa(len(report.Events)) + " unique event(s) from " +
-			strconv.Itoa(report.Answered) + "/" + strconv.Itoa(report.Relays) + " relay(s)\n" +
-			renderBrowserMarket(open, d.now().Unix()),
-	}
+		Text:    read + "\n" + renderBrowserMarket(open, d.now().Unix()),
+	}, view.Market(read, relays, open, mine, nil, nil, nil, me))
 }
 
 // publish advertises one offer signed by this participant.
@@ -224,13 +244,25 @@ func (d *marketDomain) publish(ctx context.Context, request proto.Request) proto
 		return failed(request.Command, err)
 	}
 
-	return proto.Result{
+	action := view.Action(request.Command, "", "publish-market-offer")
+	action.Message = built.ID
+	action.Sender = key.Public
+	action.Details = []proto.ActionFact{
+		{Label: "direction", Value: string(offer.Direction)},
+		{Label: "BLAKE", Value: offer.BlakeAmount.Format()},
+		{Label: "BTC sats", Value: strconv.FormatInt(offer.BTCSats, 10)},
+		{Label: "expires", Value: strconv.FormatInt(offer.ExpiresAt, 10)},
+	}
+
+	// The text is the CLI's shape, which the terminal and the worker's own tests read; the
+	// view is what the page renders.
+	return withView(proto.Result{
 		Command: request.Command,
 		OK:      true,
 		Text: "MARKET OFFER PUBLISHED\noffer id: " + built.ID +
 			"\nmaker:    " + key.Public +
 			"\ndirection: " + string(offer.Direction),
-	}
+	}, action)
 }
 
 // take publishes this participant's take of one open offer.
@@ -300,13 +332,20 @@ func (d *marketDomain) take(ctx context.Context, request proto.Request) proto.Re
 		return failed(request.Command, err)
 	}
 
-	return proto.Result{
+	action := view.Action(request.Command, "", "take-market-offer")
+	action.Message = built.ID
+	action.Sender = key.Public
+	action.Details = []proto.ActionFact{
+		{Label: "offer id", Value: offerID},
+	}
+
+	return withView(proto.Result{
 		Command: request.Command,
 		OK:      true,
 		Text: "MARKET OFFER TAKEN\noffer id: " + offerID +
 			"\ntake id:  " + built.ID +
 			"\ntaker:    " + key.Public,
-	}
+	}, action)
 }
 
 // client builds a relay client from the configured relays.

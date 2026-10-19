@@ -41,6 +41,13 @@ const (
 	SecretWalletBTCWatch   = "wallet.btc_watch"
 )
 
+// SecretUISelected is the swap the person last opened.
+//
+// It is sealed with everything else rather than kept in the page: a reload starts with a
+// locked vault, and the one thing that makes continuing easy is knowing which swap was
+// being worked on. It is not a protocol fact, which is why it lives beside the settings.
+const SecretUISelected = "ui.selected"
+
 // Default wallet names, used until the participant sets their own.
 const (
 	defaultWalletBlake      = "blake"
@@ -107,7 +114,7 @@ func (d *engineDomain) Handle(ctx context.Context, request proto.Request) proto.
 
 	swapID := strings.TrimSpace(request.Args["swap_id"])
 
-	engine, err := d.buildFor(ctx, swapID)
+	engine, err := d.buildForCommand(ctx, request.Command, swapID)
 
 	if err != nil {
 		return failed(request.Command, err)
@@ -316,6 +323,106 @@ func (d *engineDomain) Handle(ctx context.Context, request proto.Request) proto.
 		return actionResult(request, view.Resume(
 			view.Action(request.Command, swapID, "resume"), result))
 
+	case "engine.publish-blake-funded":
+		result, err := engine.AnnounceBlakeFunding(ctx, swapID)
+
+		if err != nil {
+			return failed(request.Command, err)
+		}
+
+		return actionResult(request, view.Message(
+			view.Action(request.Command, swapID, "publish-blake-funded"), result))
+
+	case "engine.receive-blake-funded":
+		result, err := engine.ReceiveBlakeFunding(ctx, swapID)
+
+		if err != nil {
+			return failed(request.Command, err)
+		}
+
+		return actionResult(request, view.Message(
+			view.Action(request.Command, swapID, "receive-blake-funded"), result))
+
+	case "engine.publish-btc-funded":
+		result, err := engine.AnnounceBTCFunding(ctx, swapID)
+
+		if err != nil {
+			return failed(request.Command, err)
+		}
+
+		return actionResult(request, view.Message(
+			view.Action(request.Command, swapID, "publish-btc-funded"), result))
+
+	case "engine.receive-btc-funded":
+		result, err := engine.ReceiveBTCFunding(ctx, swapID)
+
+		if err != nil {
+			return failed(request.Command, err)
+		}
+
+		return actionResult(request, view.Message(
+			view.Action(request.Command, swapID, "receive-btc-funded"), result))
+
+	case "engine.publish-btc-claimed":
+		result, err := engine.AnnounceBTCCLaimed(ctx, swapID)
+
+		if err != nil {
+			return failed(request.Command, err)
+		}
+
+		return actionResult(request, view.Announcement(
+			view.Action(request.Command, swapID, "publish-btc-claimed"), result))
+
+	case "engine.receive-btc-claimed":
+		result, err := engine.ReceiveBTCCLaimed(ctx, swapID)
+
+		if err != nil {
+			return failed(request.Command, err)
+		}
+
+		return actionResult(request, view.Announcement(
+			view.Action(request.Command, swapID, "receive-btc-claimed"), result))
+
+	case "engine.publish-blake-claimed":
+		result, err := engine.AnnounceBlakeClaimed(ctx, swapID)
+
+		if err != nil {
+			return failed(request.Command, err)
+		}
+
+		return actionResult(request, view.Announcement(
+			view.Action(request.Command, swapID, "publish-blake-claimed"), result))
+
+	case "engine.receive-blake-claimed":
+		result, err := engine.ReceiveBlakeClaimed(ctx, swapID)
+
+		if err != nil {
+			return failed(request.Command, err)
+		}
+
+		return actionResult(request, view.Announcement(
+			view.Action(request.Command, swapID, "receive-blake-claimed"), result))
+
+	case "engine.publish-btc-refunded":
+		result, err := engine.AnnounceBTCRefunded(ctx, swapID)
+
+		if err != nil {
+			return failed(request.Command, err)
+		}
+
+		return actionResult(request, view.Announcement(
+			view.Action(request.Command, swapID, "publish-btc-refunded"), result))
+
+	case "engine.receive-btc-refunded":
+		result, err := engine.ReceiveBTCRefunded(ctx, swapID)
+
+		if err != nil {
+			return failed(request.Command, err)
+		}
+
+		return actionResult(request, view.Announcement(
+			view.Action(request.Command, swapID, "receive-btc-refunded"), result))
+
 	case "engine.recovery-plan":
 		plan, err := engine.RecoveryPlan(ctx, swapID)
 
@@ -398,6 +505,11 @@ var engineCommands = map[string]bool{
 	"engine.extract-secret": true, "engine.complete": true, "engine.sync-funding": true,
 	"engine.sync-settlement": true, "engine.resume": true, "engine.resume-all": true,
 	"engine.recovery-plan": true, "engine.watch-htlc": true, "engine.refresh-timeouts": true,
+	"engine.publish-blake-funded": true, "engine.receive-blake-funded": true,
+	"engine.publish-btc-funded": true, "engine.receive-btc-funded": true,
+	"engine.publish-btc-claimed": true, "engine.receive-btc-claimed": true,
+	"engine.publish-blake-claimed": true, "engine.receive-blake-claimed": true,
+	"engine.publish-btc-refunded": true, "engine.receive-btc-refunded": true,
 	"wallets.status": true,
 }
 
@@ -852,9 +964,18 @@ func (d *engineDomain) build(ctx context.Context) (*swap.Engine, error) {
 	return engine, nil
 }
 
-// buildFor assembles the engine and, when the command names a swap, adopts that record's
-// protocol role.
+// buildFor is buildForCommand without a command name, for a caller that only reads.
 func (d *engineDomain) buildFor(ctx context.Context, swapID string) (*swap.Engine, error) {
+	return d.buildForCommand(ctx, "", swapID)
+}
+
+// buildForCommand assembles the engine and adopts the record's protocol role.
+//
+// One command is special: accepting an offer by id is how a record comes to exist, so a
+// missing record is the normal state for it rather than an error. Accepting is Bob's act, so
+// that is the role it runs as, and the engine's own role proof still refuses a swap somebody
+// else already accepted.
+func (d *engineDomain) buildForCommand(ctx context.Context, command, swapID string) (*swap.Engine, error) {
 	engine, err := d.build(ctx)
 
 	if err != nil {
@@ -868,6 +989,12 @@ func (d *engineDomain) buildFor(ctx context.Context, swapID string) (*swap.Engin
 	record, err := engine.Show(ctx, swapID)
 
 	if err != nil {
+		if command == "engine.accept-offer" {
+			engine.Role = store.Bob
+
+			return engine, nil
+		}
+
 		return nil, err
 	}
 

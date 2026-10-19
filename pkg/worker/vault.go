@@ -246,6 +246,40 @@ func (d *vaultDomain) handle(ctx context.Context, request proto.Request) proto.R
 	case "wallets.set":
 		return d.setWallets(ctx, request)
 
+	case "ui.get":
+		if d.store == nil {
+			return proto.Result{Command: request.Command, Error: "the vault is locked"}
+		}
+
+		selected, err := d.readSecret(ctx, SecretUISelected)
+
+		if err != nil {
+			return failed(request.Command, err)
+		}
+
+		return proto.Result{
+			Command: request.Command, OK: true, Text: "selected: " + selected,
+		}
+
+	case "ui.set":
+		if d.store == nil {
+			return proto.Result{Command: request.Command, Error: "the vault is locked"}
+		}
+
+		value := strings.TrimSpace(request.Args["selected"])
+
+		if value != "" {
+			if err := store.ValidateSwapID(value); err != nil {
+				return failed(request.Command, err)
+			}
+		}
+
+		if err := d.writeSecret(ctx, SecretUISelected, value); err != nil {
+			return failed(request.Command, err)
+		}
+
+		return proto.Result{Command: request.Command, OK: true, Text: "selected: " + value}
+
 	case "identity.generate":
 		return d.generateIdentity(ctx, request)
 
@@ -637,7 +671,8 @@ func handleCommand(
 		strings.HasPrefix(request.Command, "state."),
 		strings.HasPrefix(request.Command, "identity."),
 		strings.HasPrefix(request.Command, "proxy."),
-		strings.HasPrefix(request.Command, "wallets."):
+		strings.HasPrefix(request.Command, "wallets."),
+		strings.HasPrefix(request.Command, "ui."):
 		return vault.handle(ctx, request)
 	case strings.HasPrefix(request.Command, "engine."):
 		return engine.Handle(ctx, request)

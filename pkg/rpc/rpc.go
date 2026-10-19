@@ -314,8 +314,14 @@ func parseResponse(method string, response []byte) (json.RawMessage, error) {
 	decoder.UseNumber()
 
 	if err := decoder.Decode(&envelope); err != nil {
+		//
+		// The body is quoted, briefly, because the alternative is an operator staring at
+		// "invalid character 'o'" with no idea what answered. A proxy that refused the call
+		// says so in plain text, and that text is the whole diagnosis.
+		//
 		return nil, Transient(fmt.Errorf(
-			"%s: node returned a response that is not JSON: %w", method, err))
+			"%s: node returned a response that is not JSON: %w (body: %q)",
+			method, err, snippet(response)))
 	}
 
 	if envelope.Error != nil {
@@ -429,4 +435,21 @@ func String(params ...any) string {
 	}
 
 	return strings.Join(parts, ", ")
+}
+
+// snippet is the first line of a body, bounded, for an error message.
+func snippet(body []byte) string {
+	const limit = 160
+
+	text := strings.TrimSpace(string(body))
+
+	if at := strings.IndexByte(text, '\n'); at >= 0 {
+		text = text[:at]
+	}
+
+	if len(text) > limit {
+		return text[:limit] + "…"
+	}
+
+	return text
 }

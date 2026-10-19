@@ -598,6 +598,12 @@ def render() -> str:
     )
     lines.append("")
     lines.append(
+        "What has actually been run — and what it proved — is in "
+        "[`GO_VERIFICATION.md`](GO_VERIFICATION.md), including the list of what is "
+        "not done."
+    )
+    lines.append("")
+    lines.append(
         "It records what replaces each part of the Python engine in Go, and what "
         "has not been replaced yet. Nothing in it is asserted: the Python anchors "
         "and the Go symbols are read from the tree, and the script fails if a "

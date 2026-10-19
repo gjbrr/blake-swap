@@ -327,6 +327,7 @@ silently omitting them.
 | `docs/PYTHON_REFERENCE_RELEASE.md` | Python reference release-candidate baseline: package facts, the installed-wheel proof, and where the remaining conformance claims live |
 | `docs/GO_PORT_MAP.md` | analysis of the Python engine (control flow, types, state machine, decision table) and the Go/TinyGo package map that replaces it |
 | `docs/GO_PARITY_MANIFEST.md` | generated ledger: every Python module, function group, command and suite, what replaces it in Go, and what is still pending |
+| `docs/GO_VERIFICATION.md` | what has actually been run in the port — the Go suite, the WASM tests, the browser check, the byte-parity and cross-implementation results — and what is not done |
 | `tests/README.md` | test suite inventory, prerequisites, and node configuration |
 | `CONTRIBUTOR_ORIENTATION.md` | orientation for new contributors |
 

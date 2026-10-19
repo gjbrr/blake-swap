@@ -395,9 +395,9 @@ MODULES: list[Module] = [
          "command_sync_funding", "command_sync_settlement", "command_refresh_timeouts"],
     ),
     Module(
-        "src/swap_agent.py", "pkg/agent", "pending",
-        "the autonomous driver's step policy and budget",
-        [], ["AgentPolicy"],
+        "src/swap_agent.py", "pkg/agent", "ported",
+        "the autonomous participant's step table, the conditional steps it re-reads the record for, and the failure budget that stops it; the CLI's `agent` command is the equivalent of the reference's separate script",
+        ["Plan", "Run", "Terminal", "DefaultPolicy", "Outcome", "Host"], ["alice_step", "bob_step"],
     ),
     Module(
         "src/swap_v2.py (market flow)", "pkg/marketflow", "partial",

@@ -82,8 +82,36 @@ func main() {
 	}
 }
 
+// exitError is an error that carries the process exit code it wants.
+//
+// A supervisor reads exit codes, so the two the reference distinguishes — a security
+// failure and an exhausted failure budget — are reported as what they are rather than
+// flattened into a generic failure.
+type exitError struct {
+	code    int
+	message string
+}
+
+func (e exitError) Error() string {
+	if e.message == "" {
+		return fmt.Sprintf("exit %d", e.code)
+	}
+
+	return e.message
+}
+
 // fail prints an error the way an operator (or a test) expects to read it.
 func fail(err error) {
+	var exit exitError
+
+	if errors.As(err, &exit) {
+		if exit.message != "" {
+			fmt.Fprintln(os.Stderr, "ERROR:", exit.message)
+		}
+
+		os.Exit(exit.code)
+	}
+
 	fmt.Fprintln(os.Stderr, "ERROR:", err)
 	os.Exit(1)
 }
@@ -120,6 +148,7 @@ commands:
   reconcile SWAP_ID [--json]
   next SWAP_ID
   run SWAP_ID [--max-steps N] [--fee-rate SAT_PER_VB]
+  agent SWAP_ID --role alice|bob [--interval S] [--max-ticks N]
   resume SWAP_ID
   watch-htlc SWAP_ID
   recovery-plan SWAP_ID
@@ -232,6 +261,8 @@ func run(ctx context.Context, engine *swap.Engine, command string, args []string
 		return runNext(ctx, engine, args)
 	case "run":
 		return runDriver(ctx, engine, args)
+	case "agent":
+		return runAgent(ctx, engine, args)
 	case "resume":
 		return runResume(ctx, engine, args)
 	case "watch-htlc":

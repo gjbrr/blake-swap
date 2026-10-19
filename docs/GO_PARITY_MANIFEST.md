@@ -36,7 +36,7 @@ Statuses: **ported** (behaviour and tests), **partial** (in progress), **pending
 | `src/swap_v2.py (commands)` | `pkg/swap` | partial | the 58 commands as a Go API: the full settlement lifecycle, refunds, the offer/accept handshake, and the reporting/recovery/resume commands are in; a Go participant completes real swaps and refunds against the Python reference in both directions, and both implementations agree about the protocol report; market commands remain |
 | `src/swap_agent.py` | `pkg/agent` | pending | the autonomous driver's step policy and budget |
 | `src/swap_v2.py (market flow)` | `pkg/marketflow` | partial | market events: offer, take, cancel and match are built, parsed and validated by the reference; state is derived from evidence the same way, for one offer and for a whole book of them; the market commands remain |
-| `src/swap_v2.py (CLI)` | `cmd/blake-swap-cli (missing)` | partial | the drop-in CLI: the implemented commands with the reference's arguments and environment; `market`, `market-state` and `market-state --json` are byte-identical to the reference on live relay evidence, and `show` and `list` are byte-identical to it on real records written by each implementation, the verified-event cache is the reference's `nostr-event-cache` and is read by both implementations in either direction, and the market publish, cancel, take, match, accept, import and bridge confirmations plus the accept-offer block and the prefix refusals are pinned byte for byte by tests; the rest of the output text is not yet |
+| `src/swap_v2.py (CLI)` | `cmd/blake-swap-cli (missing)` | partial | the drop-in CLI: the implemented commands with the reference's arguments and environment; `market`, `market-state` and `market-state --json` are byte-identical to the reference on live relay evidence, and `show` and `list` are byte-identical to it on real records written by each implementation, the verified-event cache is the reference's `nostr-event-cache` and is read by both implementations in either direction, and `run` is byte-identical to the reference on a live swap, the market publish, cancel, take, match, accept, import and bridge confirmations plus the accept-offer block and the prefix refusals are pinned byte for byte by tests, and every settlement command now takes the client's `--fee-rate`, which outranks the environment; the rest of the output text is not yet |
 | `(new)` | `pkg/vault` | ported | passphrase KDF and record encryption with the NIP-44 primitives |
 | `(new)` | `pkg/proxy` | ported | the node RPC proxy: credentials stay server-side, the method allowlist and a per-address rate limit are the boundary |
 | `(new)` | `pkg/worker` | partial | the browser worker's domains: the event loop, the encrypted-state domain, the read-only engine domain it drives through the app server's proxy, and the command dispatcher |
@@ -82,7 +82,7 @@ Statuses: **ported** (behaviour and tests), **partial** (in progress), **pending
 
 ## CLI commands (58)
 
-The Go CLI dispatches 57 of these 58. Implemented means the command exists with the reference's arguments and environment; it does not by itself mean the output text is identical, which is tracked per command in the module table above.
+The Go CLI dispatches 58 of these 58. Implemented means the command exists with the reference's arguments and environment; it does not by itself mean the output text is identical, which is tracked per command in the module table above.
 
 | Command | Go | Status |
 |---|---|---|
@@ -142,7 +142,7 @@ The Go CLI dispatches 57 of these 58. Implemented means the command exists with 
 | `dashboard` | `run` | implemented |
 | `dismiss` | `run` | implemented |
 | `resume` | `run` | implemented |
-| `run` | — | pending |
+| `run` | `run` | implemented |
 | `resume-all` | `run` | implemented |
 
 ## Test suites (60)

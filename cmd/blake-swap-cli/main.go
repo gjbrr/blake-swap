@@ -119,6 +119,7 @@ commands:
   complete SWAP_ID
   reconcile SWAP_ID [--json]
   next SWAP_ID
+  run SWAP_ID [--max-steps N] [--fee-rate SAT_PER_VB]
   resume SWAP_ID
   watch-htlc SWAP_ID
   recovery-plan SWAP_ID
@@ -229,6 +230,8 @@ func run(ctx context.Context, engine *swap.Engine, command string, args []string
 		return runReconcile(ctx, engine, args)
 	case "next":
 		return runNext(ctx, engine, args)
+	case "run":
+		return runDriver(ctx, engine, args)
 	case "resume":
 		return runResume(ctx, engine, args)
 	case "watch-htlc":
@@ -897,11 +900,25 @@ func runSettle(
 	call func(context.Context, string) (*swap.SettlementResult, error),
 	label string,
 ) error {
-	if len(args) < 1 {
+	flags := flag.NewFlagSet(label, flag.ContinueOnError)
+
+	feeRate := flags.String("fee-rate", "", "settlement feerate in sat/vB")
+
+	positional, err := parsePositional(flags, args, 1)
+
+	if err != nil {
+		return err
+	}
+
+	if len(positional) < 1 {
 		return fmt.Errorf("%s requires a swap id", label)
 	}
 
-	result, err := call(ctx, args[0])
+	if err := pinFeeRate(engine, *feeRate); err != nil {
+		return err
+	}
+
+	result, err := call(ctx, positional[0])
 
 	if err != nil {
 		return err
@@ -1076,11 +1093,25 @@ func runNext(ctx context.Context, engine *swap.Engine, args []string) error {
 
 // runResume performs the recommended action once.
 func runResume(ctx context.Context, engine *swap.Engine, args []string) error {
-	if len(args) < 1 {
+	flags := flag.NewFlagSet("resume", flag.ContinueOnError)
+
+	feeRate := flags.String("fee-rate", "", "settlement feerate in sat/vB")
+
+	positional, err := parsePositional(flags, args, 1)
+
+	if err != nil {
+		return err
+	}
+
+	if len(positional) < 1 {
 		return errors.New("resume requires a swap id")
 	}
 
-	result, err := engine.Resume(ctx, args[0])
+	if err := pinFeeRate(engine, *feeRate); err != nil {
+		return err
+	}
+
+	result, err := engine.Resume(ctx, positional[0])
 
 	if err != nil {
 		return err

@@ -680,13 +680,17 @@ func (c *Client) FetchMany(ctx context.Context, filters ...Filter) ([]event.Even
 //
 // The counts are not decoration: a market view that read two of three relays is a
 // different claim about the world from one that read all three, and a caller that
-// wants to say so needs the numbers.
+// wants to say so needs the numbers. Locations answers the other question a caller
+// has about evidence — not how many but which, because "found on one relay" and
+// "found on all of them" are different evidence about the same event.
 type FetchReport struct {
 	// Events are the distinct events that verified, newest first.
 	Events []event.Event
 	// Answered is how many relays answered, and Relays how many were asked.
 	Answered int
 	Relays   int
+	// Locations is every relay that served one event, by event id.
+	Locations map[string][]string
 }
 
 // FetchReport queries every relay for several filters and reports the union.
@@ -700,6 +704,7 @@ func (c *Client) FetchReport(ctx context.Context, filters ...Filter) (FetchRepor
 	}
 
 	byID := map[string]event.Event{}
+	locations := map[string][]string{}
 	answered := 0
 
 	for _, relay := range c.Relays {
@@ -716,7 +721,13 @@ func (c *Client) FetchReport(ctx context.Context, filters ...Filter) (FetchRepor
 				continue
 			}
 
+			// An event already accepted from another relay only gains a second
+			// source: its signature is its identity, so it cannot have changed.
 			if _, seen := byID[candidate.ID]; seen {
+				if !hasRelay(locations[candidate.ID], relay) {
+					locations[candidate.ID] = append(locations[candidate.ID], relay)
+				}
+
 				continue
 			}
 
@@ -725,6 +736,7 @@ func (c *Client) FetchReport(ctx context.Context, filters ...Filter) (FetchRepor
 			}
 
 			byID[candidate.ID] = candidate
+			locations[candidate.ID] = append(locations[candidate.ID], relay)
 		}
 	}
 
@@ -749,7 +761,20 @@ func (c *Client) FetchReport(ctx context.Context, filters ...Filter) (FetchRepor
 		return events[i].ID < events[j].ID
 	})
 
-	return FetchReport{Events: events, Answered: answered, Relays: len(c.Relays)}, nil
+	return FetchReport{
+		Events: events, Answered: answered, Relays: len(c.Relays), Locations: locations,
+	}, nil
+}
+
+// hasRelay reports whether a relay is already listed as a source.
+func hasRelay(relays []string, relay string) bool {
+	for _, known := range relays {
+		if known == relay {
+			return true
+		}
+	}
+
+	return false
 }
 
 // fetchFromRelay opens a subscription, reads until EOSE and closes it.

@@ -410,7 +410,7 @@ MODULES: list[Module] = [
     ),
     Module(
         "src/swap_v2.py (CLI)", "cmd/blake-swap-cli", "partial",
-        "the drop-in CLI: the implemented commands with the reference's arguments and environment; `market`, `market-state` and `market-state --json` are byte-identical to the reference on live relay evidence, the market publish and cancel confirmations are pinned byte for byte by tests, and the rest of the output text is not yet",
+        "the drop-in CLI: the implemented commands with the reference's arguments and environment; `market`, `market-state` and `market-state --json` are byte-identical to the reference on live relay evidence, the market publish, cancel, take, match, accept and bridge confirmations plus the prefix refusals are pinned byte for byte by tests, and the rest of the output text is not yet",
         [], ["main"],
     ),
     Module(

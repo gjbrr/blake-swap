@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -176,28 +177,40 @@ func priorTake(events []event.Event, taker, offerID string) *event.Event {
 // participant has actually seen, so a fresh cache cannot resolve one. The reference has
 // the same limit, and says so.
 func resolveCachedOfferPrefix(ctx context.Context, client *nostr.Client, raw string) (string, error) {
+	return resolveCachedPrefix(ctx, client, raw, "market-offer", "market offer", true)
+}
+
+// resolveCachedPrefix is the general form: one market message type, one label.
+//
+// The label is what the operator is told about, so the same resolver serves an offer, a
+// take and a match without any of them claiming to be one of the others.
+func resolveCachedPrefix(
+	ctx context.Context, client *nostr.Client, raw, expectedType, label string, announce bool,
+) (string, error) {
 	value := strings.ToLower(strings.TrimSpace(raw))
 
 	if len(value) == 64 {
 		if err := hexOnly(value); err != nil {
-			return "", fmt.Errorf("market offer ID is not hexadecimal")
+			return "", fmt.Errorf("%s ID is not hexadecimal", label)
 		}
 
 		return value, nil
 	}
 
 	if len(value) < 8 {
-		return "", fmt.Errorf("market offer ID prefix is too short; use at least 8 hex characters")
+		return "", fmt.Errorf("%s ID prefix is too short; use at least 8 hex characters", label)
 	}
 
 	if err := hexOnly(value); err != nil {
-		return "", fmt.Errorf("market offer ID prefix is not hexadecimal")
+		return "", fmt.Errorf("%s ID prefix is not hexadecimal", label)
 	}
 
 	var matches []string
 
+	seen := map[string]bool{}
+
 	for _, cached := range cachedEvents(ctx, client.Cache) {
-		if !strings.HasPrefix(cached.ID, value) {
+		if seen[cached.ID] || !strings.HasPrefix(cached.ID, value) {
 			continue
 		}
 
@@ -207,21 +220,73 @@ func resolveCachedOfferPrefix(ctx context.Context, client *nostr.Client, raw str
 			continue
 		}
 
-		if kind, _ := message["type"].(string); kind != "market-offer" {
+		if kind, _ := message["type"].(string); kind != expectedType {
 			continue
 		}
+
+		seen[cached.ID] = true
 
 		matches = append(matches, cached.ID)
 	}
 
-	switch len(matches) {
-	case 0:
-		return "", fmt.Errorf("no cached market offer matches that prefix")
-	case 1:
-		return matches[0], nil
-	default:
-		return "", fmt.Errorf("that prefix matches %d cached market offers", len(matches))
+	sort.Strings(matches)
+
+	if len(matches) == 0 {
+		// The refusal names the command that would have filled the cache. "No match"
+		// on its own leaves an operator editing their input when the answer is that
+		// they have not looked yet.
+		return "", fmt.Errorf(
+			"No verified cached %s matches prefix '%s'; %s",
+			strings.ToLower(label), value, prefixHint(expectedType),
+		)
 	}
+
+	if len(matches) > 1 {
+		fmt.Print(renderAmbiguousPrefix(value, matches))
+
+		return "", fmt.Errorf(
+			"%s ID prefix matches more than one verified event; use a longer prefix", label,
+		)
+	}
+
+	resolved := matches[0]
+
+	if announce {
+		fmt.Printf("Resolved %s prefix %s -> %s\n", strings.ToLower(label), value, resolved)
+	}
+
+	return resolved, nil
+}
+
+// prefixHint names the command that fills the cache for one message type.
+func prefixHint(expectedType string) string {
+	switch expectedType {
+	case "market-offer":
+		return "run `blake-swap market` first"
+	case "market-take":
+		return "run `market-takes <offer>` first"
+	case "market-match":
+		return "use a full match ID or refresh match discovery"
+	}
+
+	return "refresh the relevant Nostr view first"
+}
+
+// renderAmbiguousPrefix shows every candidate so the operator can lengthen the prefix.
+func renderAmbiguousPrefix(value string, matches []string) string {
+	var out strings.Builder
+
+	out.WriteString("\nAMBIGUOUS ID PREFIX\n")
+	out.WriteString("===================\n")
+	out.WriteString(value)
+	out.WriteString("\n\n")
+
+	for _, id := range matches {
+		out.WriteString(id)
+		out.WriteString("\n")
+	}
+
+	return out.String()
 }
 
 // hexOnly reports whether a string is hexadecimal characters only.

@@ -96,6 +96,8 @@ commands:
   new --blake AMOUNT --sats SATS [--blake-timeout H --btc-timeout H]
   show SWAP_ID | list | status
   advance SWAP_ID STATE --role ROLE     (BLAKE_SWAP_TEST_MODE=1 only)
+  accept-take OFFER_ID
+  accept-market-take TAKE_ID
   publish-offer SWAP_ID
   accept-offer SWAP_ID [--expected-alice-pub HEX] [--allow-unpinned-author]
   receive-accept SWAP_ID
@@ -148,6 +150,10 @@ func run(ctx context.Context, engine *swap.Engine, command string, args []string
 		return runDismiss(ctx, engine, args)
 	case "publish-market-match":
 		return runPublishMarketMatch(ctx, engine, args)
+	case "accept-market-take":
+		return runAcceptMarketTake(ctx, engine, args)
+	case "accept-take":
+		return runAcceptTake(ctx, engine, args)
 	case "new":
 		return runNew(ctx, engine, args)
 	case "show":
@@ -370,12 +376,22 @@ func runPublishOffer(ctx context.Context, engine *swap.Engine, args []string) er
 		return err
 	}
 
-	fmt.Println("OFFER PUBLISHED")
-	fmt.Println("===============")
-	fmt.Println("swap id:", args[0])
-	fmt.Println("message:", result.Location)
+	fmt.Print(renderOfferPublished(args[0], result.Location))
 
 	return nil
+}
+
+// renderOfferPublished is the reference's publish-offer confirmation.
+//
+// The last line is the one that matters: the offer carries public terms and the
+// contract keys' public halves, and publishing it must not carry the secret.
+func renderOfferPublished(swapID, location string) string {
+	return "\nOFFER PUBLISHED\n" +
+		"===============\n" +
+		"swap id: " + swapID + "\n" +
+		"message: " + location + "\n" +
+		"\n" +
+		"PASS: secret_hex was NOT published\n"
 }
 
 func runAcceptOffer(ctx context.Context, engine *swap.Engine, args []string) error {

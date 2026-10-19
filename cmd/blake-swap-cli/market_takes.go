@@ -132,21 +132,50 @@ func runMarketTakes(ctx context.Context, engine *swap.Engine, args []string) err
 	return nil
 }
 
-// fetchEventByID asks the relays for one event and returns it.
+// fetchEventByID asks the relays for one event and returns it, saying where it came
+// from.
+//
+// The fallback to the verified local cache is what makes a negotiation survive a relay
+// that has forgotten it: the event's signature is its own proof, so a cached copy is as
+// good as a fresh one, and an operator is told which of the two they got.
 func fetchEventByID(ctx context.Context, client *nostr.Client, id string) (*event.Event, error) {
-	events, err := client.FetchMany(ctx, nostr.Filter{Kinds: []int{1}, Ids: []string{id}})
+	report, err := client.FetchReport(ctx, nostr.Filter{Kinds: []int{1}, Ids: []string{id}})
 
-	if err != nil {
-		return nil, err
-	}
+	if err == nil {
+		for index := range report.Events {
+			if report.Events[index].ID != id {
+				continue
+			}
 
-	for index := range events {
-		if events[index].ID == id {
-			return &events[index], nil
+			found := report.Events[index]
+
+			// Cache only what verified: the cache is evidence, not a spool.
+			if client.Cache != nil {
+				_ = client.Cache.Put(ctx, found)
+			}
+
+			fmt.Printf("Nostr event found on: %s\n", strings.Join(report.Locations[id], ", "))
+
+			return &found, nil
 		}
 	}
 
-	return nil, fmt.Errorf("the referenced event was not found on any configured relay")
+	if client.Cache != nil {
+		cached, ok, cacheErr := client.Cache.Get(ctx, id)
+
+		if cacheErr == nil && ok {
+			if verifyErr := event.Verify(cached, time.Now()); verifyErr == nil {
+				fmt.Print("Nostr event unavailable on configured relays; using verified local cache:\n")
+				fmt.Println(id)
+
+				return &cached, nil
+			}
+		}
+	}
+
+	return nil, fmt.Errorf(
+		"Nostr event not found on any configured relay or verified local cache: %s", id,
+	)
 }
 
 // renderMarketTakes is the reference's take table.

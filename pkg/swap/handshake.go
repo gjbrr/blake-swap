@@ -26,6 +26,10 @@ type NewRequest struct {
 	// Supplying only one is refused: half a contract is not a contract.
 	BlakeTimeout int64
 	BTCTimeout   int64
+	// NostrBobPub pins the counterparty's authenticated identity when the swap was
+	// negotiated through a signed market take. Left empty, Bob's identity is learned
+	// later from his own accept message, which is how a direct handshake works.
+	NostrBobPub string
 	// Random is the entropy source for the secret and the identifier.
 	Random io.Reader
 	// Policy overrides the timeout policy. Zero means DefaultPolicy.
@@ -165,6 +169,14 @@ func (e *Engine) New(ctx context.Context, req NewRequest) (*NewResult, error) {
 	if e.Identity != nil {
 		alice := e.Identity.PublicKey()
 		swap.NostrAlicePub = &alice
+	}
+
+	// A market take is a signed statement of who the counterparty is, so when the
+	// caller supplies that identity it is pinned here rather than left to a later
+	// message that a different machine could sign.
+	if req.NostrBobPub != "" {
+		bob := req.NostrBobPub
+		swap.NostrBobPub = &bob
 	}
 
 	if err := ssave(e, ctx, swap, store.Alice); err != nil {

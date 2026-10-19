@@ -176,8 +176,13 @@ func marketClient() *nostr.Client {
 }
 
 // cacheDirectory is where verified relay events are kept between runs.
+//
+// The name is the reference's, and that is not cosmetic: a participant who runs the
+// Python engine one day and this one the next must find their evidence where they left
+// it, because a prefix that resolved yesterday cannot become unresolvable today just
+// because the client changed.
 func cacheDirectory() string {
-	return filepath.Join(stateDirectory(), "nostr-cache")
+	return filepath.Join(stateDirectory(), "nostr-event-cache")
 }
 
 // stateDirectory is where the reference keeps its records, and where this keeps its

@@ -1,11 +1,11 @@
 # Go port: what has been verified
 
 This is the evidence record for the Go/TinyGo port, kept separate from the generated
-[`GO_PARITY_MANIFEST.md`](GO_PARITY_MANIFEST.md): the manifest says *what replaces what*, and
-this file says *what was actually run, and what it proved*.
+[`GO_PARITY_MANIFEST.md`](GO_PARITY_MANIFEST.md): the manifest says *what replaces what*,
+and this file says *what was actually run, and what it proved*.
 
-Everything below was run in this checkout against the reference engine in the same checkout.
-Commands are given so any claim can be re-checked rather than believed.
+Everything below was run in this checkout against the reference engine in the same
+checkout. Commands are given so any claim can be re-checked rather than believed.
 
 ---
 
@@ -15,63 +15,50 @@ Commands are given so any claim can be re-checked rather than believed.
 go test ./pkg/... ./cmd/...
 ```
 
-All packages pass, including the ones that need no rig (amount, wire, market, state, model,
-timeout, fees, reconcile, htlc, psbt, keys, nip44, event, vault, rpc, chain, fund, settle,
-observe, coord, nostr, store, swap, agent, marketflow, client, worker, platform, adapter,
-adversary, relaystub, contract, proto) and the CLI package.
-
-Two of those suites are integration suites that drive the real two-chain regtest rig with the
+Every package passes. Two of those suites drive the real two-chain regtest rig with the
 Python engine as the counterparty (`pkg/swap`): the handshake and settlement in both
-directions, the refund path in both directions, a stage-by-stage walk of every checkpoint, and
-a record written by Go being loaded by Python.
+directions, the refund path in both directions, a stage-by-stage walk of every checkpoint,
+and a record written by Go being loaded by Python. The rest of the rig-driven suites run
+this implementation on both sides.
 
-## 2. The browser client builds and works
+`internal/...` is part of the gate as well (`make test` runs
+`./pkg/... ./internal/... ./cmd/server`), because the packaging, documentation,
+conformance and clean-install checks live there.
 
-```bash
-make wasm                              # both modules, gated in CI
-make wasmtest                          # every WASM-testable package under TinyGo
-python3 scripts/verify-browser.py      # headless Chromium, real clicks
-```
+## 2. The 60 reference suites have a Go disposition
 
-The browser check drives the page the way a person does and asserts document markers rather
-than scraping text. Its steps, all passing:
+`./scripts/test.sh --list` classifies the reference suites as UNIT, REGTEST and NOSTR. The
+manifest's suite table carries the disposition of all 60, and the counts are the ones that
+table prints:
 
-| Step | What it proves |
-|---|---|
-| hello round trip | page → worker → page over the link |
-| boot gate | the boot screen clears only when the modules are ready |
-| encrypted self-test | an encrypted round trip through the vault's own store |
-| vault panel | create, with the passphrase typed into the field |
-| identity panel | the signing identity is sealed and read back |
-| market relays / publish / list / take | a complete market round trip over a **local relay** the check starts |
-| proxy panel | the app server's proxy address is stored |
-| engine panel | both chain heights read through the proxy |
+| Class | Suites | Needs |
+|---|---|---|
+| unit | 7 | no nodes: `chain_cli_transport`, `cli_wiring`, `docs_alignment`, `installed_wheel`, `node_config`, `packaging`, `security_conformance` |
+| regtest | 11 | the two-chain rig: `htlc_key_recovery`, `pre_btc_refund`, `swap_chain_autonomy`, `swap_participant_isolation`, `swap_peer_recovery`, `swap_protocol`, `swap_reorg_safety`, `swap_settlement_crash_matrix`, `swap_settlement_fault_matrix`, `swap_settlement_race`, `swap_settlement_recovery` |
+| nostr | 2 | the rig plus a relay: `swap_isolated_nostr_handshake`, `swap_isolated_full_chain_swap` |
 
-The market step is the browser's own `WebSocket`: no CLI, no proxy, no node.
+So **13** suites need chain nodes, not 18, and **7** need no nodes at all. An earlier
+version of this document said 18 and 2, which was wrong: it counted every unmapped suite as
+integration and only `chain_cli_transport` and `cli_wiring` as unit.
 
-### The crypto path is the TinyGo one, and it is tested as such
+The 7 unit suites are not one kind, and their Go replacements differ accordingly:
 
-The secp256k1 surface comes from `git.smesh.lol/orly`, whose signer and BIP-340 code have
-`tinygo`/`wasm` build-tagged variants: a host build uses the amd64 assembly and a browser build
-uses the pure-Go field, group and Schnorr implementation. That switch is not cosmetic — an
-assembly-only dependency compiles on the host and fails, or silently misbehaves, in wasm — so
-the key package's own tests run under `tinygo test -target=wasm` and are part of the WASM test
-list:
+- `chain_cli_transport_tests.py` and `cli_wiring_tests.py` test Python *mechanics* that have
+  no Go counterpart — a subprocess argv/stdin boundary and argparse attribute wiring. Their
+  portable halves are ported (`pkg/rpc` proves the large body, the exact value types, the
+  retry allowlist and the refusal vocabulary; the CLI proves dispatch completeness over all
+  58 command names). The argv boundary and the argparse bug class are waived inside those Go
+  tests with a reason apiece.
+- `docs_alignment_tests.py`, `installed_wheel_tests.py` and `packaging_tests.py` test the
+  Python *distribution*. Each has the Go-artefact analogue of every invariant
+  (`internal/docsalign`, `internal/installcheck`, `internal/packaging`) and records the
+  Python-only assertions as waived sub-checks.
+- `node_config_tests.py` and `security_conformance_tests.py` are language-independent and
+  ported directly (`pkg/nodeconfig`, `internal/conformance`).
 
-```bash
-tinygo test -target=wasm ./pkg/keys
-```
-
-They sign and verify the BIP-340 reference vectors (deterministic signing reproduces each
-vector, which is what cross-checks the pure-Go signer against the vectors rather than against
-itself), and they exercise the raw-x ECDH that NIP-44 needs. `pkg/event`, `pkg/nostr` and
-`pkg/nip44` run under the same target, so event ids, signatures and encrypted payloads are
-verified in the browser's actual runtime, not only on the host.
-
-CI runs `make wasm` on every push and, in the same step, `tinygo test -target=wasm` for the
-crypto and protocol core (`pkg/keys`, `pkg/event`, `pkg/nostr`, `pkg/nip44`, `pkg/coord`). The
-remaining WASM-testable packages run in the full `make wasmtest`, which is a local command
-because the whole list does not fit the job's time budget.
+A suite is claimed as **ported** only when a Go test names it with a
+`// Parity: tests/<suite>.py` marker and that test exists in the tree. A similar file name
+is not evidence, and the manifest no longer infers one.
 
 ## 3. The CLI is byte-identical to the reference where it claims to be
 
@@ -88,11 +75,10 @@ Run on a live swap, in the same state tree, one implementation after the other:
 | `status` | identical |
 | `market`, `market-state`, `market-state --json` | identical on live relay evidence |
 
-Three divergences are deliberate and are recorded in
-[`GO_PORT_MAP.md`](GO_PORT_MAP.md) §5: JSON output is JSON only (the reference prints a human
-line into its own `--json` mode), a refusal is one `ERROR:` line carrying the reference's
-message rather than a traceback around it, and `recovery-plan` refuses a record the reference
-renders as a descriptor containing `pk(None)`.
+Four divergences are deliberate and are recorded in [`GO_PORT_MAP.md`](GO_PORT_MAP.md) §5:
+JSON output is JSON only, a refusal is one `ERROR:` line rather than a traceback,
+`recovery-plan` reports per-leg solvability and does not print the reference's step list,
+and `next SWAP_ID` is an extension beside the reference's argument-less `next`.
 
 ## 4. The two implementations agree across the protocol
 
@@ -101,67 +87,155 @@ renders as a descriptor containing `pk(None)`.
 | offer → accept → BLAKE funded → Bitcoin funded → Bitcoin claimed → BLAKE claimed → complete | `pkg/swap` `TestCrossImplStageByStage`, both directions | pass |
 | refund both legs | `pkg/swap` `TestCrossImplRefundBothLegs`, both directions | pass |
 | a Go record loads in Python | `pkg/swap` `TestCrossImplRecordIsReadableByPython` | pass |
-| market handshake, Go maker and Python taker, over a local relay | `cmd/blake-swap-relay` + both CLIs, recorded in [`REGTEST_TWO_HOST.md`](REGTEST_TWO_HOST.md) §15 | pass |
+| market handshake, Go maker and Python taker, over a local relay | `cmd/blake-swap-relay` + both CLIs, in [`REGTEST_TWO_HOST.md`](REGTEST_TWO_HOST.md) §15 | pass |
 | market handshake, **both sides Go**, over a local relay | `cmd/blake-swap-cli` `TestSwapMarketFlow` | pass |
 | the protocol report agrees | `pkg/swap` `assertReconcileAgrees` | pass |
 
-The market handshake is the one worth pointing at: the Python engine took a Go offer, the Go
-engine accepted that Python-signed take, published the match, and the Python engine imported
-it and reported "Bob independently validated v1.5 timeout safety". Neither side learns the
-other's secret, and no line of code is shared.
+## 5. The settlement suite is a real durability drill
 
-## 5. The seeded corpus is reproducible from this implementation
+The reference's settlement matrices are reproduced with the reference's own
+fault-injection contract: twelve failpoint names (`after_{btc,blake}_{claim,refund}`
+× `{candidate_save_before_broadcast, broadcast, confirmation_before_state_save}`) and four
+post-broadcast crash points, all gated by `BLAKE_SWAP_TEST_MODE=1` and ending the process
+with the reference's exit codes 97 and 86.
+
+| Suite | What it proves | Command |
+|---|---|---|
+| crash matrix | a death at any of the twelve boundaries leaves the durable state where it was, leaves the signed candidate with its txid and hex and no block hash, and the restart adopts that transaction instead of signing a second one | `go test ./pkg/swap/ -run TestSettlementCrashMatrix` |
+| fault matrix | the same twelve, with the stricter claim: never more than one spender of the HTLC at any observation, and exactly one transaction ever spent it in its block | `go test ./pkg/swap/ -run TestSettlementFaultMatrix` |
+| recovery | the actor dies after the broadcast and the node restarts; the record's txid survives, its signed hex decodes to the transaction in the mempool, and the confirming block advances the state | `go test ./pkg/swap/ -run TestSettlementRecovery` |
+| race | two invocations released at the same instant: at least one succeeds, the record names one transaction, and exactly one transaction spent the HTLC | `go test ./pkg/swap/ -run TestSettlementRace` |
+
+**One bound is recorded rather than worked around.** A restarted node re-submits its loaded
+wallets' unconfirmed transactions even with wallet broadcast disabled, so a node cannot be
+made to forget a wallet transaction; "rebroadcast after mempool loss" is therefore proved
+where it is reachable — at the candidate boundary, where nothing was broadcast and the
+transaction can only appear in the mempool if the restart sent the recorded bytes.
+
+## 6. Reorg safety is proved with the node, not by editing a record
+
+`go test ./pkg/swap/ -run TestReorgSafetySuite` disconnects and reconnects real blocks with
+`invalidateblock` and `reconsiderblock`: a peer refuses to fund its own leg while the
+counterparty commitment is no longer confirmed, an authentic announcement whose settlement
+is not in the active chain is refused and leaves the receiver's record byte-identical, a
+rolled-back final settlement stops being reported as confirmed or settled, and the same
+transaction is recovered when the chain returns.
+
+## 7. The browser client builds and works
+
+```bash
+make wasm                              # both modules, gated in CI
+make wasmtest                          # every WASM-testable package under TinyGo
+python3 scripts/verify-browser.py      # headless Chromium, real clicks
+```
+
+The browser check drives the page the way a person does and asserts document markers rather
+than scraping text. Its market step and its coordination steps use the browser's own
+`WebSocket`: no CLI-side socket, no proxy, no node.
+
+### The browser can carry a settlement message
+
+The worker's coordination domain publishes and receives all seven settlement message types
+over a relay, with the body built in Go from the swap record rather than accepted from the
+page. Sender pinning is enforced by the transport and restated at the use site, and
+decryption is fail-closed: a plaintext reply under `nip44_v2`, a payload that looks
+encrypted but does not decrypt, and an unreadable payload are each refused.
+
+Six steps in `scripts/verify-browser.py` prove it end to end, against the loopback relay the
+check starts:
+
+| Step | What it proves |
+|---|---|
+| a | the browser publishes a signed coordination message |
+| b | a second client (the CLI's `coord-read`) reads and validates it |
+| c | that client replies |
+| d | the browser receives and validates the reply |
+| e | a reply signed by the wrong key is refused, and the refusal names both authors |
+| f | one encrypted round trip under `nip44_v2`, and a plaintext reply refused as a downgrade |
+
+Exit status 0 on the run recorded at the bottom of this file.
+
+### The crypto path is the TinyGo one, and it is tested as such
+
+The secp256k1 surface comes from `git.smesh.lol/orly`, whose signer and BIP-340 code have
+`tinygo`/`wasm` build-tagged variants: a host build uses the amd64 assembly and a browser
+build uses the pure-Go field, group and Schnorr implementation. That switch is not cosmetic —
+an assembly-only dependency compiles on the host and fails, or silently misbehaves, in wasm —
+so the key package's own tests run under `tinygo test -target=wasm`:
+
+```bash
+tinygo test -target=wasm ./pkg/keys ./pkg/event ./pkg/nostr ./pkg/nip44 ./pkg/coord
+```
+
+They sign and verify the BIP-340 reference vectors (deterministic signing reproduces each
+vector, which is what cross-checks the pure-Go signer against the vectors rather than against
+itself), and they exercise the raw-x ECDH that NIP-44 needs. CI runs `make wasm` and the same
+tests on every push.
+
+## 8. `next` is the reference's discovery command
+
+`next` with no argument scans the whole local state tree and the configured relays, finds the
+one unambiguous non-economic coordination step, and performs it: take an open offer,
+import an authenticated acceptance, import a fresh validated match, import the reverse
+direction's offer, or accept a valid take. Freshness is
+`BLAKE_SWAP_NEXT_FRESH_SECONDS` (default 3600, refused below 60); durable
+`market-selections/offer-<id>.json` records and a prior-take check stop it publishing a
+second take or accepting the same take twice. Exactly one action is performed and reported
+with the reference's banners, more than one is listed and refused, and none falls through to
+the settlement and funding report — which is printed and never executed.
+
+`next SWAP_ID` remains as an extension: it reports one swap's recommendation.
+
+```bash
+go test ./cmd/blake-swap-cli/ -run TestNext
+```
+
+## 9. The seeded corpus is reproducible from this implementation
 
 The corpus's scheduler is `SHA-256("<version>:<seed>:<path>:<stage>")` read as an unsigned
 big-endian integer modulo the option count. `pkg/adversary` reproduces it, and its test pins
 the reference's eight default schedules (seeds 4, 17, 184467, 20261004 × claim/refund) exactly.
 
-## 6. What is not done
-
-Recorded here rather than left to be inferred from the manifest:
-
-- **20 of the 60 reference suites are not mapped to a Go replacement.** Their Go
-  counterparts would be integration tests of the same size, and they are not written:
-
-  `chain_cli_transport_tests.py`, `cli_wiring_tests.py`, `docs_alignment_tests.py`,
-  `htlc_key_recovery_tests.py`, `installed_wheel_tests.py`, `node_config_tests.py`,
-  `packaging_tests.py`, `pre_btc_refund_tests.py`, `security_conformance_tests.py`,
-  `swap_chain_autonomy_tests.py`, `swap_isolated_full_chain_swap_tests.py`,
-  `swap_isolated_nostr_handshake_tests.py`, `swap_participant_isolation_tests.py`,
-  `swap_peer_recovery_tests.py`, `swap_protocol_tests.py`, `swap_reorg_safety_tests.py`,
-  `swap_settlement_crash_matrix_tests.py`, `swap_settlement_fault_matrix_tests.py`,
-  `swap_settlement_race_tests.py`, `swap_settlement_recovery_tests.py`.
-
-  Eighteen of those drive a full two-chain swap with injected faults — settlement crashes,
-  faults, races, reorgs, peer recovery, isolated chains — and are the largest remaining piece
-  of the port. The other two (`chain_cli_transport`, `cli_wiring`) test the Python engine's
-  *argument rendering and parser wiring*, which this port does not have because it speaks
-  JSON-RPC and parses flags in Go: their transport half (the retry allowlist, the refusal
-  vocabulary) is covered by `pkg/rpc`'s tests, and their argv half has no counterpart.
-- **`next` is a different command.** The reference's `next` takes no argument: it discovers the
-  single unambiguous non-economic coordination step across the whole state tree (an offer to
-  take, an accept to import, a match to import) and performs it. This port's `next SWAP_ID`
-  prints the recommended action for one swap. Both are useful; they are not the same command,
-  and the CLI is therefore not a drop-in replacement for that one name.
-- **The browser has no coordination transport.** The market, the vault, the encrypted store and
-  the read-only engine are in the browser; sending a swap's coordination messages to a relay is
-  not. The worker's `TODO` is still a `TODO`.
-- **Three suites have no Go counterpart by nature**: `packaging_tests.py`,
-  `installed_wheel_tests.py` and `docs_alignment_tests.py` test the Python package, the wheel
-  and the Python documentation set.
-
-## 7. Reproducing the rig-dependent parts
-
-The integration suites skip unless a two-chain regtest rig and the Python virtualenv are
-present:
+## 10. Reproducing the rig-dependent parts
 
 ```bash
 scripts/test-nodes start          # writes ~/.blake-swap-test/rig-env.json
 make server                       # build the CLI and the app server
-go test ./pkg/swap/ -run CrossImpl
+go test ./pkg/swap/               # every protocol, settlement, reorg and recovery suite
 python3 scripts/verify-browser.py
 ```
 
-Without the rig, those suites skip rather than pass, and the browser check reports the market
-and vault steps and leaves the engine step until a rig is available — a skip is never counted
-as a pass in this repository.
+Without the rig, those suites skip and say so, naming the reason. A skip is never counted as
+a pass in this repository, and a stale `rig-env.json` whose nodes are gone is a skip with a
+reason rather than a failure.
+
+## 11. What is not done
+
+Recorded here rather than left to be inferred from the manifest:
+
+Nothing in the suite table is pending. What is left is verification breadth rather than
+port work:
+
+- **`./scripts/test.sh` has not been run end to end in one pass** in this session. Each Go
+  suite above was run on its own against the same rig, and the reference suites quoted in §2
+  were run individually; the runner has not swept all 60 in one go since the last of them
+  landed.
+- **The two `try`-shaped guarantees are bounded, not absolute.** A restarted node re-submits
+  its wallets' unconfirmed transactions, so "the node forgot the mempool" is not
+  reproducible for a wallet transaction (§5); and a refund submitted exactly at its CLTV
+  height can be final for the next block rather than this one, which the suites handle by
+  adopting the recorded transaction rather than by mining differently.
+
+## 12. Recorded command results
+
+| Command | Result |
+|---|---|
+| `go test ./pkg/... ./cmd/...` | see the run recorded with the final commit |
+| `tinygo test -target=wasm ./pkg/keys ./pkg/event ./pkg/nostr ./pkg/nip44 ./pkg/coord` | pass, all five packages |
+| `make wasm` | pass, both modules |
+| `python3 scripts/verify-browser.py` | exit 0: hello, boot gate, encrypted self-test, vault, identity, market relays/publish/list/take, coordination a–f, proxy, engine heights |
+| `python3 scripts/go_parity.py --check` | `parity manifest: current` |
+| `.venv/bin/python tests/docs_alignment_tests.py` | 11 checks, 0 failures |
+| `.venv/bin/python tests/cli_wiring_tests.py` | 58 subcommands, 0 failures |
+| `python3 tests/security_conformance_tests.py`, `tests/packaging_tests.py` | pass |
+| `PATH=$PWD/.venv/bin:$PATH python3 tests/installed_wheel_tests.py` | 4 checks, 0 failures |

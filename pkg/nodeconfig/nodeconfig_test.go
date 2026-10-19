@@ -22,12 +22,12 @@ import (
 // fakeHost is a described host: which paths are directories, which are
 // executables, what PATH resolves to, and what the environment says.
 type fakeHost struct {
-	dirs   map[string]bool
-	files  map[string]bool
-	path   map[string]string
-	env    map[string]string
-	home   string
-	root   string
+	dirs  map[string]bool
+	files map[string]bool
+	path  map[string]string
+	env   map[string]string
+	home  string
+	root  string
 }
 
 // newHost is a host with nothing installed and no rig.

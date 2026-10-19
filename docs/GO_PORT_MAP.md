@@ -233,6 +233,61 @@ browser client never uses it.
 
 ---
 
+### 2.5 The worker's domains
+
+The browser worker is one long-lived loop that dispatches a command to a domain by its
+prefix. Every domain is built the same way — the vault supplies the identity and the
+configuration, a dialer supplies the socket — so each is testable against the relay stub
+without a browser, and the browser's socket is the only platform edge:
+
+| Prefix | Domain | What it does |
+|---|---|---|
+| `vault.` | `vaultDomain` | create/unlock/lock the encrypted state, `state.get`/`state.put`, the encrypted self-test |
+| `identity.`, `proxy.` | `vaultDomain` | the Nostr key and the app server's proxy address, both sealed |
+| `engine.` | `engineDomain` | the read-only engine over the proxy, with `engine.Transport` wired to the relay transport |
+| `market.` | `marketDomain` | relays, read, publish, take — the CLI's market builders over the browser's socket |
+| `coord.` | `coordDomain` | the settlement transport: the seven message types, send and receive |
+
+The coordination domain is the browser's real swap-coordination transport, and it is not
+a second implementation of anything:
+
+- **One transport.** It builds a `coord.NostrTransport` over `pkg/nostr` with the
+  browser's own `platform.WebSocket`, so event signing, the NIP-01 filter, sender
+  pinning, the NIP-44 policy and fail-closed decryption are the same code the CLI runs.
+- **One message format.** Bodies come from `swap.MessageBody`, the builder the engine's
+  `Announce*`/`AcceptOffer` commands use, so an `accept` is defined once. The page never
+  supplies a body: a command names the swap and the type, and the worker reads the facts
+  from the record it holds. A record that does not have them is refused by name.
+- **Roles are the protocol's.** `swap.SenderRole`/`ReceiverRole` say which participant
+  signs and which receives each type; signing a type as the wrong role, or receiving one
+  this participant is not the addressee of, is a `SECURITY FAILURE` before any bytes move.
+- **The wrong author is refused, not skipped.** A pinned receive asks the relay for the
+  pinned author's events; when it finds nothing it re-reads the swap's events without the
+  author filter and, if a valid message from another key is there, refuses with
+  `SECURITY FAILURE: <type> was signed by <key>, not by the pinned counterparty <key>`.
+  A relay that ignores the author filter therefore cannot make a pinned read pass, and a
+  participant cannot be left believing nobody answered.
+- **Configuration lives in the vault.** The relay list is the market's (`relays`), and
+  the confidentiality mode is `encryption`, read with the reference's own
+  `nostr.ParseMode`, so an unrecognised value is refused where it is typed rather than
+  silently published as plaintext.
+
+The engine domain builds the same transport as its `engine.Transport`, so the engine's
+`Announce*`/`Receive*` methods work in the browser unchanged; the `coord.` commands are
+the transport-level half, the part that needs nothing but a relay. `coord.open` creates
+the local record those commands read: the browser holds no wallet yet, so the record's
+contract keys are this participant's Nostr key in compressed form and its timeout plan is
+the policy's plan from height zero — a well-formed proposal for the transport, explicitly
+not a fundable contract, because the funding flow is what replaces those keys from the
+wallet and anchors the heights to both chains.
+
+Finally, the browser check (`scripts/verify-browser.py`) is a two-client test of exactly
+this: the page publishes a signed offer to a local relay, the Go CLI (`coord-read`,
+`coord-reply`, no node, the same relay) reads and answers it, the page receives and
+validates the reply against the pinned author, a reply signed by the wrong key is refused
+by name, and one round trip completes under `nip44_v2` while a plaintext reply in that
+mode is refused as a downgrade.
+
 ## 3. The Go package map
 
 Five layers. Arrows are import direction; nothing lower imports anything higher.
@@ -283,7 +338,7 @@ Five layers. Arrows are import direction; nothing lower imports anything higher.
 | `cmd/blake-swap-cli` | `argparse` + `main()` | drop-in CLI: parsing, dispatch, output, exit codes |
 | `cmd/server` | (new) | static hosting, `/rpc/{btc,blake}` proxy, config, auth token. Built as `bin/blake-swap-app` |
 | `pkg/proto` | (new) | page ↔ worker request/response contract |
-| `pkg/worker`, `pkg/page` | (new / extends) | worker domain wiring (vault, engine, market); page presentation |
+| `pkg/worker`, `pkg/page` | (new / extends) | worker domain wiring (vault, engine, market, coord); page presentation |
 | `pkg/nodeconfig` | `tests/node_config.py` | which node a command talks to: environment, then a running rig, then conventional locations; a stopped rig is a reason, not a fallback |
 | `pkg/relaystub` | (new) | a loopback relay the suites and the browser check drive, so no test needs a public relay |
 | `cmd/blake-swap-relay` | (new) | the same relay as a binary, for a two-host run |
@@ -343,7 +398,7 @@ build rather than quietly becoming a claim.
 | M2 | `reconcile`, `htlc`, `psbt` | the 12-action table and witness classifier match Python on recorded fixtures |
 | M3 | `rpc`/`chain`/`fund`/`settle`/`observe` against a real regtest through the proxy | **partly done**: `rpc`, `chain`, `contract`, `fund` and `observe` are in; `settle` remains |
 | M4 | `cmd/blake-swap-cli` | the existing suites run with `$SWAP_V2` pointed at the Go binary |
-| M5 | `store`/`vault`/`coord`/`nostr` + worker domains | two browser instances complete a swap on regtest; `store`, `nostr` and `coord` are in, the worker domains remain |
+| M5 | `store`/`vault`/`coord`/`nostr` + worker domains | two browser instances complete a swap on regtest; `store`, `nostr`, `coord` and the worker's coordination transport are in, the funding and settlement commands remain read-only |
 | M6 | `marketflow` (offer, take, match, cancel, import) + page UI | the whole market cycle driven from the UI |
 
 M4 and the orly reuse are the two big schedule wins: one gives a mechanical
@@ -366,20 +421,33 @@ data-model work entirely.
 5. **Watch-only observation and the bounded fallback scan are both kept.**
 6. **Market scope is total**: offer, take, cancel, match, accept, import,
    ignore, reverse directions.
-7. **Amounts never touch a float.** The node writes the same quantity two
+7. **Amounts never touch a float.** The node writes the same quantity three
    ways — a bare number from `getrawtransaction`, a quoted string from
-   `listunspent` — so `amount.Coin` accepts both and keeps the digits the
-   node sent. A float would turn `0.1` into a nearby number and the engine
-   would compare its own records against the wrong amount.
+   `listunspent`, and exponent notation (`1.13e-06`) for a small enough value —
+   so `amount.Coin` accepts all three and keeps the digits the node sent. An
+   exponent is expanded by moving the point, never by reading a float: a float
+   would turn `0.1` into a nearby number and the engine would compare its own
+   records against the wrong amount.
 
-8. **Three output divergences are deliberate.** Two are about machine
-   readability rather than protocol content.** `market-takes --json` prints
-   only the JSON document; the reference prints a human "Nostr take read:"
-   line on stdout first, which makes the flag's own output unparseable. And a
-   refusal is reported as `ERROR: <message>` with the reference's message
-   text; the reference often raises an uncaught exception instead, so the same
-   words arrive wrapped in a traceback. The message bodies are byte-identical,
-   which is what a test or an operator reads.
+8. **Four output divergences are deliberate**, and each is a decision rather
+   than an unfinished port.
+   - `market-takes --json` prints only the JSON document. The reference prints a
+     human "Nostr take read:" line on stdout first, which makes the flag's own
+     output unparseable.
+   - A refusal is reported as `ERROR: <message>` with the reference's message
+     text. The reference often raises an uncaught exception instead, so the same
+     words arrive wrapped in a traceback. The message bodies are byte-identical,
+     which is what a test or an operator reads.
+   - `recovery-plan` reports the descriptor, the address, the amount, the
+     timeout, this participant's own claim and refund keys, and whether a loaded
+     wallet can solve the HTLC. The reference prints the same descriptor but adds
+     a step list for a Python-era wallet workflow; this one answers the question
+     an operator actually has ("can anything here spend it") for both chains at
+     once, which the reference does not.
+   - `next SWAP_ID` is an extension. The reference's `next` takes no argument and
+     discovery is what this port implements for that name; the one-swap
+     recommendation is kept beside it because the driver and the resume path ask
+     the same question about a specific swap.
 
 Open, deliberately: the passphrase UX (when it is asked, and what happens on a
 wrong one), whether the server also proxies relays, and whether the CLI shim

@@ -28,6 +28,7 @@ import (
 	"github.com/gjbrr/blake-swap/pkg/nodeconfig"
 	"github.com/gjbrr/blake-swap/pkg/nostr"
 	"github.com/gjbrr/blake-swap/pkg/reconcile"
+	"github.com/gjbrr/blake-swap/pkg/settle"
 	"github.com/gjbrr/blake-swap/pkg/state"
 	"github.com/gjbrr/blake-swap/pkg/store"
 	"github.com/gjbrr/blake-swap/pkg/swap"
@@ -166,7 +167,8 @@ commands:
   publish-btc-refunded SWAP_ID | receive-btc-refunded SWAP_ID
   complete SWAP_ID
   reconcile SWAP_ID [--json]
-  next SWAP_ID
+  next                                  the one safe coordination step, if it is unambiguous
+  next SWAP_ID                          the recommended action for one swap (extension)
   run SWAP_ID [--max-steps N] [--fee-rate SAT_PER_VB]
   agent SWAP_ID --role alice|bob [--interval S] [--max-ticks N]
   resume [SWAP_ID_PREFIX] [--max-steps N] [--fee-rate SAT_PER_VB]
@@ -383,6 +385,12 @@ func run(ctx context.Context, engine *swap.Engine, command string, args []string
 	case "reconcile":
 		return runReconcile(ctx, engine, args)
 	case "next":
+		// `next` with no argument is the reference's discovery command; `next SWAP_ID` is
+		// this implementation's single-swap extension and keeps its own path.
+		if len(args) == 0 {
+			return runNextDiscovery(ctx, engine, args)
+		}
+
 		return runNext(ctx, engine, args)
 	case "run":
 		return runDriver(ctx, engine, args)
@@ -2423,9 +2431,24 @@ func buildEngine() (*swap.Engine, func(), error) {
 	engine.Role = roleFromEnv()
 	engine.BlakeWallet = walletFromEnv("BLAKE_SWAP_BLAKE_WALLET", engine.Role)
 	engine.BTCWallet = walletFromEnv("BLAKE_SWAP_BTC_WALLET", engine.Role)
-	engine.BlakeWatchWallet = engine.BlakeWallet + "-watch"
-	engine.BTCWatchWallet = engine.BTCWallet + "-watch"
+	engine.BlakeWatchWallet = watchWalletFromEnv("BLAKE_SWAP_BLAKE_WATCH_WALLET", engine.BlakeWallet)
+	engine.BTCWatchWallet = watchWalletFromEnv("BLAKE_SWAP_BTC_WATCH_WALLET", engine.BTCWallet)
 	engine.TestMode = os.Getenv("BLAKE_SWAP_TEST_MODE") == "1"
+
+	settlementTarget, err := feeTargetBlocksFromEnv()
+	if err != nil {
+		return nil, cleanup, err
+	}
+
+	engine.Settlement.FeeTargetBlocks = settlementTarget
+
+	fundingTarget, err := fundingFeeTargetBlocksFromEnv(chain.Blake)
+	if err != nil {
+		return nil, cleanup, err
+	}
+
+	engine.Funding.FeeTargetBlocks = fundingTarget
+
 	engine.Funding.AutoMine = autoMine()
 	engine.Now = time.Now
 
@@ -2508,11 +2531,20 @@ func nodeFromDatadir(ch chain.Chain) (*chain.Node, error) {
 		return nil, err
 	}
 
+	retry, err := chain.RetryFromEnv()
+
+	if err != nil {
+		return nil, err
+	}
+
 	return chain.New(ch, chain.Config{
-		URL:                 "http://127.0.0.1:" + strconv.Itoa(port) + "/",
-		User:                user,
-		Password:            password,
-		TimeoutMilliseconds: int(timeout / time.Millisecond),
+		URL:                         "http://127.0.0.1:" + strconv.Itoa(port) + "/",
+		User:                        user,
+		Password:                    password,
+		TimeoutMilliseconds:         int(timeout / time.Millisecond),
+		RetryAttempts:               retry.Attempts,
+		RetryBackoffMilliseconds:    int(retry.Backoff / time.Millisecond),
+		RetryMaxBackoffMilliseconds: int(retry.MaxBackoff / time.Millisecond),
 	})
 }
 
@@ -2592,12 +2624,85 @@ func roleFromEnv() string {
 }
 
 // walletFromEnv reads a wallet name, defaulting to the role's wallet.
+//
+// The reference's precedence is chain-specific variable, then the shared
+// BLAKE_SWAP_CHAIN_WALLET, then the role. The shared variable exists because a
+// mixed-provider deployment may select independent signing wallets per chain
+// while a single-wallet profile keeps setting only one name.
 func walletFromEnv(name, role string) string {
 	if wallet := os.Getenv(name); wallet != "" {
 		return wallet
 	}
 
+	if wallet := os.Getenv("BLAKE_SWAP_CHAIN_WALLET"); wallet != "" {
+		return wallet
+	}
+
 	return role
+}
+
+// watchWalletFromEnv reads a watch-only wallet name for one chain.
+//
+// The default is the signing wallet's name with "-watch" appended, and the name
+// is per chain because the two chains are separate datadirs: one default on each
+// node is two wallets, not one.
+func watchWalletFromEnv(name, signingWallet string) string {
+	if wallet := os.Getenv(name); wallet != "" {
+		return wallet
+	}
+
+	return signingWallet + "-watch"
+}
+
+// feeTargetBlocksFromEnv reads the settlement estimator's confirmation target.
+func feeTargetBlocksFromEnv() (int64, error) {
+	raw := strings.TrimSpace(os.Getenv("BLAKE_SWAP_FEE_TARGET_BLOCKS"))
+
+	if raw == "" {
+		return settle.DefaultFeeTargetBlocks, nil
+	}
+
+	target, err := strconv.ParseInt(raw, 10, 64)
+
+	if err != nil {
+		return 0, fmt.Errorf("BLAKE_SWAP_FEE_TARGET_BLOCKS must be an integer")
+	}
+
+	if target < 1 {
+		return 0, fmt.Errorf("BLAKE_SWAP_FEE_TARGET_BLOCKS must be >= 1")
+	}
+
+	return target, nil
+}
+
+// fundingFeeTargetBlocksFromEnv reads one chain's funding confirmation target.
+//
+// Funding and settlement are separate policies on purpose: a funding
+// transaction can afford to wait, and a settlement cannot.
+func fundingFeeTargetBlocksFromEnv(which chain.Chain) (int64, error) {
+	name := "BLAKE_SWAP_BTC_FUNDING_FEE_TARGET_BLOCKS"
+
+	if which == chain.Blake {
+		name = "BLAKE_SWAP_BLAKE_FUNDING_FEE_TARGET_BLOCKS"
+	}
+
+	raw := strings.TrimSpace(os.Getenv(name))
+
+	if raw == "" {
+		return fund.DefaultFeeTargetBlocks, nil
+	}
+
+	target, err := strconv.ParseInt(raw, 10, 64)
+
+	if err != nil {
+		return 0, fmt.Errorf("%s must be an integer", name)
+	}
+
+	if target < 1 {
+		return 0, fmt.Errorf("%s must be >= 1", name)
+	}
+
+	return target, nil
 }
 
 // autoMine reads the regtest auto-mine switch, defaulting on like the reference.

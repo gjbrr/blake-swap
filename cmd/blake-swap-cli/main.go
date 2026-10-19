@@ -71,6 +71,16 @@ func main() {
 		return
 	}
 
+	// The coordination peer talks to relays and holds a key, and touches no chain at
+	// all: it is the other end of a browser participant's settlement transport.
+	if isCoordPeerCommand(command) {
+		if err := runCoordPeer(context.Background(), command, args); err != nil {
+			fail(err)
+		}
+
+		return
+	}
+
 	// These commands sign or read, but they touch no chain. Building an engine here
 	// would demand a regtest datadir and two nodes for a command the reference runs on
 	// a laptop with neither, so only the identity is loaded.
@@ -200,6 +210,11 @@ market (relays, no nodes):
   dismiss SWAP_ID
   rebroadcast-nostr-event EVENT_ID
 
+coordination peer (relays, no nodes):
+  coord-key
+  coord-read SWAP_ID --author HEX [--kind TYPE] [--encryption off|nip44_v2]
+  coord-reply SWAP_ID --author HEX --blake-bob-pub HEX --btc-bob-pub HEX [--encryption off|nip44_v2]
+
 environment:
   BLAKE_SWAP_STATE_DIR            records and the verified relay cache
   BLAKE_SWAP_PARTICIPANT_KEY_FILE the Nostr identity this participant signs with
@@ -285,6 +300,9 @@ var commands = map[string]string{
 	"ignore-match":                "tombstone a match so it stops surfacing",
 	"dismiss":                     "dismiss a record from the dashboard",
 	"rebroadcast-nostr-event":     "republish a signed event",
+	"coord-key":                   "print this participant's Nostr public key",
+	"coord-read":                  "read and validate one coordination message",
+	"coord-reply":                 "answer a pinned offer with an acceptance",
 }
 
 // run dispatches one command.
@@ -2453,11 +2471,30 @@ func buildEngine() (*swap.Engine, func(), error) {
 	engine.Now = time.Now
 
 	//
-	// The file transport is the only one wired here so far, and it is the one the
-	// suites and a same-host Python participant use. A relay transport is the
-	// browser client's job, not the CLI's.
+	// The coordination transport is chosen by BLAKE_SWAP_TRANSPORT: the local spool,
+	// which two participants on one host can share, or relays, which two participants
+	// that cannot see each other's filesystem need. An unknown value is refused rather
+	// than defaulted, because a participant that silently wrote to a spool nobody
+	// reads would look like a participant whose peer never answers.
 	//
 	engine.Transport = &coord.FileTransport{Spool: records, Sender: identity.PublicKey()}
+
+	switch transport := strings.ToLower(strings.TrimSpace(os.Getenv("BLAKE_SWAP_TRANSPORT"))); transport {
+	case "", "file":
+	case "nostr":
+		relay, relayMode, err := peerTransport(os.Getenv("BLAKE_SWAP_NOSTR_ENCRYPTION"))
+
+		if err != nil {
+			return nil, cleanup, err
+		}
+
+		engine.Transport = relay
+		engine.Mode = relayMode
+	default:
+		return nil, cleanup, fmt.Errorf(
+			"BLAKE_SWAP_TRANSPORT must be file or nostr, not %q", transport,
+		)
+	}
 
 	return engine, cleanup, nil
 }

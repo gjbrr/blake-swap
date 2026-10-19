@@ -24,6 +24,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -77,10 +78,8 @@ type Side struct {
 	Public string
 }
 
-//
 // The CLI is built once per test binary. Every suite used to rebuild it, which
 // cost more than the test it was building for.
-//
 var (
 	buildOnce sync.Once
 	builtCLI  string
@@ -608,10 +607,28 @@ func (r *Rig) SetupSwap(t *testing.T, dir Direction) (alice, bob *Side, messages
 func (r *Rig) SetupGoSwap(t *testing.T) (alice, bob *Side, messages, id string) {
 	t.Helper()
 
-	messages = t.TempDir()
+	return r.SetupGoSwapIn(t, t.TempDir())
+}
+
+// SetupGoSwapIn runs the handshake on an existing spool, so two swaps can share
+// one.
+//
+// Sharing matters for the replay suites: a message that names a different swap is
+// only a replay if both swaps are reachable through the same transport, which is
+// exactly the situation a participant with more than one swap is in.
+func (r *Rig) SetupGoSwapIn(t *testing.T, messages string) (alice, bob *Side, _, id string) {
+	t.Helper()
 
 	alice = NewSide(t, "go", "alice")
 	bob = NewSide(t, "go", "bob")
+
+	return alice, bob, messages, r.Handshake(t, alice, bob, messages)
+}
+
+// Handshake runs the offer/accept exchange for a new swap between two existing
+// participants, so one participant can hold several swaps at once.
+func (r *Rig) Handshake(t *testing.T, alice, bob *Side, messages string) (id string) {
+	t.Helper()
 
 	output := r.Run(t, alice, messages, "new", "--blake", "0.001", "--sats", "25000")
 	id = SwapID(t, output)
@@ -620,7 +637,7 @@ func (r *Rig) SetupGoSwap(t *testing.T) (alice, bob *Side, messages, id string) 
 	r.Run(t, bob, messages, "accept-offer", id, "--expected-alice-pub", alice.Public)
 	r.Run(t, alice, messages, "receive-accept", id)
 
-	return alice, bob, messages, id
+	return id
 }
 
 // FundBothLegs funds and announces both legs.
@@ -851,5 +868,124 @@ func AssertFieldAbsent(t *testing.T, s *Side, id, field string) {
 
 	if present && value != nil && fmt.Sprint(value) != "" {
 		t.Fatalf("%s recorded %s, which it must not have", s.Name, field)
+	}
+}
+
+// Expect runs one command as this participant and requires it to fail, with the
+// given fragment in its output.
+//
+// A refusal is a protocol observation, not a test failure: the suites that assert
+// a wrong-role action or a replayed message is *refused* need the output, the exit
+// status and the record that did not change.
+func (r *Rig) Expect(t *testing.T, s *Side, messages, fragment string, args ...string) string {
+	t.Helper()
+
+	output, exit, err := r.Exec(t, s, messages, nil, args...)
+
+	if err != nil {
+		t.Fatalf("running %v: %v", args, err)
+	}
+
+	if exit == 0 {
+		t.Fatalf("%s %v succeeded; expected a refusal containing %q\n%s",
+			s.Name, args, fragment, output)
+	}
+
+	if fragment != "" && !strings.Contains(output, fragment) {
+		t.Fatalf("%s %v refused for the wrong reason; expected %q in:\n%s",
+			s.Name, args, fragment, output)
+	}
+
+	return output
+}
+
+// Mempool is one chain's current mempool transaction ids, sorted.
+func (r *Rig) Mempool(t *testing.T, which string) []string {
+	t.Helper()
+
+	var ids []string
+
+	if err := json.Unmarshal([]byte(r.Node(t, which, "getrawmempool")), &ids); err != nil {
+		t.Fatalf("getrawmempool: %v", err)
+	}
+
+	sort.Strings(ids)
+
+	return ids
+}
+
+// AssertMempoolUnchanged requires one chain's mempool to be the same before and
+// after, which is how a suite proves an action moved no money.
+func (r *Rig) AssertMempoolUnchanged(t *testing.T, which string, before []string, what string) {
+	t.Helper()
+
+	after := r.Mempool(t, which)
+
+	if strings.Join(before, ",") != strings.Join(after, ",") {
+		t.Fatalf("%s changed the %s mempool:\n before: %v\n after:  %v",
+			what, which, before, after)
+	}
+}
+
+// Snapshot is one participant's stored record, as bytes.
+//
+// Comparing bytes is how a suite proves a refused action left the record exactly
+// as it was, including fields the rendered output does not show.
+func (r *Rig) Snapshot(t *testing.T, s *Side, id string) string {
+	t.Helper()
+
+	raw, err := os.ReadFile(filepath.Join(s.State, id+".json"))
+
+	if err != nil {
+		t.Fatalf("reading %s's record: %v", s.Name, err)
+	}
+
+	return string(raw)
+}
+
+// AssertSnapshotUnchanged requires a participant's record to be byte-identical.
+func (r *Rig) AssertSnapshotUnchanged(t *testing.T, s *Side, id, before, what string) {
+	t.Helper()
+
+	if after := r.Snapshot(t, s, id); after != before {
+		t.Fatalf("%s changed %s's record:\n before: %s\n after:  %s",
+			what, s.Name, before, after)
+	}
+}
+
+// MessageSpool lists the coordination messages currently in the shared spool.
+func (r *Rig) MessageSpool(t *testing.T, messages string) []string {
+	t.Helper()
+
+	names := []string{}
+
+	entries, err := os.ReadDir(messages)
+
+	if err != nil {
+		if os.IsNotExist(err) {
+			return names
+		}
+
+		t.Fatalf("reading the message spool: %v", err)
+	}
+
+	for _, entry := range entries {
+		names = append(names, entry.Name())
+	}
+
+	sort.Strings(names)
+
+	return names
+}
+
+// AssertNoNewMessages requires a command to have published nothing.
+func (r *Rig) AssertNoNewMessages(t *testing.T, messages string, before []string, what string) {
+	t.Helper()
+
+	after := r.MessageSpool(t, messages)
+
+	if strings.Join(before, ",") != strings.Join(after, ",") {
+		t.Fatalf("%s published a coordination message:\n before: %v\n after:  %v",
+			what, before, after)
 	}
 }

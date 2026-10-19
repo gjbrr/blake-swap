@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gjbrr/blake-swap/internal/rigtest"
 	"github.com/gjbrr/blake-swap/pkg/relaystub"
 )
 
@@ -26,56 +27,21 @@ import (
 // Settlement after the match is the direct path, which `pkg/swap`'s cross-implementation tests
 // already walk against the reference.
 
-// marketParticipant is one side of the exchange: a state root, a key file and an identity.
+// marketParticipant is one side of the exchange: a state root, a key file, a role and an
+// identity.
+//
+// The role matters because the reference's market flow has the maker act as protocol Alice
+// and the taker as protocol Bob, and the chain wallets are named after the role.
 type marketParticipant struct {
 	name   string
+	role   string
 	state  string
 	key    string
 	public string
 }
 
-// rigOrSkip skips unless the two-chain rig, the Python virtualenv and a built CLI are present.
-func rigOrSkip(t *testing.T) string {
-	t.Helper()
-
-	root := os.Getenv("BLAKE_SWAP_TEST_ROOT")
-
-	if root == "" {
-		home, err := os.UserHomeDir()
-
-		if err != nil {
-			t.Skip("no home directory")
-		}
-
-		root = filepath.Join(home, ".blake-swap-test")
-	}
-
-	if _, err := os.ReadFile(filepath.Join(root, "rig-env.json")); err != nil {
-		t.Skipf("no test rig at %s", root)
-	}
-
-	repo, err := filepath.Abs(filepath.Join("..", ".."))
-
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	binary := filepath.Join(repo, "bin", "blake-swap-cli")
-
-	if _, err := os.Stat(binary); err != nil {
-		build := exec.Command("go", "build", "-o", binary, "./cmd/blake-swap-cli")
-		build.Dir = repo
-
-		if out, err := build.CombinedOutput(); err != nil {
-			t.Fatalf("building the CLI: %v\n%s", err, out)
-		}
-	}
-
-	return repo
-}
-
 // newMarketParticipant writes one participant's key and state root.
-func newMarketParticipant(t *testing.T, name, secret string) marketParticipant {
+func newMarketParticipant(t *testing.T, name, role, secret string) marketParticipant {
 	t.Helper()
 
 	dir := t.TempDir()
@@ -85,30 +51,28 @@ func newMarketParticipant(t *testing.T, name, secret string) marketParticipant {
 		t.Fatal(err)
 	}
 
-	part := marketParticipant{name: name, state: dir, key: keyFile}
-
-	// The public key is what the outputs report; reading it from the CLI keeps this test from
-	// depending on the key derivation it is not testing.
-	part.public = secret
-
-	return part
+	return marketParticipant{name: name, role: role, state: dir, key: keyFile, public: secret}
 }
 
 // runParticipant runs one CLI command as one participant.
+//
+// The chain configuration comes from internal/rigtest, which is also what proves the rig is
+// running and that the wallets this path reads exist. Only the relay and the message spool
+// are specific to the market.
 func runParticipant(
-	t *testing.T, repo string, part marketParticipant, relays string, messages string, args ...string,
+	t *testing.T, r *rigtest.Rig, part marketParticipant, relays string, messages string,
+	args ...string,
 ) string {
 	t.Helper()
 
-	env := append(os.Environ(),
-		"BLAKE_SWAP_STATE_DIR="+part.state,
-		"BLAKE_SWAP_PARTICIPANT_KEY_FILE="+part.key,
-		"BLAKE_SWAP_NOSTR_RELAYS="+relays,
-		"BLAKE_SWAP_MESSAGE_DIR="+messages,
-	)
+	side := &rigtest.Side{
+		Name: "go", Role: part.role, State: part.state, KeyFile: part.key,
+	}
 
-	command := exec.Command(filepath.Join(repo, "bin", "blake-swap-cli"), args...)
-	command.Dir = repo
+	env := append(r.Env(side, messages), "BLAKE_SWAP_NOSTR_RELAYS="+relays)
+
+	command := exec.Command(r.CLI, args...)
+	command.Dir = r.Repo
 	command.Env = env
 
 	out, err := command.CombinedOutput()
@@ -136,7 +100,7 @@ func marketField(t *testing.T, output, label string) string {
 
 // TestSwapMarketFlow runs the marketplace path between two participants over a local relay.
 func TestSwapMarketFlow(t *testing.T) {
-	repo := rigOrSkip(t)
+	r := rigtest.Load(t)
 
 	stub, err := relaystub.New()
 
@@ -149,11 +113,11 @@ func TestSwapMarketFlow(t *testing.T) {
 	messages := t.TempDir()
 
 	// Two identities, both long enough to be keys and different from each other.
-	alice := newMarketParticipant(t, "maker", strings.Repeat("31", 32))
-	bob := newMarketParticipant(t, "taker", strings.Repeat("42", 32))
+	alice := newMarketParticipant(t, "maker", "alice", strings.Repeat("31", 32))
+	bob := newMarketParticipant(t, "taker", "bob", strings.Repeat("42", 32))
 
 	// Step 1: the maker advertises.
-	published := runParticipant(t, repo, alice, stub.URL, messages,
+	published := runParticipant(t, r, alice, stub.URL, messages,
 		"publish-market-offer", "--blake", "10", "--sats", "50000", "--minutes", "30")
 
 	offerID := marketField(t, published, "offer id")
@@ -177,9 +141,9 @@ func TestSwapMarketFlow(t *testing.T) {
 
 	// Step 2: the taker reads the market and takes the offer. Reading first is what fills the
 	// taker's cache, which is how a prefix resolves — the same order a person uses.
-	runParticipant(t, repo, bob, stub.URL, messages, "market", "--limit", "10")
+	runParticipant(t, r, bob, stub.URL, messages, "market", "--limit", "10")
 
-	taken := runParticipant(t, repo, bob, stub.URL, messages, "take-market-offer", offerID)
+	taken := runParticipant(t, r, bob, stub.URL, messages, "take-market-offer", offerID)
 
 	takeID := marketField(t, taken, "take id")
 
@@ -189,9 +153,9 @@ func TestSwapMarketFlow(t *testing.T) {
 
 	// Step 3: the maker reads its inbox and accepts the take, which creates the swap and
 	// publishes both the protocol offer and the match.
-	runParticipant(t, repo, alice, stub.URL, messages, "market-takes", offerID)
+	runParticipant(t, r, alice, stub.URL, messages, "market-takes", offerID)
 
-	accepted := runParticipant(t, repo, alice, stub.URL, messages, "accept-market-take", takeID)
+	accepted := runParticipant(t, r, alice, stub.URL, messages, "accept-market-take", takeID)
 
 	if !strings.Contains(accepted, "MARKET TAKE ACCEPTED") {
 		t.Fatalf("the take was not accepted:\n%s", accepted)
@@ -203,7 +167,7 @@ func TestSwapMarketFlow(t *testing.T) {
 	matchID := marketField(t, matchOutput, "market match")
 
 	// Step 4: the taker imports the match, which binds the negotiation to its own swap.
-	imported := runParticipant(t, repo, bob, stub.URL, messages, "accept-market-match", matchID)
+	imported := runParticipant(t, r, bob, stub.URL, messages, "accept-market-match", matchID)
 
 	if !strings.Contains(imported, "MARKET MATCH IMPORTED") {
 		t.Fatalf("the match was not imported:\n%s", imported)
@@ -240,7 +204,7 @@ func TestSwapMarketFlow(t *testing.T) {
 // TestSwapMarketFlowRefusesAnUnopenedOffer: a take of something that is not open is refused,
 // and the refusal is the reference's.
 func TestSwapMarketFlowRefusesAnUnopenedOffer(t *testing.T) {
-	repo := rigOrSkip(t)
+	r := rigtest.Load(t)
 
 	stub, err := relaystub.New()
 
@@ -251,20 +215,17 @@ func TestSwapMarketFlowRefusesAnUnopenedOffer(t *testing.T) {
 	defer stub.Close()
 
 	messages := t.TempDir()
-	bob := newMarketParticipant(t, "taker", strings.Repeat("43", 32))
+	bob := newMarketParticipant(t, "taker", "bob", strings.Repeat("43", 32))
 
 	// A full-length id that is not on the relay: the refusal must come from the market read,
 	// not from a validation shortcut.
 	missing := strings.Repeat("ab", 32)
 
-	command := exec.Command(filepath.Join(repo, "bin", "blake-swap-cli"), "take-market-offer", missing)
-	command.Dir = repo
-	command.Env = append(os.Environ(),
-		"BLAKE_SWAP_STATE_DIR="+bob.state,
-		"BLAKE_SWAP_PARTICIPANT_KEY_FILE="+bob.key,
-		"BLAKE_SWAP_NOSTR_RELAYS="+stub.URL,
-		"BLAKE_SWAP_MESSAGE_DIR="+messages,
-	)
+	side := &rigtest.Side{Name: "go", Role: bob.role, State: bob.state, KeyFile: bob.key}
+
+	command := exec.Command(r.CLI, "take-market-offer", missing)
+	command.Dir = r.Repo
+	command.Env = append(r.Env(side, messages), "BLAKE_SWAP_NOSTR_RELAYS="+stub.URL)
 
 	out, err := command.CombinedOutput()
 

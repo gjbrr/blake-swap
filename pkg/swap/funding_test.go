@@ -202,7 +202,13 @@ func (w *testWallet) ListTransactions(context.Context, int64, int64) ([]chain.Wa
 }
 
 func (w *testWallet) AddressInfo(_ context.Context, address string) (*chain.AddressInfo, error) {
-	return &chain.AddressInfo{Address: address, Solvable: true}, nil
+	// A real wallet reports the key behind the address it just handed out, and the engine
+	// refuses to build a contract naming a wallet that cannot produce one.
+	return &chain.AddressInfo{
+		Address:  address,
+		Solvable: true,
+		Pubkey:   "02" + strings.Repeat("66", 32),
+	}, nil
 }
 
 func (w *testWallet) ImportDescriptor(_ context.Context, descriptor string) (*chain.ImportResult, error) {

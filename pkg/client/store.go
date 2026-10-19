@@ -66,6 +66,7 @@ func (e *Encrypted) entropy() io.Reader {
 // message scans, which is what lets the store's List see exactly the records.
 const (
 	recordPrefix  = "record/"
+	rolePrefix    = "record-role/"
 	messagePrefix = "message/"
 	headerKey     = "vault/header"
 	verifierKey   = "vault/verifier"
@@ -178,6 +179,16 @@ func Exists(ctx context.Context, kv KV) (bool, error) {
 func (e *Encrypted) Header() vault.Params { return e.header }
 
 // Save implements store.Store.
+//
+// The role is not decorative here. A vault holds one participant's records, and a
+// participant is Alice in one swap and Bob in another; the sealed record is keyed by swap
+// id alone, so a save that disagreed with the role already recorded for that swap would
+// overwrite one participant's record with the other's view of the same swap. The role tag
+// is written on the first save and checked on every later one.
+//
+// A vault written before the tag existed has no tag, and the first save of an existing
+// record writes it: that is the migration, and it is deliberate rather than silent,
+// because the alternative is refusing to open a vault that worked yesterday.
 func (e *Encrypted) Save(ctx context.Context, role string, swap *model.Swap) error {
 	if err := store.ValidateRole(role); err != nil {
 		return err
@@ -191,13 +202,59 @@ func (e *Encrypted) Save(ctx context.Context, role string, swap *model.Swap) err
 		return err
 	}
 
+	recorded, found, err := e.get(ctx, rolePrefix+swap.SwapID)
+
+	if err != nil {
+		return err
+	}
+
+	if found && string(recorded) != role {
+		return fmt.Errorf(
+			"SECURITY FAILURE: swap %s is stored as protocol %s; refusing to save it as %s",
+			swap.SwapID, string(recorded), role,
+		)
+	}
+
 	encoded, err := swap.Marshal()
 
 	if err != nil {
 		return err
 	}
 
-	return e.put(ctx, recordPrefix+swap.SwapID, encoded)
+	if err := e.put(ctx, recordPrefix+swap.SwapID, encoded); err != nil {
+		return err
+	}
+
+	if !found {
+		if err := e.put(ctx, rolePrefix+swap.SwapID, []byte(role)); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// Role is the protocol role this vault recorded for one swap.
+//
+// An empty role with a nil error means the record predates the tag. The caller falls back
+// to the record's identity pins, which are the authority anyway; the tag exists so that a
+// save cannot silently change sides.
+func (e *Encrypted) Role(ctx context.Context, swapID string) (string, error) {
+	if err := store.ValidateSwapID(swapID); err != nil {
+		return "", err
+	}
+
+	recorded, found, err := e.get(ctx, rolePrefix+swapID)
+
+	if err != nil {
+		return "", err
+	}
+
+	if !found {
+		return "", nil
+	}
+
+	return string(recorded), nil
 }
 
 // Load implements store.Store.
@@ -266,6 +323,14 @@ func (e *Encrypted) Archive(ctx context.Context, role, swapID string) error {
 
 	if err := e.kv.Put(ctx, archivePrefix+swapID, sealed); err != nil {
 		return err
+	}
+
+	// The role tag follows the record: an archived swap that is saved again must still
+	// be the same participant's record.
+	if recorded, found, err := e.get(ctx, rolePrefix+swapID); err == nil && found {
+		if err := e.put(ctx, rolePrefix+swapID, recorded); err != nil {
+			return err
+		}
 	}
 
 	return e.kv.Delete(ctx, recordPrefix+swapID)

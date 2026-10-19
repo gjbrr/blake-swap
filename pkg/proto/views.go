@@ -277,6 +277,49 @@ type MarketSelection struct {
 	Direction string `json:"direction,omitempty"`
 }
 
+// IdentityView is the one reply that carries a secret.
+//
+// It is returned once, by identity.generate, because a person must be able to write their
+// key down. Nothing stores it on the page: the sealed record is the only copy after this
+// reply, and the page clears the field that displayed it.
+type IdentityView struct {
+	Public string `json:"public"`
+	Secret string `json:"secret"`
+}
+
+// SwapList is every record the store holds.
+type SwapList struct {
+	Swaps []SwapSummary `json:"swaps,omitempty"`
+}
+
+// RecoveryView is a recovery plan: what a wallet would need to spend each HTLC.
+type RecoveryView struct {
+	SwapID string            `json:"swap_id"`
+	State  string            `json:"state"`
+	Role   string            `json:"role"`
+	Legs   []RecoveryLegView `json:"legs,omitempty"`
+}
+
+// RecoveryLegView is one chain's part of a recovery plan.
+type RecoveryLegView struct {
+	Chain      string `json:"chain"`
+	Descriptor string `json:"descriptor"`
+	Address    string `json:"address"`
+	// Amount is the expected value in the chain's smallest unit, as a string.
+	Amount       string `json:"amount"`
+	FundingTxID  string `json:"funding_txid,omitempty"`
+	FundingVout  int64  `json:"funding_vout,omitempty"`
+	Timeout      int64  `json:"timeout"`
+	OurClaimKey  string `json:"our_claim_key,omitempty"`
+	OurRefundKey string `json:"our_refund_key,omitempty"`
+	// Solvable and Known report whether a loaded wallet can spend the output, and
+	// whether that question was asked at all.
+	Solvable       bool   `json:"solvable"`
+	Known          bool   `json:"known"`
+	SolvableWallet string `json:"solvable_wallet,omitempty"`
+	Reason         string `json:"reason,omitempty"`
+}
+
 // ActionView is what a command that changed something did.
 type ActionView struct {
 	// Command is the command that ran.

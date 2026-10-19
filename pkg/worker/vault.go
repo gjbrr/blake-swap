@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"strings"
@@ -30,6 +31,10 @@ type vaultDomain struct {
 	random   io.Reader
 	store    *client.Encrypted
 	unlocked bool
+	// defaultProxy is the page's own origin, offered as the proxy when none is
+	// configured. It is memory only: where this document was loaded from is not a
+	// setting worth sealing, and it must never overwrite one the operator chose.
+	defaultProxy string
 }
 
 // NewVaultDomain builds a vault domain over any KV and entropy source.
@@ -134,7 +139,18 @@ func (d *vaultDomain) handle(ctx context.Context, request proto.Request) proto.R
 			return failed(request.Command, err)
 		}
 
-		if err := d.store.Save(ctx, store.Alice, record); err != nil {
+		//
+		// The role is the caller's, because this command exists to seed a record in a
+		// test and a seeded Bob record must be stored as Bob's. The store itself refuses a
+		// save that would change an existing record's side.
+		//
+		role := strings.TrimSpace(request.Args["role"])
+
+		if role == "" {
+			role = store.Alice
+		}
+
+		if err := d.store.Save(ctx, role, record); err != nil {
 			return failed(request.Command, err)
 		}
 
@@ -227,6 +243,25 @@ func (d *vaultDomain) handle(ctx context.Context, request proto.Request) proto.R
 			Command: request.Command, OK: true, Text: "identity: " + key.Public,
 		}
 
+	case "wallets.set":
+		return d.setWallets(ctx, request)
+
+	case "identity.generate":
+		return d.generateIdentity(ctx, request)
+
+	case "proxy.default":
+		//
+		// The page supplies its own origin so that an app served by a server can reach
+		// the nodes it is already talking to. It is a fact about where this document was
+		// loaded from, not a protocol decision, and it never overwrites a proxy the
+		// operator configured.
+		//
+		d.defaultProxy = strings.TrimRight(strings.TrimSpace(request.Args["url"]), "/")
+
+		return proto.Result{
+			Command: request.Command, OK: true, Text: "proxy default: " + d.defaultProxy,
+		}
+
 	case "proxy.set":
 		value := strings.TrimRight(strings.TrimSpace(request.Args["url"]), "/")
 
@@ -281,6 +316,163 @@ func (d *vaultDomain) handle(ctx context.Context, request proto.Request) proto.R
 		Command: request.Command,
 		Error:   fmt.Sprintf("unknown command: %s", request.Command),
 	}
+}
+
+// proxyAddress is the proxy the engine should use.
+//
+// A configured proxy always wins. The page's origin is the fallback, which is what makes
+// a browser served by cmd/server work with no setup: the server already proxies the two
+// chains on its own origin.
+func (d *vaultDomain) proxyAddress(ctx context.Context) (string, error) {
+	stored, err := d.readSecret(ctx, SecretProxy)
+
+	if err != nil {
+		return "", err
+	}
+
+	if stored != "" {
+		return stored, nil
+	}
+
+	return d.defaultProxy, nil
+}
+
+// setWallets stores the four wallet names.
+//
+// The names are validated as names rather than as a set of known values: a node may call
+// its wallets anything, and the client's job is to refuse what a node cannot accept, not
+// to choose for it. What is refused is the shapes that turn into a URL path or a shell
+// token: empty, whitespace, slashes, dots-only, and anything unexpected in a wallet name.
+func (d *vaultDomain) setWallets(ctx context.Context, request proto.Request) proto.Result {
+	if d.store == nil {
+		return proto.Result{Command: request.Command, Error: "the vault is locked"}
+	}
+
+	pairs := []struct {
+		argument string
+		name     string
+		label    string
+	}{
+		{"blake", SecretWalletBlake, "BLAKE wallet"},
+		{"btc", SecretWalletBTC, "BTC wallet"},
+		{"blake_watch", SecretWalletBlakeWatch, "BLAKE watch-only wallet"},
+		{"btc_watch", SecretWalletBTCWatch, "BTC watch-only wallet"},
+	}
+
+	for _, pair := range pairs {
+		value := strings.TrimSpace(request.Args[pair.argument])
+
+		if value == "" {
+			return proto.Result{
+				Command: request.Command,
+				Error:   pair.label + " name is required",
+			}
+		}
+
+		if err := validateWalletName(value); err != nil {
+			return proto.Result{
+				Command: request.Command,
+				Error:   pair.label + ": " + err.Error(),
+			}
+		}
+
+		if err := d.writeSecret(ctx, pair.name, value); err != nil {
+			return failed(request.Command, err)
+		}
+	}
+
+	return proto.Result{
+		Command: request.Command, OK: true, Text: "wallets set",
+	}
+}
+
+// validateWalletName refuses a name a node would not accept.
+func validateWalletName(name string) error {
+	if len(name) > 64 {
+		return fmt.Errorf("name is longer than 64 characters")
+	}
+
+	for _, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z',
+			r >= 'A' && r <= 'Z',
+			r >= '0' && r <= '9',
+			r == '-', r == '_':
+			continue
+		default:
+			return fmt.Errorf("name may contain only letters, digits, '-' and '_'")
+		}
+	}
+
+	if strings.HasPrefix(name, "-") {
+		return fmt.Errorf("name may not start with '-'")
+	}
+
+	return nil
+}
+
+// generateIdentity creates a new Nostr key, seals it, and returns the secret exactly
+// once.
+//
+// The secret is in the reply because a person must be able to write their key down, and
+// that is the only moment it can be shown: after this reply the worker holds it sealed
+// and the page holds nothing. Storing it nowhere else is the whole design.
+func (d *vaultDomain) generateIdentity(ctx context.Context, request proto.Request) proto.Result {
+	if d.store == nil {
+		return proto.Result{Command: request.Command, Error: "the vault is locked"}
+	}
+
+	existing, err := d.readSecret(ctx, SecretIdentity)
+
+	if err != nil {
+		return failed(request.Command, err)
+	}
+
+	//
+	// Replacing a key silently would orphan every swap pinned to the old one, so a
+	// second generate is refused unless the caller says it means it.
+	//
+	if existing != "" && !strings.EqualFold(strings.TrimSpace(request.Args["replace"]), "true") {
+		key, err := nostr.NewKey(existing)
+
+		if err != nil {
+			return failed(request.Command, err)
+		}
+
+		return proto.Result{
+			Command: request.Command,
+			Error: "an identity is already configured (" + key.Public +
+				"); pass replace=true to create a new one",
+		}
+	}
+
+	secret, err := generateSecret()
+	key, err := nostr.NewKey(secret)
+
+	if err != nil {
+		return failed(request.Command, err)
+	}
+
+	if err := d.writeSecret(ctx, SecretIdentity, key.Secret); err != nil {
+		return failed(request.Command, err)
+	}
+
+	return withView(proto.Result{
+		Command: request.Command,
+		OK:      true,
+		Text:    "identity generated: " + key.Public,
+	}, proto.IdentityView{Public: key.Public, Secret: key.Secret})
+}
+
+// generateSecret makes a fresh 32-byte key as hex.
+func generateSecret() (string, error) {
+	buffer := make([]byte, 32)
+
+	if _, err := io.ReadFull(randomReader{}, buffer); err != nil {
+		return "", err
+	}
+
+	return hex.EncodeToString(buffer), nil
 }
 
 // vaultSelfTest runs the encrypted round trip in the browser.
@@ -439,10 +631,13 @@ func handleCommand(
 	}
 
 	switch {
+	case request.Command == "wallets.status":
+		return engine.Handle(ctx, request)
 	case strings.HasPrefix(request.Command, "vault."),
 		strings.HasPrefix(request.Command, "state."),
 		strings.HasPrefix(request.Command, "identity."),
-		strings.HasPrefix(request.Command, "proxy."):
+		strings.HasPrefix(request.Command, "proxy."),
+		strings.HasPrefix(request.Command, "wallets."):
 		return vault.handle(ctx, request)
 	case strings.HasPrefix(request.Command, "engine."):
 		return engine.Handle(ctx, request)

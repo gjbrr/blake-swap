@@ -334,3 +334,132 @@ func TestSealedRecordsDiffer(t *testing.T) {
 		t.Fatal("two seals of the same record are identical")
 	}
 }
+
+// TestSaveRefusesARoleChange is the accident this check exists to remove: the sealed
+// record is keyed by swap id alone, so a save that changed sides would overwrite one
+// participant's record with the other's view of the same swap.
+func TestSaveRefusesARoleChange(t *testing.T) {
+	ctx := context.Background()
+	st, err := Create(ctx, NewMemory(), "correct horse battery staple")
+
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	record := newRecord(t, "aaaa00000002")
+
+	if err := st.Save(ctx, store.Bob, record); err != nil {
+		t.Fatalf("the first save as Bob failed: %v", err)
+	}
+
+	role, err := st.Role(ctx, record.SwapID)
+
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if role != store.Bob {
+		t.Fatalf("recorded role = %q, want bob", role)
+	}
+
+	// Saving again as Bob is the normal path.
+	if err := st.Save(ctx, store.Bob, record); err != nil {
+		t.Fatalf("the second save as Bob failed: %v", err)
+	}
+
+	// Saving the same swap as Alice is refused, whichever way round the mistake goes.
+	err = st.Save(ctx, store.Alice, record)
+
+	if err == nil {
+		t.Fatal("a Bob record was saved as Alice")
+	}
+
+	if !strings.Contains(err.Error(), "SECURITY FAILURE") || !strings.Contains(err.Error(), "bob") {
+		t.Fatalf("the refusal does not name the recorded role: %v", err)
+	}
+
+	// The record itself is untouched by the refused save.
+	loaded, err := st.Load(ctx, record.SwapID)
+
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if loaded.SwapID != record.SwapID {
+		t.Fatal("the refused save changed the record")
+	}
+}
+
+// TestRoleIsRecordedTheOtherWayRound: the same two directions, starting from Alice, so a
+// check that only worked for one side cannot pass this.
+func TestRoleIsRecordedTheOtherWayRound(t *testing.T) {
+	ctx := context.Background()
+	st, err := Create(ctx, NewMemory(), "correct horse battery staple")
+
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	record := newRecord(t, "aaaa00000003")
+
+	if err := st.Save(ctx, store.Alice, record); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := st.Save(ctx, store.Bob, record); err == nil {
+		t.Fatal("an Alice record was saved as Bob")
+	}
+
+	if role, _ := st.Role(ctx, record.SwapID); role != store.Alice {
+		t.Fatalf("recorded role = %q, want alice", role)
+	}
+}
+
+// TestRoleOfARecordWrittenBeforeTheTag: a vault written before the role tag existed has
+// no tag. Opening it must still work, and the first save records the role — the migration
+// is "the next save writes it", not a refused vault.
+func TestRoleOfARecordWrittenBeforeTheTag(t *testing.T) {
+	ctx := context.Background()
+	kv := NewMemory()
+
+	st, err := Create(ctx, kv, "correct horse battery staple")
+
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	record := newRecord(t, "aaaa00000004")
+
+	// Write the record and then remove the tag, which is exactly the shape of an old
+	// vault: a sealed record with no role beside it.
+	if err := st.Save(ctx, store.Alice, record); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := kv.Delete(ctx, rolePrefix+record.SwapID); err != nil {
+		t.Fatal(err)
+	}
+
+	role, err := st.Role(ctx, record.SwapID)
+
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if role != "" {
+		t.Fatalf("a record with no tag reported role %q", role)
+	}
+
+	// The record still loads, and the next save records the role it was saved with.
+	if _, err := st.Load(ctx, record.SwapID); err != nil {
+		t.Fatalf("a record with no role tag could not be loaded: %v", err)
+	}
+
+	if err := st.Save(ctx, store.Alice, record); err != nil {
+		t.Fatalf("the migrating save failed: %v", err)
+	}
+
+	if role, _ := st.Role(ctx, record.SwapID); role != store.Alice {
+		t.Fatalf("the migration did not record the role: %q", role)
+	}
+}

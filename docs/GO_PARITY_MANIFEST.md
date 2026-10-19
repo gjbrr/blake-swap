@@ -212,4 +212,4 @@ Every Python suite, and the Go package whose tests cover the same ground where o
 | `swap_timeout_negotiation_tests.py` | — | pending |
 | `swap_timeout_policy_tests.py` | — | pending |
 | `swap_wire_compat_tests.py` | — | pending |
-| `swap_wire_tests.py` | — | pending |
+| `swap_wire_tests.py` | `pkg/wire` | partial |

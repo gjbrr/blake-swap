@@ -2023,10 +2023,20 @@ func nodeFromDatadir(ch chain.Chain) (*chain.Node, error) {
 		return nil, fmt.Errorf("%s: malformed RPC cookie", envName)
 	}
 
+	// A node that accepts the connection and then never answers must not hang the
+	// engine forever: without a deadline that is an engine with no error and nothing to
+	// retry. The default and the override are the reference's.
+	timeout, err := chain.TimeoutFromEnv()
+
+	if err != nil {
+		return nil, err
+	}
+
 	return chain.New(ch, chain.Config{
-		URL:      "http://127.0.0.1:" + strconv.Itoa(port) + "/",
-		User:     user,
-		Password: password,
+		URL:                 "http://127.0.0.1:" + strconv.Itoa(port) + "/",
+		User:                user,
+		Password:            password,
+		TimeoutMilliseconds: int(timeout / time.Millisecond),
 	})
 }
 

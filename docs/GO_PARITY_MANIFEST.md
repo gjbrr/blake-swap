@@ -163,7 +163,7 @@ Every Python suite, and the Go package whose tests cover the same ground where o
 | `command_surface_tests.py` | — | pending |
 | `docs_alignment_tests.py` | — | pending |
 | `driver_policy_tests.py` | `cmd/blake-swap-cli` | partial |
-| `dynamic_settlement_builder_tests.py` | — | pending |
+| `dynamic_settlement_builder_tests.py` | `pkg/settle` | partial |
 | `fail_closed_tests.py` | `pkg/htlc` | partial |
 | `fee_policy_tests.py` | `pkg/fees` | partial |
 | `htlc_key_recovery_tests.py` | — | pending |

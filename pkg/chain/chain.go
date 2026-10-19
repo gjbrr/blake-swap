@@ -20,6 +20,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -1197,4 +1199,42 @@ func asNodeError(err error, target **rpc.Error) bool {
 	}
 
 	return false
+}
+
+// TimeoutFromEnv reads the chain RPC timeout.
+//
+// The default is the reference's, and it exists for a specific failure: a node that accepts
+// the connection and then never answers. Without a deadline that is an engine that hangs
+// forever with no error and nothing to retry, which is worse than a timeout because there is
+// nothing to look at. A configured value is validated rather than coerced, so a typo in a
+// unit file fails at the call that reads it.
+//
+// Override with BLAKE_SWAP_RPC_TIMEOUT_SECONDS.
+func TimeoutFromEnv() (time.Duration, error) {
+	raw := env("BLAKE_SWAP_RPC_TIMEOUT_SECONDS")
+
+	if raw == "" {
+		return defaultRPCTimeout, nil
+	}
+
+	seconds, err := strconv.ParseFloat(raw, 64)
+
+	if err != nil {
+		return 0, fmt.Errorf("BLAKE_SWAP_RPC_TIMEOUT_SECONDS must be a number")
+	}
+
+	if seconds <= 0 {
+		return 0, fmt.Errorf("BLAKE_SWAP_RPC_TIMEOUT_SECONDS must be positive")
+	}
+
+	return time.Duration(seconds * float64(time.Second)), nil
+}
+
+// defaultRPCTimeout is the reference's RPC timeout.
+const defaultRPCTimeout = 120 * time.Second
+
+// env reads one environment variable through os, isolated so the timing helpers above are
+// testable and so a future platform has one place to change.
+func env(name string) string {
+	return strings.TrimSpace(os.Getenv(name))
 }

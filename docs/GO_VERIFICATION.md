@@ -243,11 +243,12 @@ port work:
 | Command | Result |
 |---|---|
 | `go test ./pkg/... ./cmd/...` | exit 0: 36 packages ok; the rig-driven suites skip with a reason when no rig is present, which is what CI runs |
-| `go test -timeout 45m ./pkg/... ./internal/... ./cmd/...` | exit 0 with the rig up; every package above plus `internal/rigsuites` |
-| `./scripts/test.sh` | all 60 reference suites, run by the reference runner |
+| `go test -timeout 45m ./pkg/... ./internal/... ./cmd/...` | exit 0 with the rig up: 41 packages ok, including `internal/rigsuites` |
+| `./scripts/test.sh` | `passed: 58  skipped: 0  failed: 0` — every suite that does not need `--with-nostr`; no public relay contacted |
+| `make wasmtest` | exit 0: every WASM-testable package under TinyGo |
 | `tinygo test -target=wasm ./pkg/keys ./pkg/event ./pkg/nostr ./pkg/nip44 ./pkg/coord` | pass, all five packages |
 | `make wasm` | pass, both modules |
-| `python3 scripts/verify-browser.py` | exit 0: hello, boot gate, encrypted self-test, vault, identity, market relays/publish/list/take, coordination a–f, proxy, engine heights |
+| `python3 scripts/verify-browser.py` | exit 0: hello, boot gate, encrypted self-test, vault, identity, market relays/publish/list/take, coordination a–f, settlement transport round trip, proxy, engine heights |
 | `python3 scripts/go_parity.py --check` | `parity manifest: current` |
 | `.venv/bin/python tests/docs_alignment_tests.py` | 11 checks, 0 failures |
 | `.venv/bin/python tests/cli_wiring_tests.py` | 58 subcommands, 0 failures |

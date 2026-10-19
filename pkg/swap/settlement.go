@@ -464,6 +464,8 @@ func (e *Engine) settleAndRecord(
 		return nil, err
 	}
 
+	failpoint(FailpointName(ch, branch, BoundaryCandidateSave))
+
 	broadcast, err := node.SendRaw(ctx, plan.Hex)
 
 	if err != nil {
@@ -476,6 +478,12 @@ func (e *Engine) settleAndRecord(
 			chainLabel(ch), branch,
 		)
 	}
+
+	if err := crashAfterBroadcast(ch, branch); err != nil {
+		return nil, err
+	}
+
+	failpoint(FailpointName(ch, branch, BoundaryBroadcast))
 
 	result := &SettlementResult{
 		Chain:     ch,
@@ -517,6 +525,8 @@ func (e *Engine) settleAndRecord(
 	if err := advance(swap); err != nil {
 		return nil, err
 	}
+
+	failpoint(FailpointName(ch, branch, BoundaryConfirmation))
 
 	if err := e.save(ctx, swap); err != nil {
 		return nil, err

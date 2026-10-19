@@ -68,6 +68,11 @@ itself), and they exercise the raw-x ECDH that NIP-44 needs. `pkg/event`, `pkg/n
 `pkg/nip44` run under the same target, so event ids, signatures and encrypted payloads are
 verified in the browser's actual runtime, not only on the host.
 
+CI runs `make wasm` on every push and, in the same step, `tinygo test -target=wasm` for the
+crypto and protocol core (`pkg/keys`, `pkg/event`, `pkg/nostr`, `pkg/nip44`, `pkg/coord`). The
+remaining WASM-testable packages run in the full `make wasmtest`, which is a local command
+because the whole list does not fit the job's time budget.
+
 ## 3. The CLI is byte-identical to the reference where it claims to be
 
 Run on a live swap, in the same state tree, one implementation after the other:

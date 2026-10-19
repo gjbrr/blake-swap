@@ -173,7 +173,7 @@ Every Python suite, and the Go package whose tests cover the same ground where o
 | `moxie_adapter_smoke_tests.py` | `pkg/adapter` | partial |
 | `nip44_tests.py` | `pkg/nip44` | partial |
 | `node_config_tests.py` | — | pending |
-| `nostr_market_tests.py` | — | pending |
+| `nostr_market_tests.py` | `pkg/marketflow` | partial |
 | `packaging_tests.py` | — | pending |
 | `pre_btc_refund_tests.py` | — | pending |
 | `production_funding_pending_tests.py` | — | pending |

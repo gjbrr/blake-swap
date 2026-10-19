@@ -428,6 +428,85 @@ type Filter struct {
 	Limit  int
 }
 
+// Matches reports whether one event satisfies this filter.
+//
+// The relay applies these rules, and so must anything that stands in for one: an event that
+// a subscription would not have returned must not be treated as if it had. The rule is
+// conjunctive across the fields that are set and disjunctive within each — an event matches
+// when it satisfies every constraint the filter expresses.
+func (f Filter) Matches(e event.Event) bool {
+	if !f.matchesField(f.Kinds, int(e.Kind)) {
+		return false
+	}
+
+	if !f.matchesString(f.Authors, e.Pubkey) {
+		return false
+	}
+
+	if !f.matchesString(f.Ids, e.ID) {
+		return false
+	}
+
+	if !f.matchesTag(f.ETags, e, "e") {
+		return false
+	}
+
+	if !f.matchesTag(f.PTags, e, "p") {
+		return false
+	}
+
+	if !f.matchesTag(f.DTags, e, "d") {
+		return false
+	}
+
+	return f.matchesTag(f.Topics, e, "t")
+}
+
+// matchesField applies an integer selection, treating an empty selection as no constraint.
+func (f Filter) matchesField(selection []int, value int) bool {
+	if len(selection) == 0 {
+		return true
+	}
+
+	for _, candidate := range selection {
+		if candidate == value {
+			return true
+		}
+	}
+
+	return false
+}
+
+// matchesString applies a string selection, treating an empty selection as no constraint.
+func (f Filter) matchesString(selection []string, value string) bool {
+	if len(selection) == 0 {
+		return true
+	}
+
+	for _, candidate := range selection {
+		if candidate == value {
+			return true
+		}
+	}
+
+	return false
+}
+
+// matchesTag applies a tag selection: at least one of the named values must be present.
+func (f Filter) matchesTag(selection []string, e event.Event, tag string) bool {
+	if len(selection) == 0 {
+		return true
+	}
+
+	for _, candidate := range selection {
+		if e.HasTag(tag, candidate) {
+			return true
+		}
+	}
+
+	return false
+}
+
 // request renders the filter as a subscription object.
 func (f Filter) request() map[string]any {
 	object := map[string]any{

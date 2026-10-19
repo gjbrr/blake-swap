@@ -101,6 +101,7 @@ commands:
   accept-market-take TAKE_ID
   accept-market-match MATCH_ID
   accept-reverse-market-match MATCH_ID
+  accept-reverse-swap-offer MATCH_ID
   publish-offer SWAP_ID
   accept-offer SWAP_ID [--expected-alice-pub HEX] [--allow-unpinned-author]
   receive-accept SWAP_ID
@@ -163,6 +164,8 @@ func run(ctx context.Context, engine *swap.Engine, command string, args []string
 		return runAcceptReverseMarketMatch(ctx, engine, args)
 	case "accept-match":
 		return runAcceptMatch(ctx, engine, args)
+	case "accept-reverse-swap-offer":
+		return runAcceptReverseSwapOffer(ctx, engine, args)
 	case "new":
 		return runNew(ctx, engine, args)
 	case "show":
@@ -447,19 +450,50 @@ func runAcceptOffer(ctx context.Context, engine *swap.Engine, args []string) err
 		return err
 	}
 
-	fmt.Println("OFFER ACCEPTED")
-	fmt.Println("==============")
-	fmt.Println("swap id:", result.Swap.SwapID)
-	fmt.Println("accept message:", result.Location)
-	fmt.Println("Bob state:", result.State)
-
-	if result.Timeout != nil {
-		fmt.Println("BTC remaining safety (h):",
-			strconv.FormatInt(result.Timeout.BTCRemainingSeconds/3600, 10))
-		fmt.Println("cross-chain recovery gap (s):", result.Timeout.ActualRecoveryGap)
-	}
+	fmt.Printf("accept message: %s\n", result.Location)
+	fmt.Print(renderOfferAccepted(
+		result.Swap.SwapID, recordPath(result.Swap.SwapID), result.Timeout,
+	))
 
 	return nil
+}
+
+// renderOfferAccepted is the reference's accept-offer confirmation.
+//
+// The timeout lines are the part an operator is meant to read: they say how much of
+// Alice's Bitcoin window is left after Bob's own measurements, and how much recovery room
+// that leaves him. They are hours to two decimals because that is how a person judges
+// whether a trade is safe to fund.
+func renderOfferAccepted(swapID, bobStatePath string, check *swap.TimeoutCheck) string {
+	var out strings.Builder
+
+	out.WriteString("\n")
+	out.WriteString("OFFER ACCEPTED\n")
+	out.WriteString("==============\n")
+	fmt.Fprintf(&out, "swap id: %s\n", swapID)
+	fmt.Fprintf(&out, "Bob state: %s\n", bobStatePath)
+	out.WriteString("\n")
+	out.WriteString("PASS: Bob has hash H\n")
+	out.WriteString("PASS: Bob does NOT have secret S\n")
+
+	if check != nil {
+		out.WriteString("PASS: Bob independently validated v1.5 timeout safety\n")
+		fmt.Fprintf(&out, "BTC remaining safety: %s h\n", hoursOf(check.BTCRemainingSeconds))
+		fmt.Fprintf(&out, "cross-chain recovery gap: %s h\n", hoursOf(check.ActualRecoveryGap))
+		fmt.Fprintf(&out, "Bob required recovery: %s h\n", hoursOf(check.RequiredRecovery))
+	}
+
+	return out.String()
+}
+
+// hoursOf renders seconds as hours to two decimals.
+func hoursOf(seconds int64) string {
+	return fmt.Sprintf("%.2f", float64(seconds)/3600)
+}
+
+// recordPath is where one swap record lives in this participant's state tree.
+func recordPath(swapID string) string {
+	return filepath.Join(stateDirectory(), swapID+".json")
 }
 
 func runReceiveAccept(ctx context.Context, engine *swap.Engine, args []string) error {

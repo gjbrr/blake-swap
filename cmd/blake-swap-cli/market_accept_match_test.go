@@ -14,6 +14,7 @@ import (
 	"github.com/gjbrr/blake-swap/pkg/marketflow"
 	"github.com/gjbrr/blake-swap/pkg/model"
 	"github.com/gjbrr/blake-swap/pkg/store"
+	"github.com/gjbrr/blake-swap/pkg/swap"
 )
 
 // TestRenderMatchImportedMatchesTheReference pins the taker's import confirmation.
@@ -474,5 +475,167 @@ func TestReverseMatchRolesRefusesEveryWayAMatchIsNotThisParticipants(t *testing.
 
 	if err := reverseMatchRoles(item, alice); err != nil {
 		t.Fatalf("a matching reverse trade was refused: %v", err)
+	}
+}
+
+// TestRenderOfferAcceptedMatchesTheReference pins the accept-offer block, including the
+// timeout hours an operator reads before funding anything.
+func TestRenderOfferAcceptedMatchesTheReference(t *testing.T) {
+	check := &swap.TimeoutCheck{
+		BTCRemainingSeconds: 64_800,
+		ActualRecoveryGap:   14_400,
+		RequiredRecovery:    79_200,
+	}
+
+	got := renderOfferAccepted("aaaa00000001", "/state/aaaa00000001.json", check)
+
+	want := "\nOFFER ACCEPTED\n" +
+		"==============\n" +
+		"swap id: aaaa00000001\n" +
+		"Bob state: /state/aaaa00000001.json\n" +
+		"\n" +
+		"PASS: Bob has hash H\n" +
+		"PASS: Bob does NOT have secret S\n" +
+		"PASS: Bob independently validated v1.5 timeout safety\n" +
+		"BTC remaining safety: 18.00 h\n" +
+		"cross-chain recovery gap: 4.00 h\n" +
+		"Bob required recovery: 22.00 h\n"
+
+	if got != want {
+		t.Fatalf("renderOfferAccepted mismatch:\n--- got ---\n%q\n--- want ---\n%q", got, want)
+	}
+}
+
+// TestRenderOfferAcceptedOmitsTheTimeoutBlockWhenUnmeasured: a record accepted without a
+// timeout check must not print zeroed hours, which would read as a measured zero.
+func TestRenderOfferAcceptedOmitsTheTimeoutBlockWhenUnmeasured(t *testing.T) {
+	got := renderOfferAccepted("aaaa00000001", "/state/aaaa00000001.json", nil)
+
+	if strings.Contains(got, "timeout") || strings.Contains(got, "0.00 h") {
+		t.Fatalf("an unmeasured timeout was printed:\n%s", got)
+	}
+}
+
+// TestRecordPathIsTheReferenceLayout: the state tree is shared with the reference, so a
+// record path is `<state>/<swap_id>.json` for either protocol role.
+func TestRecordPathIsTheReferenceLayout(t *testing.T) {
+	t.Setenv("BLAKE_SWAP_STATE_DIR", "/state")
+
+	if got := recordPath("aaaa00000001"); got != "/state/aaaa00000001.json" {
+		t.Fatalf("recordPath = %q", got)
+	}
+}
+
+// TestRenderReverseSwapOfferBlocksMatchTheReference: Bob's import confirmations, both the
+// fresh one and the duplicate.
+func TestRenderReverseSwapOfferBlocksMatchTheReference(t *testing.T) {
+	matchID := strings.Repeat("ab", 32)
+	record := reverseSwap()
+
+	fresh := renderReverseSwapOfferImported(matchID, record)
+
+	wantFresh := "\nREVERSE SWAP OFFER IMPORTED\n" +
+		"===========================\n" +
+		"match id: " + matchID + "\n" +
+		"swap id: aaaa00000001\n" +
+		"\n" +
+		"Alice Nostr: " + strings.Repeat("44", 32) + "\n" +
+		"Bob Nostr:   " + strings.Repeat("33", 32) + "\n" +
+		"\n" +
+		"PASS: market maker derived as protocol Bob\n" +
+		"PASS: market taker derived as protocol Alice\n" +
+		"PASS: protocol offer signed by matched Alice\n" +
+		"PASS: economic terms match signed market match\n" +
+		"PASS: v1.5 timeout safety independently validated\n" +
+		"PASS: Bob does NOT know secret S\n"
+
+	if fresh != wantFresh {
+		t.Fatalf("renderReverseSwapOfferImported mismatch:\n--- got ---\n%q\n--- want ---\n%q", fresh, wantFresh)
+	}
+
+	repeat := renderReverseSwapOfferAlreadyImported(matchID, "aaaa00000001")
+
+	wantRepeat := "\nREVERSE SWAP OFFER ALREADY IMPORTED\n" +
+		"===================================\n" +
+		"match id: " + matchID + "\n" +
+		"swap id:  aaaa00000001\n" +
+		"\n" +
+		"PASS: existing Bob state reused\n" +
+		"PASS: no new Bob settlement keys created\n" +
+		"PASS: Bob still does NOT know secret S\n"
+
+	if repeat != wantRepeat {
+		t.Fatalf("renderReverseSwapOfferAlreadyImported mismatch:\n--- got ---\n%q\n--- want ---\n%q", repeat, wantRepeat)
+	}
+}
+
+// TestRenderReverseBobRecoveredMatchesTheReference pins the resumed-handshake block.
+func TestRenderReverseBobRecoveredMatchesTheReference(t *testing.T) {
+	got := renderReverseBobRecovered("aaaa00000001", "aaaa00000001.accept")
+
+	want := "\nREVERSE BOB HANDSHAKE RECOVERED\n" +
+		"===============================\n" +
+		"swap id:        aaaa00000001\n" +
+		"accept message: aaaa00000001.accept\n" +
+		"\n" +
+		"PASS: existing Bob settlement keys reused\n" +
+		"PASS: authenticated Bob identity pinned\n" +
+		"PASS: Bob still does NOT know secret S\n" +
+		"PASS: no funds moved\n"
+
+	if got != want {
+		t.Fatalf("renderReverseBobRecovered mismatch:\n--- got ---\n%q\n--- want ---\n%q", got, want)
+	}
+}
+
+// TestReverseBobResumableRefusesEveryUnsafeResume: a partial handshake may only be
+// finished while nothing has moved, and only with keys Bob already created.
+func TestReverseBobResumableRefusesEveryUnsafeResume(t *testing.T) {
+	bobKey := strings.Repeat("77", 32)
+	txid := strings.Repeat("88", 32)
+
+	fixture := func() *model.Swap {
+		record := reverseSwap()
+		record.BlakeBobPub = &bobKey
+		record.BTCBobPub = &bobKey
+		record.NostrBobPub = nil
+
+		return record
+	}
+
+	// The resumable shape is accepted, so the test is not asserting refusal only.
+	if err := reverseBobResumable(fixture()); err != nil {
+		t.Fatalf("a resumable record was refused: %v", err)
+	}
+
+	cases := map[string]struct {
+		mutate func(*model.Swap)
+		want   string
+	}{
+		"not offered": {func(s *model.Swap) { s.State = "BLAKE_FUNDED" }, "not OFFERED"},
+		"has secret": {func(s *model.Swap) {
+			secret := strings.Repeat("66", 32)
+			s.SecretHex = &secret
+		}, "unexpectedly possesses secret S"},
+		"funded":  {func(s *model.Swap) { s.BTCFundingTxID = &txid }, "after settlement activity"},
+		"claimed": {func(s *model.Swap) { s.BlakeClaimTxID = &txid }, "after settlement activity"},
+		"no keys": {func(s *model.Swap) { s.BlakeBobPub = nil }, "does not contain Bob settlement keys"},
+	}
+
+	for name, test := range cases {
+		record := fixture()
+		test.mutate(record)
+
+		err := reverseBobResumable(record)
+
+		if err == nil {
+			t.Errorf("%s: was resumable", name)
+
+			continue
+		}
+
+		if !strings.Contains(err.Error(), test.want) {
+			t.Errorf("%s: refusal = %v, want it to mention %q", name, err, test.want)
+		}
 	}
 }

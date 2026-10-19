@@ -103,16 +103,36 @@ func runMarketTakes(ctx context.Context, engine *swap.Engine, args []string) err
 
 	cacheMarketTakes(ctx, client, takeReport.Events)
 
+	//
+	// The candidate set is the union of what the relays served and what the verified
+	// cache holds, by event id. A take read in this invocation has just been cached, so
+	// it is in both; counting it twice would report a relay as having served an event it
+	// only appears to have served because it was cached on the way past.
+	//
 	evidence := append([]event.Event{}, takeReport.Events...)
-	evidence = append(evidence, cachedEvents(ctx, client.Cache)...)
+	seen := make(map[string]bool, len(evidence))
 
-	for _, found := range takeReport.Events {
-		if err := client.Cache.Put(ctx, found); err != nil {
-			return err
+	for _, found := range evidence {
+		seen[found.ID] = true
+	}
+
+	for _, cached := range cachedEvents(ctx, client.Cache) {
+		if seen[cached.ID] {
+			continue
 		}
+
+		seen[cached.ID] = true
+
+		evidence = append(evidence, cached)
 	}
 
 	takes := marketflow.TakesFor(listed, evidence, now)
+
+	// The read is reported before the answer, in both forms. It is a fact about the
+	// scan, not about the rendering, and a machine-readable answer still came from a
+	// scan an operator may need to judge.
+	fmt.Printf("Nostr take read: %d unique event(s) from %d/%d relay(s)\n",
+		len(evidence), takeReport.Answered, takeReport.Relays)
 
 	if *asJSON {
 		text, err := marketTakesJSON(offerID, listed, takes)
@@ -125,9 +145,6 @@ func runMarketTakes(ctx context.Context, engine *swap.Engine, args []string) err
 
 		return nil
 	}
-
-	fmt.Printf("Nostr take read: %d unique event(s) from %d/%d relay(s)\n",
-		len(evidence), takeReport.Answered, takeReport.Relays)
 
 	fmt.Print(renderMarketTakes(offerID, listed, takes))
 

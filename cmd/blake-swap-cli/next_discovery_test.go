@@ -403,13 +403,29 @@ func assertOutputIs(t *testing.T, got, want string) {
 }
 
 // nextHeader is the block every performed step starts with.
+//
+// It ends at the disclaimer, without a blank line: the step's own output supplies that,
+// which is how the reference prints it.
 func nextHeader(label string) string {
 	return "\nNEXT SAFE STEP\n" +
 		"==============\n" +
 		label + "\n" +
 		"\n" +
-		"PASS: this coordination step does not itself fund, claim, or refund an HTLC\n" +
-		"\n"
+		"PASS: this coordination step does not itself fund, claim, or refund an HTLC\n"
+}
+
+// nextRelayReport is what one loopback relay says when it accepted the one event a step
+// published. The blocks are built from the same renderers the CLI uses, so a change to
+// their wording changes this expectation with it.
+func nextRelayReport(t *testing.T, rig *nextRig, who *nextParticipant, eventID string) string {
+	t.Helper()
+
+	return renderOutboundCached(eventID, filepath.Join(who.state, "nostr-event-cache")) +
+		renderRelayResults(nostr.Report{
+			EventID:  eventID,
+			Relays:   []nostr.RelayResult{{Relay: rig.stub.URL, Accepted: true}},
+			Accepted: 1,
+		})
 }
 
 // nextNothingToDo is the whole quiet block, with no history to report.
@@ -480,7 +496,15 @@ func TestNextTakesTheOnlyOpenOffer(t *testing.T) {
 
 	// The whole block, byte for byte: header, the take command's own output, then the
 	// closing lines. Fixing the order is what keeps the two engines comparable.
+	//
+	// The take reports the scan it read, the event it took, and where it published —
+	// before the confirmation block. Those lines are the reference's, and they are most
+	// of what an operator sees.
+	//
 	want := nextHeader(label) +
+		"Nostr market read: 1 unique event(s) from 1/1 relay(s)\n" +
+		"Nostr event found on: " + rig.stub.URL + "\n" +
+		nextRelayReport(t, rig, rig.bob, take.ID) +
 		renderTaken(offerID, take.ID, rig.alice.key.PublicKey(), rig.bob.key.PublicKey(),
 			blakeUnits(t, "10"), 50_000)
 

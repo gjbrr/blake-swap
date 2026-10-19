@@ -55,6 +55,8 @@ func runTakeMarketOffer(ctx context.Context, engine *swap.Engine, args []string)
 		return err
 	}
 
+	announceMarketRead(report)
+
 	events := append([]event.Event{}, report.Events...)
 	events = append(events, cachedEvents(ctx, client.Cache)...)
 
@@ -97,6 +99,31 @@ func runTakeMarketOffer(ctx context.Context, engine *swap.Engine, args []string)
 				"settlement-feasible amount is %d sats under the current settlement fee policy",
 			selected.Offer.BTCSats, minimum,
 		)
+	}
+
+	//
+	// The exact event is fetched again, by id, before anything is signed against it.
+	// The scan decided that an offer like this is open; this decides that *this*
+	// signed event is the one being taken, which is what the take will reference.
+	//
+	original, err := fetchEventByID(ctx, client, offerID)
+
+	if err != nil {
+		return err
+	}
+
+	if err := event.Verify(*original, now); err != nil {
+		return err
+	}
+
+	var message map[string]any
+
+	if err := json.Unmarshal([]byte(original.Content), &message); err != nil {
+		return err
+	}
+
+	if kind, _ := message["type"].(string); kind != "market-offer" {
+		return fmt.Errorf("Referenced event is not a market offer")
 	}
 
 	if prior := priorTake(events, key.PublicKey(), offerID); prior != nil {

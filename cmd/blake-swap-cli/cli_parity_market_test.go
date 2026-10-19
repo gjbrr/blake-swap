@@ -20,12 +20,9 @@ import (
 // implementation gets its own loopback relay: a shared one would let one side see
 // the other's events and the offer counts would not be comparable.
 //
-// Not yet identical, and therefore not compared here: the relay-chatter lines the
-// fetching commands print (`Nostr event found on: ...`), the `MARKET MATCH PUBLISHED`
-// block inside `accept-market-take`, the `OFFER ACCEPTED` block inside
-// `accept-market-match`, and the take-listing commands. Those are listed in
-// docs/GO_VERIFICATION.md as the remaining output gap; the walk compares what is
-// identical so a regression there is still caught.
+// The walk is the whole negotiation rather than the read commands alone, because the
+// relay chatter and the publish confirmations are most of what these commands print:
+// an event is only comparable if the lines that say where it went are compared too.
 
 // marketWalk runs the market command group for one implementation.
 func marketWalk(t *testing.T, r *rigtest.Rig, impl string) map[string]string {
@@ -84,15 +81,57 @@ func marketWalk(t *testing.T, r *rigtest.Rig, impl string) map[string]string {
 
 	// The offer id is read out to prove the command produced one; the reads below
 	// discover it from the relay, which is what a participant does.
-	if id := marketValue(t, published, "offer id"); len(id) != 64 {
-		t.Fatalf("%s: offer id is %q", impl, id)
+	offerID := marketValue(t, published, "offer id")
+
+	if len(offerID) != 64 {
+		t.Fatalf("%s: offer id is %q", impl, offerID)
 	}
 
 	run("market", alice, "market", "--limit", "10")
 	run("market-state", alice, "market-state", "--limit", "10")
 	run("market-state json", alice, "market-state", "--limit", "10", "--json")
 
+	//
+	// The negotiation, in the order the two participants would run it: Bob takes the
+	// offer, Alice inspects the take, reads her inbox, and accepts; Bob reads the match;
+	// and the maker withdraws what is left of the offer. Every step is compared,
+	// including the relay chatter, because that chatter is what tells an operator which
+	// relays answered.
+	//
+	bob := participant("bob")
+
+	taken := run("take-market-offer", bob, "take-market-offer", offerID)
+	takeID := marketValue(t, taken, "take id")
+
+	if len(takeID) != 64 {
+		t.Fatalf("%s: take id is %q", impl, takeID)
+	}
+
+	run("inspect-market-take", bob, "inspect-market-take", offerID)
+	run("market-takes", alice, "market-takes", offerID)
+	run("market-takes json", alice, "market-takes", offerID, "--json")
+	accepted := run("accept-market-take", alice, "accept-market-take", takeID)
+	matchID := marketValue(t, accepted[bridgeOffset(t, accepted):], "market match")
+
+	run("accept-market-match", bob, "accept-market-match", matchID)
+	run("market-matches", bob, "market-matches")
+	run("cancel-market-offer", alice, "cancel-market-offer", offerID)
+
 	return outputs
+}
+
+// bridgeOffset is where the market-to-swap bridge block starts, which is where the match
+// id is reported.
+func bridgeOffset(t *testing.T, output string) int {
+	t.Helper()
+
+	at := indexOf(output, "MARKET -> SWAP BRIDGE CREATED")
+
+	if at < 0 {
+		t.Fatalf("no bridge block in output:\n%s", output)
+	}
+
+	return at
 }
 
 // marketValue reads one "label: value" line from a command's output.
@@ -171,3 +210,14 @@ func trimSpace(text string) string {
 
 // unusedFmt keeps the fmt import honest if the file stops needing it.
 var _ = fmt.Sprint
+
+// indexOf is strings.Index, kept here so this file's imports stay to what it uses.
+func indexOf(haystack, needle string) int {
+	for at := 0; at+len(needle) <= len(haystack); at++ {
+		if haystack[at:at+len(needle)] == needle {
+			return at
+		}
+	}
+
+	return -1
+}

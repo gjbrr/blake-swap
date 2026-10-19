@@ -734,8 +734,12 @@ func performNextAction(ctx context.Context, engine *swap.Engine, action nextActi
 	fmt.Print(action.label + "\n")
 	fmt.Print("\n")
 	fmt.Print("PASS: this coordination step does not itself fund, claim, or refund an HTLC\n")
-	fmt.Print("\n")
 
+	//
+	// No blank line here. The step's own output starts with one, exactly as the
+	// reference's commands do, so adding another would separate the disclaimer from the
+	// work it disclaims twice over.
+	//
 	if err := dispatchNextAction(ctx, engine, action); err != nil {
 		return err
 	}

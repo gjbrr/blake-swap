@@ -45,6 +45,8 @@ func runInspectMarketTake(ctx context.Context, engine *swap.Engine, args []strin
 		return err
 	}
 
+	announceMarketRead(report)
+
 	events := append([]event.Event{}, report.Events...)
 	events = append(events, cachedEvents(ctx, client.Cache)...)
 
@@ -67,6 +69,20 @@ func runInspectMarketTake(ctx context.Context, engine *swap.Engine, args []strin
 
 	if listed == nil {
 		return fmt.Errorf("Offer is not currently open")
+	}
+
+	//
+	// The dry run signs against the exact event, not against the scan's summary of it:
+	// what is inspected has to be what a real take would reference.
+	//
+	original, err := fetchEventByID(ctx, client, offerID)
+
+	if err != nil {
+		return err
+	}
+
+	if err := event.Verify(*original, now); err != nil {
+		return err
 	}
 
 	built, _, err := marketflow.BuildTake(key, marketflow.BuildTakeOptions{

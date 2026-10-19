@@ -76,6 +76,7 @@ Run on a live swap, in the same state tree, one implementation after the other:
 | `market`, `market-state`, `market-state --json` | identical on live relay evidence |
 | `new`, `verify-blake`, `verify-btc`, `fund-blake`, `fund-btc`, `claim-btc`, `claim-blake`, `refund-btc`, `refund-blake` | identical, proved by a scripted walk that runs both implementations |
 | `publish-offer`, `accept-offer`, `receive-accept`, `publish-*`/`receive-*` funding, claim and refund, `complete`, `extract-secret`, `resume-all`, `publish-market-offer`, `publish-market-match` | identical, same walk |
+| the whole market negotiation: `publish-market-offer`, `market`, `market-state`, `take-market-offer`, `inspect-market-take`, `market-takes`, `market-takes --json`, `accept-market-take`, `accept-market-match`, `market-matches`, `cancel-market-offer` | identical, relay chatter and publish confirmations included |
 
 How that is proved, and what it covers: `TestCLIParityUnknownSwap` runs every command
 that takes a swap id against the same durable state with both implementations and
@@ -84,24 +85,25 @@ neither side changes anything. `TestCLIParityProtocolWalk`, `TestCLIParityRefund
 and `TestCLIParityMarketWalk` run the same scripted walk twice, once with each
 implementation driving, and compare every step's output, normalising only the
 identifiers that legitimately differ: transaction and event ids, keys, addresses,
-heights, fees, the output index the HTLC landed in, and a remaining-lifetime figure
-that can fall either side of a minute boundary.
+heights, fees, the output index the HTLC landed in, a market take's random nonce, and
+a remaining-lifetime figure that can fall either side of a minute boundary.
+
+The market walk is the negotiation rather than the read commands alone, because the
+relay chatter and the publish confirmations are most of what these commands print: the
+market scan line (`Nostr market read: ...`), the fetch line (`Nostr event found on:
+...`), the outbound-cache block, the per-relay result block, `MARKET MATCH PUBLISHED`
+inside `accept-market-take`, and the `accept message:` line and `OFFER ACCEPTED` block
+inside `accept-market-match` are all compared. An event is only comparable if the lines
+that say where it went are compared with it.
 
 ```bash
 go test ./cmd/blake-swap-cli/ -run TestCLIParity
 ```
 
-Not yet identical, and therefore not compared in those walks: the relay-chatter line
-`Nostr event found on: ...` that the fetching market commands print, the
-`MARKET MATCH PUBLISHED` block inside `accept-market-take`, the `OFFER ACCEPTED`
-block inside `accept-market-match`, and the take-listing commands. Those commands are
-correct and tested; their wording has not been diffed, and the market walk says so
-rather than implying coverage it does not have.
-
-Four divergences are deliberate and are recorded in [`GO_PORT_MAP.md`](GO_PORT_MAP.md) §5:
-JSON output is JSON only, a refusal is one `ERROR:` line rather than a traceback,
-`recovery-plan` reports per-leg solvability and does not print the reference's step list,
-and `next SWAP_ID` is an extension beside the reference's argument-less `next`.
+Three divergences are deliberate and are recorded in [`GO_PORT_MAP.md`](GO_PORT_MAP.md) §5:
+a refusal is one `ERROR:` line rather than a traceback, `recovery-plan` reports per-leg
+solvability and does not print the reference's step list, and `next SWAP_ID` is an
+extension beside the reference's argument-less `next`.
 
 ## 4. The two implementations agree across the protocol
 

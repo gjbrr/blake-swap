@@ -8,6 +8,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -118,15 +119,20 @@ func runAcceptMarketMatch(ctx context.Context, engine *swap.Engine, args []strin
 		return err
 	}
 
+	//
 	// No local swap yet: the offer this match names has to be accepted as an ordinary
 	// swap, with the market's terms pinned so a different offer cannot answer instead.
-	blake, sats := item.BlakeAmount, item.BTCSats
-
-	if _, err := engine.AcceptOffer(ctx, swap.AcceptRequest{
-		SwapID:              item.SwapID,
-		ExpectedAlicePub:    item.Maker,
-		ExpectedBlakeAmount: &blake,
-		ExpectedBTCSats:     &sats,
+	//
+	// The acceptance goes through the accept-offer command rather than through the engine
+	// directly, because that is what the reference does: the acceptance message and the
+	// timeout verification it prints belong to accepting an offer, and a second copy of
+	// them here would be a second thing to keep true.
+	//
+	if err := runAcceptOffer(ctx, engine, []string{
+		"--expected-alice-pub", item.Maker,
+		"--expected-blake-amount", item.BlakeAmount.String(),
+		"--expected-btc-sats", strconv.FormatInt(item.BTCSats, 10),
+		item.SwapID,
 	}); err != nil {
 		return err
 	}

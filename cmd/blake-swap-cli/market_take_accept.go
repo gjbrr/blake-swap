@@ -252,6 +252,7 @@ func runAcceptMarketTake(ctx context.Context, engine *swap.Engine, args []string
 		return err
 	}
 
+	fmt.Print(renderMatchPublished(offerID, takeID, match.MatchID, record.SwapID))
 	fmt.Print(renderMarketBridge(offerID, takeID, match.MatchID, record.SwapID))
 
 	return nil

@@ -129,24 +129,16 @@ func runCancelMarketOffer(ctx context.Context, engine *swap.Engine, args []strin
 
 	client := marketClient()
 
+	//
 	// Fetch the original: the cancel names it by id, and it can only be signed by the
-	// identity that signed the offer.
-	events, err := client.FetchMany(ctx, nostr.Filter{Kinds: []int{1}, Ids: []string{offerID}})
+	// identity that signed the offer. The fetch is by id rather than by scan because a
+	// cancellation is about one exact event, and the helper reports where it came from
+	// — a relay, or the verified cache when the relays have forgotten it.
+	//
+	original, err := fetchEventByID(ctx, client, offerID)
 
 	if err != nil {
 		return err
-	}
-
-	var original *event.Event
-
-	for index := range events {
-		if events[index].ID == offerID {
-			original = &events[index]
-		}
-	}
-
-	if original == nil {
-		return fmt.Errorf("the referenced offer was not found on any configured relay")
 	}
 
 	if _, err := marketflow.ParseOffer(*original, time.Now()); err != nil {

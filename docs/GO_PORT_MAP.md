@@ -429,11 +429,15 @@ data-model work entirely.
    would turn `0.1` into a nearby number and the engine would compare its own
    records against the wrong amount.
 
-8. **Four output divergences are deliberate**, and each is a decision rather
+8. **Three output divergences are deliberate**, and each is a decision rather
    than an unfinished port.
-   - `market-takes --json` prints only the JSON document. The reference prints a
-     human "Nostr take read:" line on stdout first, which makes the flag's own
-     output unparseable.
+
+   Everything else is compared, including the market command group in full: the
+   `Nostr market read: ...` scan line, the `Nostr event found on: ...` fetch line,
+   the outbound-cache and per-relay-result blocks, `MARKET MATCH PUBLISHED`, and the
+   `OFFER ACCEPTED` block. `market-takes --json` therefore prints the reference's
+   scan line before its JSON document: a consumer of that flag skips the leading
+   line, which is what any consumer of the reference's output already does.
    - A refusal is reported as `ERROR: <message>` with the reference's message
      text. The reference often raises an uncaught exception instead, so the same
      words arrive wrapped in a traceback. The message bodies are byte-identical,

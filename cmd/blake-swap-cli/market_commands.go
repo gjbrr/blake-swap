@@ -105,6 +105,16 @@ func runMarket(ctx context.Context, args []string) error {
 	return nil
 }
 
+// announceMarketRead prints the reference's market-scan line.
+//
+// Every command that scans the market for offers prints it, so it lives here rather
+// than in each of them: the event count and the relay count are the evidence an operator
+// judges a silent or partial scan by.
+func announceMarketRead(report nostr.FetchReport) {
+	fmt.Printf("Nostr market read: %d unique event(s) from %d/%d relay(s)\n",
+		len(report.Events), report.Answered, report.Relays)
+}
+
 // runMarketState emits the canonical state of every offer the evidence describes.
 func runMarketState(ctx context.Context, args []string) error {
 	flags := flag.NewFlagSet(marketStateCommand, flag.ContinueOnError)

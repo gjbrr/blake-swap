@@ -95,6 +95,10 @@ var volatile = []*regexp.Regexp{
 	// is what proves the right output was read, and the command succeeding is that
 	// proof.
 	regexp.MustCompile(`(?m)^(\s*vout:\s+)\d+`),
+	// A market take carries a random nonce. It exists so the same economic terms signed
+	// twice are two different events, which makes it the one field two runs can never
+	// share.
+	regexp.MustCompile(`(?m)^(\s*"nonce":\s*")[0-9a-f]{16}(")`),
 }
 
 // pythonScaffolding is the part of a reference failure that is Python rather than
@@ -110,8 +114,11 @@ func normalise(output string) string {
 	output = normaliseWatchOnly(output)
 	output = pythonScaffolding.ReplaceAllString(output, "")
 	for _, pattern := range volatile {
-		if pattern.String() == `(?m)^(\\s*vout:\\s+)\\d+` {
-			output = pattern.ReplaceAllString(output, "${1}<v>")
+		// Two patterns name a key worth keeping: the value is volatile, the label is
+		// what the operator reads.
+		switch pattern.String() {
+		case `(?m)^(\s*vout:\s+)\d+`, `(?m)^(\s*"nonce":\s*")[0-9a-f]{16}(")`:
+			output = pattern.ReplaceAllString(output, "${1}<v>${2}")
 
 			continue
 		}
@@ -190,8 +197,20 @@ func referenceMessage(output string) string {
 }
 
 // portMessage is the sentence the port prints after its `ERROR:` prefix.
+//
+// A command may print before it refuses — the market commands report the scan they
+// read — so the sentence is the last `ERROR:` line, which is the one the process
+// exited on.
 func portMessage(output string) string {
-	return strings.TrimPrefix(strings.TrimSpace(output), "ERROR: ")
+	lines := strings.Split(strings.TrimRight(output, "\n"), "\n")
+
+	for index := len(lines) - 1; index >= 0; index-- {
+		if sentence, found := strings.CutPrefix(lines[index], "ERROR: "); found {
+			return sentence
+		}
+	}
+
+	return strings.TrimSpace(output)
 }
 
 // compareRefusals diffs what both implementations say about a command they both

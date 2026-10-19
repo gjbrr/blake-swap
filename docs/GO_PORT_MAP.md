@@ -136,7 +136,7 @@ Market (versions 1 and 2), 4 types: `market-offer`, `market-take`,
 | Program | Runs on | Job |
 |---|---|---|
 | `cmd/webpage` + `cmd/webworker` | browser (TinyGo wasm) | the client: presentation, protocol domains, encrypted local state |
-| `cmd/blake-swap-server` | a server | serve the app; **dial the nodes**; optionally proxy relays; deployable config |
+| `cmd/server` | a server | serve the app; **dial the nodes**; optionally proxy relays; deployable config. Built as `bin/blake-swap-app` |
 | `cmd/blake-swap-cli` | a host | drop-in replacement for `swap_v2.py`, used by the existing suites |
 
 ### 2.1 Who connects to which socket
@@ -154,7 +154,7 @@ worker        --WSS-->  Nostr relays                   (browser WebSocket, direc
   node credentials. It speaks HTTPS to our server and WSS to relays.
 - **The server is the only thing that dials node RPC.** That is also the only
   place where node credentials, rate limits and an allowlist of RPC methods
-  live. `cmd/blake-swap-server` therefore has two faces: static hosting, and
+  live. `cmd/server` therefore has two faces: static hosting, and
   `/rpc/{btc,blake}` JSON-RPC forwarding.
 - **Relays are reached directly by the browser.** A relay proxy on the server is
   optional (useful for a relay that forbids browser origins); it is not on the
@@ -169,14 +169,14 @@ Measured with TinyGo 0.43 wasm builds, not assumed:
 
 | Orly package | TinyGo wasm | Verdict |
 |---|---|---|
-| `pkg/nostr/crypto/keys` | builds and runs | **use as-is**: key generation, pubkey derivation |
-| `pkg/nostr/crypto/encryption` | builds and runs (encrypt→decrypt round trip verified) | **use as-is**: NIP-44 v2, plus NIP-04 if ever needed |
-| `pkg/nostr/crypto/ec/{schnorr,secp256k1,...}` | builds | **use as-is** for BIP-340 sign/verify |
-| `pkg/p256k1` + `.../schnorr`, `.../keys` | builds and runs; **signing** is byte-identical to libsecp256k1, **verification** rejects valid signatures under TinyGo | signing and ECDH only; verification is implemented in `pkg/keys` |
-| `pkg/nostr/encoders/{event,filter,tag,kind,envelope}` | builds and runs | **use as-is**: event and filter model |
-| `pkg/nostr/ws` | **fails**: `gorilla/websocket` needs `tls.Conn.VerifyHostname` | write a JS `WebSocket` bridge (same pattern as `link`) |
-| `pkg/wasmdb` | **fails**: `pkg/database` references `NRCConnection`, undefined in this build configuration | do not use; see the store note below |
-| `pkg/database` | fails for the same reason | not used by the client |
+| `orly/pkg/nostr/crypto/keys` | builds and runs | **use as-is**: key generation, pubkey derivation |
+| `orly/pkg/nostr/crypto/encryption` | builds and runs (encrypt→decrypt round trip verified) | **use as-is**: NIP-44 v2, plus NIP-04 if ever needed |
+| `orly/pkg/nostr/crypto/ec/{schnorr,secp256k1,...}` | builds | **use as-is** for BIP-340 sign/verify |
+| `orly/pkg/p256k1` + `.../schnorr`, `.../keys` | builds and runs; **signing** is byte-identical to libsecp256k1, **verification** rejects valid signatures under TinyGo | signing and ECDH only; verification is implemented in `pkg/keys` |
+| `orly/pkg/nostr/encoders/{event,filter,tag,kind,envelope}` | builds and runs | **use as-is**: event and filter model |
+| `orly/pkg/nostr/ws` | **fails**: `gorilla/websocket` needs `tls.Conn.VerifyHostname` | write a JS `WebSocket` bridge (same pattern as `link`) |
+| `orly/pkg/wasmdb` | **fails**: its `database` dependency references `NRCConnection`, undefined in this build configuration | do not use; see the store note below |
+| `orly/pkg/database` | fails for the same reason | not used by the client |
 
 One caveat, found by running the official BIP-340 vector under
 `tinygo test -target=wasm`: orly's Schnorr *verifier* returns false for a valid
@@ -195,10 +195,12 @@ exactly the parts a browser cannot do from Go.
 The store finding is worth stating precisely: the raw
 `aperturerobotics/go-indexeddb` binding *compiles* under TinyGo and starts, but
 `Request.Await` did not resume the Go scheduler in a browser (with either the
-default or the asyncify scheduler). Rather than fight it, IndexedDB lives on the
-JavaScript side behind the same request/response envelope the link already uses:
-`web/store.js` performs `get/put/delete/list`, and Go sees a synchronous-looking
-API. That keeps the platform seam in one place and the Go code portable.
+default or the asyncify scheduler). Rather than fight it, IndexedDB is reached
+through the platform seam the rest of the client already uses: the browser build
+of `pkg/platform/platform_js.go` drives the worker's JavaScript store
+(`web/worker.js`) over the same request/response envelope the link uses, and Go
+sees a synchronous-looking `KV` API. That keeps the platform seam in one place and
+the Go code portable.
 
 ### 2.3 Encrypted state at rest
 
@@ -236,7 +238,7 @@ browser client never uses it.
 Five layers. Arrows are import direction; nothing lower imports anything higher.
 
 ```
-                     cmd/webpage   cmd/webworker   cmd/blake-swap-server   cmd/blake-swap-cli
+                     cmd/webpage   cmd/webworker   cmd/server   cmd/blake-swap-cli
                             \           |              /                        /
   app layer           page(P)   app(worker domains)  server(static+rpc proxy)  cli(shim)
                                    |
@@ -278,10 +280,19 @@ Five layers. Arrows are import direction; nothing lower imports anything higher.
 | `pkg/swap` | the 58 commands | the typed command API: `New`, `Publish*`, `Receive*`, `Fund*`, `Claim*`, `Refund*`, `Sync*`, `Reconcile`, `Next`, `Dashboard`, `Recover` |
 | `pkg/agent` | `swap_agent.py` | polling loop, allowlist, role checks, step budget |
 | `pkg/marketflow` | market lifecycle | offer, take, match, accept, import, cancel, ignore |
-| `pkg/cli` | `argparse` + `main()` | drop-in CLI: parsing, dispatch, output, exit codes |
-| `cmd/blake-swap-server` | (new) | static hosting, `/rpc/{btc,blake}` proxy, config, auth token |
-| `pkg/jsonrpc` | (new) | page ↔ worker request/response contract |
-| `pkg/app`, `pkg/page` | (new / extends) | worker domain wiring; page presentation |
+| `cmd/blake-swap-cli` | `argparse` + `main()` | drop-in CLI: parsing, dispatch, output, exit codes |
+| `cmd/server` | (new) | static hosting, `/rpc/{btc,blake}` proxy, config, auth token. Built as `bin/blake-swap-app` |
+| `pkg/proto` | (new) | page ↔ worker request/response contract |
+| `pkg/worker`, `pkg/page` | (new / extends) | worker domain wiring (vault, engine, market); page presentation |
+| `pkg/nodeconfig` | `tests/node_config.py` | which node a command talks to: environment, then a running rig, then conventional locations; a stopped rig is a reason, not a fallback |
+| `pkg/relaystub` | (new) | a loopback relay the suites and the browser check drive, so no test needs a public relay |
+| `cmd/blake-swap-relay` | (new) | the same relay as a binary, for a two-host run |
+| `cmd/blake-swap-adapter` | (new) | serves the portable `blake-swap-adapter-v1` participant interface, one JSON request per process |
+| `internal/rigtest` | (new) | the shared regtest harness: the rig, both participants, the process plumbing |
+| `internal/conformance` | `tests/security_conformance_tests.py` | the 47-invariant security manifest, and the Go test each invariant names |
+| `internal/packaging` | `tests/packaging_tests.py` | go.mod, go.sum, Makefile targets, the CI workflow, the licence |
+| `internal/installcheck` | `tests/installed_wheel_tests.py` | a clean `go install`, run from outside the checkout with a scrubbed environment |
+| `internal/docsalign` | `tests/docs_alignment_tests.py` | the documentation against the implementation |
 
 ### 3.1 API sketches
 
@@ -331,7 +342,7 @@ build rather than quietly becoming a claim.
 | M1 | Value layer (`amount`, `wire`, `market`, `state`, `model`, `timeout`, `fees`) | ported vectors pass under `go test` on the host |
 | M2 | `reconcile`, `htlc`, `psbt` | the 12-action table and witness classifier match Python on recorded fixtures |
 | M3 | `rpc`/`chain`/`fund`/`settle`/`observe` against a real regtest through the proxy | **partly done**: `rpc`, `chain`, `contract`, `fund` and `observe` are in; `settle` remains |
-| M4 | `pkg/cli` + `cmd/blake-swap-cli` | the existing suites run with `$SWAP_V2` pointed at the Go binary |
+| M4 | `cmd/blake-swap-cli` | the existing suites run with `$SWAP_V2` pointed at the Go binary |
 | M5 | `store`/`vault`/`coord`/`nostr` + worker domains | two browser instances complete a swap on regtest; `store`, `nostr` and `coord` are in, the worker domains remain |
 | M6 | `marketflow` (offer, take, match, cancel, import) + page UI | the whole market cycle driven from the UI |
 
@@ -344,7 +355,7 @@ data-model work entirely.
 ## 5. Decisions taken
 
 1. **Client only; server stack replicated.** The browser client is the product;
-   `cmd/blake-swap-server` exists because something must dial node RPC and host
+   `cmd/server` exists because something must dial node RPC and host
    the app.
 2. **Node access is proxied.** Credentials never enter the browser; the proxy
    allowlists methods and rate-limits.

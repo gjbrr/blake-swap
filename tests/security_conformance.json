@@ -708,5 +708,338 @@
         "economic_transactions"
       ]
     }
+  ],
+  "go_conformance": [
+    {
+      "id": "C1",
+      "go_tests": [
+        "pkg/swap:TestFundBlakeHappyPath",
+        "pkg/swap:TestAnnounceBlakeFundingCarriesTheContractButNotTheSecret"
+      ],
+      "reference_only": ""
+    },
+    {
+      "id": "C2",
+      "go_tests": [
+        "pkg/swap:TestExtractSecretReadsThePreimageFromTheChain",
+        "pkg/swap:TestReceiveBTCCLaimedVerifiesAndAdvances"
+      ],
+      "reference_only": ""
+    },
+    {
+      "id": "C3",
+      "go_tests": [
+        "pkg/swap:TestSettlementCommandsGateOnRoleAndState"
+      ],
+      "reference_only": ""
+    },
+    {
+      "id": "C4",
+      "go_tests": [
+        "pkg/state:TestForwardMatrix",
+        "pkg/model:TestTransitionAndReorg"
+      ],
+      "reference_only": ""
+    },
+    {
+      "id": "C5",
+      "go_tests": [
+        "pkg/swap:TestAdvanceIsGatedAndForwardOnly"
+      ],
+      "reference_only": ""
+    },
+    {
+      "id": "C6",
+      "go_tests": [
+        "pkg/swap:TestReceiveRefusesAnAnnouncementThatIsNotTheContract",
+        "pkg/swap:TestReceiveRefusesWhenTheChainDisagreesWithTheTerms"
+      ],
+      "reference_only": ""
+    },
+    {
+      "id": "C7",
+      "go_tests": [
+        "pkg/swap:TestReceiveRefusesABlockThatDoesNotHoldTheTransaction"
+      ],
+      "reference_only": ""
+    },
+    {
+      "id": "C8",
+      "go_tests": [
+        "pkg/swap:TestFundBlakeRefusesTheWrongRole"
+      ],
+      "reference_only": ""
+    },
+    {
+      "id": "C9",
+      "go_tests": [
+        "pkg/swap:TestReceiveBTCCLaimedVerifiesAndAdvances",
+        "pkg/swap:TestReceiveBlakeClaimedAndBTCRefunded"
+      ],
+      "reference_only": ""
+    },
+    {
+      "id": "C10",
+      "go_tests": [
+        "pkg/model:TestSwapModelSettlementIdentityRefusesMalformedEvidence"
+      ],
+      "reference_only": ""
+    },
+    {
+      "id": "C11",
+      "go_tests": [
+        "pkg/htlc:TestClassifySpend",
+        "pkg/swap:TestExtractSecretRefusesAWitnessThatDoesNotHash"
+      ],
+      "reference_only": ""
+    },
+    {
+      "id": "C12",
+      "go_tests": [
+        "pkg/htlc:TestClassifySpend",
+        "pkg/swap:TestClaimBTCRefusesARecordedSettlementOnTheWrongBranch"
+      ],
+      "reference_only": ""
+    },
+    {
+      "id": "C13",
+      "go_tests": [
+        "pkg/htlc:TestClassifySpendFailClosed",
+        "pkg/htlc:TestClassifyIsStructuralNotAbsenceBased"
+      ],
+      "reference_only": ""
+    },
+    {
+      "id": "C14",
+      "go_tests": [],
+      "reference_only": "proven only by tests/swap_protocol_tests.py's \"duplicate BTC claim receive\" and \"duplicate BLAKE claim receive\" cases; the ported Go suite does not exist yet"
+    },
+    {
+      "id": "C15",
+      "go_tests": [
+        "pkg/swap:TestReceiveRefusesAConflictingClaim"
+      ],
+      "reference_only": ""
+    },
+    {
+      "id": "C16",
+      "go_tests": [],
+      "reference_only": "proven only by tests/swap_protocol_tests.py's \"conflicting BLAKE claim replay rejected\" case; the ported Go suite does not exist yet"
+    },
+    {
+      "id": "C17",
+      "go_tests": [],
+      "reference_only": "proven only by tests/swap_protocol_tests.py's \"conflicting BTC refund replay rejected\" case; the ported Go suite does not exist yet"
+    },
+    {
+      "id": "C18",
+      "go_tests": [],
+      "reference_only": "proven only by tests/swap_protocol_tests.py's \"BTC claim swap_id mismatch rejected\" and \"BLAKE claim swap_id mismatch rejected\" cases; the ported Go suite does not exist yet"
+    },
+    {
+      "id": "C19",
+      "go_tests": [],
+      "reference_only": "proven only by tests/swap_protocol_tests.py's \"BTC claim hashlock mismatch\" case; the ported Go suite does not exist yet"
+    },
+    {
+      "id": "C20",
+      "go_tests": [],
+      "reference_only": "proven only by tests/swap_protocol_tests.py's CROSS-SWAP BTC CLAIM REPLAY case (\"genuine BTC claim from another swap rejected by exact HTLC binding\"); the ported Go suite does not exist yet"
+    },
+    {
+      "id": "C21",
+      "go_tests": [],
+      "reference_only": "proven only by tests/swap_protocol_tests.py's CROSS-SWAP BTC CLAIM REPLAY case in the other direction (\"genuine BLAKE claim from another swap rejected by exact HTLC binding\"); the ported Go suite does not exist yet"
+    },
+    {
+      "id": "C22",
+      "go_tests": [],
+      "reference_only": "proven only by tests/swap_protocol_tests.py's CROSS-SWAP BTC REFUND REPLAY case (\"genuine BTC refund from another swap rejected by exact HTLC binding\"); the ported Go suite does not exist yet"
+    },
+    {
+      "id": "C23",
+      "go_tests": [
+        "pkg/wire:TestSecretHexIsForbiddenOnTheWire",
+        "pkg/coord:TestSchemaEqualitySecretHexIsASecurityRefusal",
+        "pkg/swap:TestAnnounceSettlementCarriesOnlyPublicData"
+      ],
+      "reference_only": ""
+    },
+    {
+      "id": "C24",
+      "go_tests": [
+        "pkg/wire:TestUnknownAndMissingFields",
+        "pkg/wire:TestTypeAndShapeRefusals",
+        "pkg/coord:TestSchemaEqualityUnknownFieldsAreRefusedByBoth"
+      ],
+      "reference_only": ""
+    },
+    {
+      "id": "C25",
+      "go_tests": [
+        "pkg/coord:TestSchemaEqualityInternalAnnotationsNeverTravel",
+        "pkg/coord:TestSchemaEqualityWireViewIsTheWireFields"
+      ],
+      "reference_only": ""
+    },
+    {
+      "id": "C26",
+      "go_tests": [
+        "pkg/coord:TestFileTransportRefusesTheWrongIdentity",
+        "pkg/coord:TestNostrTransportReceivesOnlyFromThePinnedAuthor"
+      ],
+      "reference_only": ""
+    },
+    {
+      "id": "C27",
+      "go_tests": [
+        "pkg/coord:TestRoleGuardRefusesSigningAsTheWrongRole",
+        "pkg/swap:TestSwapTimeoutNegotiationRefusesAnUnpinnedAuthor"
+      ],
+      "reference_only": ""
+    },
+    {
+      "id": "C28",
+      "go_tests": [
+        "pkg/swap:TestReceiveRefusesWhenTheChainDisagreesWithTheTerms",
+        "pkg/swap:TestReceiveRefusesAnAnnouncementThatIsNotTheContract"
+      ],
+      "reference_only": ""
+    },
+    {
+      "id": "C29",
+      "go_tests": [
+        "pkg/swap:TestClaimBTCPendingIsAdoptedNotRebuilt",
+        "pkg/observe:TestFindSpendUnconfirmedRecordedSettlementIsPending"
+      ],
+      "reference_only": ""
+    },
+    {
+      "id": "C30",
+      "go_tests": [
+        "pkg/observe:TestFindSpendRefusesRebroadcastWhenTheOutpointIsGone"
+      ],
+      "reference_only": ""
+    },
+    {
+      "id": "C31",
+      "go_tests": [
+        "pkg/swap:TestReceiveRefusesAnUnconfirmedClaim",
+        "pkg/observe:TestFindSpendRejectsAnInactiveTransaction"
+      ],
+      "reference_only": ""
+    },
+    {
+      "id": "C32",
+      "go_tests": [],
+      "reference_only": "proven only by tests/swap_reorg_safety_tests.py's \"REORG: STALE BTC CLAIM ANNOUNCEMENT IS REJECTED\" case; the ported Go suite does not exist yet"
+    },
+    {
+      "id": "C33",
+      "go_tests": [],
+      "reference_only": "proven only by tests/swap_reorg_safety_tests.py's \"REORG: STALE BLAKE CLAIM ANNOUNCEMENT IS REJECTED\" case; the ported Go suite does not exist yet"
+    },
+    {
+      "id": "C34",
+      "go_tests": [],
+      "reference_only": "proven only by tests/swap_reorg_safety_tests.py's \"REORG: STALE BTC REFUND ANNOUNCEMENT IS REJECTED\" case; the ported Go suite does not exist yet"
+    },
+    {
+      "id": "C35",
+      "go_tests": [
+        "pkg/state:TestReorgMatrix"
+      ],
+      "reference_only": ""
+    },
+    {
+      "id": "C36",
+      "go_tests": [
+        "pkg/model:TestSwapModelSettlementIdentityAcceptsAReorgHint"
+      ],
+      "reference_only": ""
+    },
+    {
+      "id": "C37",
+      "go_tests": [
+        "pkg/swap:TestSettlementCandidateIsDurableBeforeBroadcast"
+      ],
+      "reference_only": ""
+    },
+    {
+      "id": "C38",
+      "go_tests": [
+        "pkg/swap:TestSettlementCandidateIsDurableBeforeBroadcast",
+        "pkg/fund:TestFundRecoversInsteadOfPayingTwice"
+      ],
+      "reference_only": ""
+    },
+    {
+      "id": "C39",
+      "go_tests": [
+        "pkg/swap:TestSettlementCandidateIsDurableBeforeBroadcast"
+      ],
+      "reference_only": ""
+    },
+    {
+      "id": "C40",
+      "go_tests": [
+        "pkg/swap:TestSwapTimeoutNegotiationRefusesUnsafeOffers",
+        "pkg/wire:TestSwapWireRefusesVersionlessTimeoutMetadata"
+      ],
+      "reference_only": ""
+    },
+    {
+      "id": "C41",
+      "go_tests": [
+        "pkg/swap:TestSwapTimeoutNegotiationRefusesUnsafeOffers",
+        "pkg/timeout:TestSwapTimeoutPolicyRecoveryBoundary"
+      ],
+      "reference_only": ""
+    },
+    {
+      "id": "C42",
+      "go_tests": [
+        "pkg/swap:TestSwapTimeoutNegotiationRefusesUnsafeOffers",
+        "pkg/timeout:TestSwapTimeoutPolicyRefusesExpiredDeadlines"
+      ],
+      "reference_only": ""
+    },
+    {
+      "id": "C43",
+      "go_tests": [
+        "pkg/reconcile:TestDecideTable"
+      ],
+      "reference_only": ""
+    },
+    {
+      "id": "C44",
+      "go_tests": [
+        "pkg/swap:TestSyncFundingRecoversBothStages",
+        "pkg/swap:TestSyncSettlementRecordsAConfirmedClaim"
+      ],
+      "reference_only": ""
+    },
+    {
+      "id": "C45",
+      "go_tests": [
+        "pkg/swap:TestSyncSettlementRefusesAnInconsistentBranch",
+        "pkg/fund:TestFundRefusesRecoveryWithoutAnIntent"
+      ],
+      "reference_only": ""
+    },
+    {
+      "id": "C46",
+      "go_tests": [
+        "pkg/model:TestSwapModelSettlementIdentityRequiresAnAnchor"
+      ],
+      "reference_only": ""
+    },
+    {
+      "id": "C47",
+      "go_tests": [
+        "pkg/swap:TestCompleteReprovesTheActiveClaim"
+      ],
+      "reference_only": ""
+    }
   ]
 }

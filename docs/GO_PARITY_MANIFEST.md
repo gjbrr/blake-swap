@@ -77,7 +77,7 @@ Statuses: **ported** (behaviour and tests), **partial** (in progress), **pending
 | `command_status`, `command_show`, `command_advance`, `command_list`, `command_fund_blake`, `command_fund_btc`, `command_claim_btc`, `command_claim_blake`, `command_refund_btc`, `command_refund_blake`, `command_complete`, `command_publish_blake_funded`, `command_receive_blake_funded`, `command_publish_btc_funded`, `command_receive_btc_funded`, `command_publish_btc_claimed`, `command_receive_btc_claimed`, `command_publish_blake_claimed`, `command_receive_blake_claimed`, `command_publish_btc_refunded`, `command_receive_btc_refunded`, `command_extract_secret`, `command_new`, `command_publish_offer`, `command_accept_offer`, `command_receive_accept`, `command_reconcile`, `command_next`, `command_resume`, `command_watch_htlc`, `command_recovery_plan`, `command_dashboard`, `command_resume_all`, `command_sync_funding`, `command_sync_settlement`, `command_refresh_timeouts` | `Engine`, `Status`, `Show`, `List`, `Advance`, `FundBlake`, `FundBTC`, `VerifyBlake`, `VerifyBTC`, `ClaimBTC`, `ClaimBlake`, `RefundBTC`, `RefundBlake`, `Complete`, `ExtractSecret`, `AnnounceBlakeFunding`, `ReceiveBlakeFunding`, `AnnounceBTCFunding`, `ReceiveBTCFunding`, `AnnounceBTCCLaimed`, `ReceiveBTCCLaimed`, `AnnounceBlakeClaimed`, `ReceiveBlakeClaimed`, `AnnounceBTCRefunded`, `ReceiveBTCRefunded`, `New`, `PublishOffer`, `AcceptOffer`, `ReceiveAccept`, `Reconcile`, `Next`, `Resume`, `WatchHTLC`, `RecoveryPlan`, `Dashboard`, `ResumeAll`, `SyncFunding`, `SyncSettlement`, `RefreshTimeouts` | `pkg/swap` |
 | `alice_step`, `bob_step` | `Plan`, `Run`, `Terminal`, `DefaultPolicy`, `Outcome`, `Host` | `pkg/agent` |
 | `build_market_offer_v2_event`, `nostr_parse_market_offer_event`, `build_market_take_event`, `nostr_validate_market_take_event`, `build_market_cancel_event`, `build_market_match_event`, `validate_market_match_evidence`, `nostr_derive_market_offer_state`, `nostr_market_cancellation_applies` | `BuildOffer`, `ParseOffer`, `BuildTake`, `ParseTake`, `BuildCancel`, `ParseCancel`, `BuildMatch`, `ParseMatch`, `DeriveState`, `CancellationApplies`, `Book`, `OpenOffers`, `Entry`, `MarketFilters` | `pkg/marketflow` |
-| `main` | — | `pkg/cmd/blake-swap-cli` |
+| `main` | — | `cmd/blake-swap-cli` |
 | — | `Seal`, `Open`, `DeriveKey` | `pkg/vault` |
 | `run_chain_cli`, `chain_dispatch` | `Proxy`, `Config`, `Endpoint`, `DefaultAllowlist` | `pkg/proxy` |
 | — | `NewVaultDomain`, `Domain`, `Chans`, `SecretRelays`, `DefaultRelays` | `pkg/worker` |
@@ -174,7 +174,7 @@ Every Python suite, and the Go package whose tests cover the same ground where o
 | `market_state_tests.py` | `pkg/marketflow` | partial |
 | `moxie_adapter_smoke_tests.py` | `pkg/adapter` | partial |
 | `nip44_tests.py` | `pkg/nip44` | partial |
-| `node_config_tests.py` | — | pending |
+| `node_config_tests.py` | `pkg/nodeconfig` | partial |
 | `nostr_market_tests.py` | `pkg/marketflow` | partial |
 | `packaging_tests.py` | — | pending |
 | `pre_btc_refund_tests.py` | — | pending |

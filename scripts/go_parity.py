@@ -646,11 +646,13 @@ def render() -> str:
     lines.append("|---|---|---|")
 
     for module in MODULES:
-        package = module.go.split(" ")[0].removeprefix("pkg/")
+        # A command is not a package: rendering one as `pkg/cmd/...` invented a path
+        # that does not exist, and the documentation check caught it.
+        target = module.go.split(" ")[0]
         anchors = ", ".join(f"`{anchor}`" for anchor in module.anchors) or "—"
         symbols = ", ".join(f"`{symbol}`" for symbol in module.symbols) or "—"
 
-        lines.append(f"| {anchors} | {symbols} | `pkg/{package}` |")
+        lines.append(f"| {anchors} | {symbols} | `{target}` |")
 
     lines.append("")
     lines.append(f"## CLI commands ({len(commands)})")

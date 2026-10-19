@@ -25,7 +25,7 @@ SOURCES := $(shell find pkg cmd -name '*.go' -not -name native_stub.go) go.mod g
 # Packages that build for the host. Everything except the browser seams and
 # the wasm entry points is host-buildable, which is what makes the value layer
 # testable without a browser.
-NATIVE_PKGS := ./pkg/... ./cmd/server
+NATIVE_PKGS := ./pkg/... ./internal/... ./cmd/server
 
 # Packages whose tests also run under TinyGo wasm. They are the ones the
 # browser client will link, so a host-only pass would not be enough.

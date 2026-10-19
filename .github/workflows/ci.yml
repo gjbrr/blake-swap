@@ -159,6 +159,24 @@ jobs:
           go vet ./pkg/...
           go test ./pkg/...
 
+      - name: WASM modules build
+        run: |
+          set -euo pipefail
+          #
+          # The browser client is the product, and nothing above this step
+          # compiles it: a WASM-only compile error -- or a package that uses a
+          # host-only API -- would leave every other check green while the
+          # thing people actually run stops building. That happened once with
+          # `undefined: rpc` in the platform's browser transport.
+          #
+          TINYGO_VERSION=0.43.0
+          curl -fsSL -o /tmp/tinygo.tar.gz \
+            "https://github.com/tinygo-org/tinygo/releases/download/v${TINYGO_VERSION}/tinygo${TINYGO_VERSION}.linux-amd64.tar.gz"
+          tar -xzf /tmp/tinygo.tar.gz -C /tmp
+          export PATH="/tmp/tinygo/bin:$PATH"
+          tinygo version
+          make wasm
+
       - name: Parity manifest
         run: |
           set -euo pipefail

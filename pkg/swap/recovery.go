@@ -175,12 +175,25 @@ type DashboardEntry struct {
 	TxIDs map[string]string
 }
 
+// Unsolvable is one HTLC no loaded wallet can spend.
+//
+// It is the dashboard's most important line: a swap whose contract cannot be solved
+// by anything on this machine is a swap that needs a recovery plan before anything
+// else, and it is invisible in the per-swap state.
+type Unsolvable struct {
+	SwapID string
+	Chain  string
+	Reason string
+}
+
 // Dashboard is the whole summary, classified the way the dashboard displays it.
 type Dashboard struct {
-	Active    []DashboardEntry
-	Attention []DashboardEntry
-	Settled   []DashboardEntry
-	Archived  []DashboardEntry
+	// Unsolvable lists the HTLCs no loaded wallet can spend.
+	Unsolvable []Unsolvable
+	Active     []DashboardEntry
+	Attention  []DashboardEntry
+	Settled    []DashboardEntry
+	Archived   []DashboardEntry
 }
 
 // Dashboard summarises every local swap.
@@ -309,6 +322,44 @@ func Classify(entries []DashboardEntry) Dashboard {
 	}
 
 	return summary
+}
+
+// UnsolvableHTLCs lists the funded HTLCs no loaded wallet can spend.
+//
+// It asks the recovery plan rather than the observation, because "can anything here
+// spend it" is a wallet question: a funded HTLC whose keys are gone looks exactly
+// like a funded one whose keys are here, until someone tries.
+func (e *Engine) UnsolvableHTLCs(ctx context.Context) []Unsolvable {
+	records, err := e.List(ctx)
+
+	if err != nil {
+		return nil
+	}
+
+	var found []Unsolvable
+
+	for _, record := range records {
+		plan, err := e.RecoveryPlan(ctx, record.SwapID)
+
+		if err != nil {
+			continue
+		}
+
+		for _, leg := range plan.Legs {
+			if leg.Solvable == nil || *leg.Solvable {
+				continue
+			}
+
+			found = append(found, Unsolvable{
+				SwapID: record.SwapID,
+				Chain:  chainSlug(leg.Chain),
+				Reason: "no loaded wallet can solve this HTLC; import the descriptor " +
+					"with `watch-htlc` (see docs/KEY_RECOVERY.md)",
+			})
+		}
+	}
+
+	return found
 }
 
 // Archive lists the retired records the dashboard shows.

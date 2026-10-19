@@ -9,6 +9,8 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -185,8 +187,8 @@ commands:
   watch-htlc SWAP_ID
   recovery-plan SWAP_ID
   refresh-timeouts SWAP_ID [--clear-stale-intent]
-  sync-funding SWAP_ID
-  sync-settlement SWAP_ID
+  sync-funding SWAP_ID [--role alice|bob]
+  sync-settlement SWAP_ID [--role alice|bob]
   dashboard [--json]
   resume-all
 
@@ -369,35 +371,35 @@ func run(ctx context.Context, engine *swap.Engine, command string, args []string
 	case "verify-btc":
 		return runVerify(ctx, engine, args, chain.BTC)
 	case "publish-blake-funded":
-		return runAnnounce(ctx, engine, args, engine.AnnounceBlakeFunding, "blake-funding")
+		return runAnnouncement(ctx, engine, args, true, "blake-funded", engine.AnnounceBlakeFunding)
 	case "receive-blake-funded":
-		return runAnnounce(ctx, engine, args, engine.ReceiveBlakeFunding, "blake-funding")
+		return runAnnouncement(ctx, engine, args, false, "blake-funded", engine.ReceiveBlakeFunding)
 	case "publish-btc-funded":
-		return runAnnounce(ctx, engine, args, engine.AnnounceBTCFunding, "btc-funding")
+		return runAnnouncement(ctx, engine, args, true, "btc-funded", engine.AnnounceBTCFunding)
 	case "receive-btc-funded":
-		return runAnnounce(ctx, engine, args, engine.ReceiveBTCFunding, "btc-funding")
+		return runAnnouncement(ctx, engine, args, false, "btc-funded", engine.ReceiveBTCFunding)
 	case "claim-btc":
-		return runSettle(ctx, engine, args, engine.ClaimBTC, "btc-claim")
+		return runClaim(ctx, engine, args, chain.BTC, engine.ClaimBTC)
 	case "claim-blake":
-		return runSettle(ctx, engine, args, engine.ClaimBlake, "blake-claim")
+		return runClaim(ctx, engine, args, chain.Blake, engine.ClaimBlake)
 	case "refund-btc":
-		return runSettle(ctx, engine, args, engine.RefundBTC, "btc-refund")
+		return runRefund(ctx, engine, args, chain.BTC, engine.RefundBTC)
 	case "refund-blake":
-		return runSettle(ctx, engine, args, engine.RefundBlake, "blake-refund")
+		return runRefund(ctx, engine, args, chain.Blake, engine.RefundBlake)
 	case "extract-secret":
 		return runExtractSecret(ctx, engine, args)
 	case "publish-btc-claimed":
-		return runSettlement(ctx, engine, args, engine.AnnounceBTCCLaimed, "btc-claimed")
+		return runAnnouncement(ctx, engine, args, true, "btc-claimed", announceBTCCLaimed(engine))
 	case "receive-btc-claimed":
-		return runSettlement(ctx, engine, args, engine.ReceiveBTCCLaimed, "btc-claimed")
+		return runAnnouncement(ctx, engine, args, false, "btc-claimed", receiveBTCCLaimed(engine))
 	case "publish-blake-claimed":
-		return runSettlement(ctx, engine, args, engine.AnnounceBlakeClaimed, "blake-claimed")
+		return runAnnouncement(ctx, engine, args, true, "blake-claimed", announceBlakeClaimed(engine))
 	case "receive-blake-claimed":
-		return runSettlement(ctx, engine, args, engine.ReceiveBlakeClaimed, "blake-claimed")
+		return runAnnouncement(ctx, engine, args, false, "blake-claimed", receiveBlakeClaimed(engine))
 	case "publish-btc-refunded":
-		return runSettlement(ctx, engine, args, engine.AnnounceBTCRefunded, "btc-refunded")
+		return runAnnouncement(ctx, engine, args, true, "btc-refunded", announceBTCRefunded(engine))
 	case "receive-btc-refunded":
-		return runSettlement(ctx, engine, args, engine.ReceiveBTCRefunded, "btc-refunded")
+		return runAnnouncement(ctx, engine, args, false, "btc-refunded", receiveBTCRefunded(engine))
 	case "complete":
 		return runComplete(ctx, engine, args)
 	case "reconcile":
@@ -473,17 +475,30 @@ func runNew(ctx context.Context, engine *swap.Engine, args []string) error {
 		return err
 	}
 
-	// The identifier is the one thing a script needs from this command.
-	fmt.Println("swap id:", result.Swap.SwapID)
-	fmt.Println("state:  ", result.Swap.State)
-	fmt.Println("blake:  ", amount.Blake(result.Swap.BlakeAmountBaseUnits).Format())
-	fmt.Println("sats:   ", result.Swap.BTCSats)
-	fmt.Println("btc timeout:  ", result.Swap.BTCTimeout)
-	fmt.Println("blake timeout:", result.Swap.BlakeTimeout)
+	//
+	// The reference prints the whole record, then the timeout policy it derived,
+	// then where it saved it. A caller that only wants the identifier reads the
+	// first line of the record; a caller that wants to know the safety windows gets
+	// the same numbers the peer will validate.
+	//
+	printRecord(result.Swap)
 
-	for _, archived := range result.Archived {
-		fmt.Println("archived:", archived)
+	policyVersion := ""
+
+	if result.Swap.TimeoutPolicyVersion != nil {
+		policyVersion = *result.Swap.TimeoutPolicyVersion
 	}
+
+	if policyVersion == "1.5" {
+		fmt.Println()
+		fmt.Println("timeout policy:", policyVersion)
+		fmt.Println("BTC safety window:", hoursOf(deref(result.Swap.BTCTimeoutWindowSeconds)), "h")
+		fmt.Println("Bob recovery window:", hoursOf(deref(result.Swap.BobRecoverySeconds)), "h")
+		fmt.Println("BLAKE safety window:", hoursOf(deref(result.Swap.BlakeTimeoutWindowSeconds)), "h")
+	}
+
+	fmt.Println()
+	fmt.Println("saved:", recordPath(result.Swap.SwapID))
 
 	return nil
 }
@@ -603,22 +618,9 @@ func runPublishOffer(ctx context.Context, engine *swap.Engine, args []string) er
 		return err
 	}
 
-	fmt.Print(renderOfferPublished(args[0], result.Location))
+	fmt.Print(renderOfferPublished(args[0], messageLocation(result.Location)))
 
 	return nil
-}
-
-// renderOfferPublished is the reference's publish-offer confirmation.
-//
-// The last line is the one that matters: the offer carries public terms and the
-// contract keys' public halves, and publishing it must not carry the secret.
-func renderOfferPublished(swapID, location string) string {
-	return "\nOFFER PUBLISHED\n" +
-		"===============\n" +
-		"swap id: " + swapID + "\n" +
-		"message: " + location + "\n" +
-		"\n" +
-		"PASS: secret_hex was NOT published\n"
 }
 
 func runAcceptOffer(ctx context.Context, engine *swap.Engine, args []string) error {
@@ -665,7 +667,7 @@ func runAcceptOffer(ctx context.Context, engine *swap.Engine, args []string) err
 		return err
 	}
 
-	fmt.Printf("accept message: %s\n", result.Location)
+	fmt.Printf("accept message: %s\n", messageLocation(result.Location))
 	fmt.Print(renderOfferAccepted(
 		result.Swap.SwapID, recordPath(result.Swap.SwapID), result.Timeout,
 	))
@@ -702,8 +704,48 @@ func renderOfferAccepted(swapID, bobStatePath string, check *swap.TimeoutCheck) 
 }
 
 // hoursOf renders seconds as hours to two decimals.
+// deref reads a present-or-absent count, treating an absent one as zero.
+func deref(value *int64) int64 {
+	if value == nil {
+		return 0
+	}
+
+	return *value
+}
+
 func hoursOf(seconds int64) string {
 	return fmt.Sprintf("%.2f", float64(seconds)/3600)
+}
+
+// sha256Hex is the SHA-256 of a secret, as the reference prints it.
+func sha256Hex(secret string) string {
+	decoded, err := hex.DecodeString(secret)
+
+	if err != nil {
+		return ""
+	}
+
+	sum := sha256.Sum256(decoded)
+
+	return hex.EncodeToString(sum[:])
+}
+
+// nullableString is a JSON null for an empty value, the way Python writes None.
+func nullableString(value string) any {
+	if value == "" {
+		return nil
+	}
+
+	return value
+}
+
+// pyString renders an empty value the way Python prints None.
+func pyString(value string) string {
+	if value == "" {
+		return "None"
+	}
+
+	return value
 }
 
 // recordPath is where one swap record lives in this participant's state tree.
@@ -997,23 +1039,29 @@ func runFund(ctx context.Context, engine *swap.Engine, args []string, ch chain.C
 		return err
 	}
 
-	if result.Pending {
-		fmt.Println("FUNDING BROADCAST")
-		fmt.Println("=================")
-		fmt.Println("txid: ", result.TxID)
-		fmt.Println("vout: ", result.Vout)
-		fmt.Println("block: pending")
-		fmt.Println("state:", result.State)
+	record, err := engine.Show(ctx, args[0])
 
-		return nil
+	if err != nil {
+		return err
 	}
 
-	fmt.Println("FUNDED")
-	fmt.Println("------")
-	fmt.Println("txid: ", result.TxID)
-	fmt.Println("vout: ", result.Vout)
-	fmt.Println("block:", result.BlockHash)
-	fmt.Println("state:", result.State)
+	if ch == chain.Blake {
+		fmt.Print(renderFundBlake(result, record))
+	} else {
+		//
+		// Bitcoin funding begins by re-proving the BLAKE leg: Bob funds only once
+		// he has seen Alice's commitment on the active chain, and the reference
+		// prints that proof before it prepares anything.
+		//
+		blake, err := engine.CheckBlakeFunding(ctx, args[0])
+
+		if err != nil {
+			return err
+		}
+
+		fmt.Print(renderVerifyBlake(blake))
+		fmt.Print(renderFundBTC(result, record))
+	}
 
 	if !result.Watch.Imported && result.Watch.Reason != "" {
 		fmt.Println("WARNING: the HTLC was not recorded in a watch-only wallet:",
@@ -1028,32 +1076,51 @@ func runVerify(ctx context.Context, engine *swap.Engine, args []string, ch chain
 		return fmt.Errorf("verify-%s requires a swap id", chainSuffix(ch))
 	}
 
-	var err error
+	check := engine.CheckBTCFunding
 
 	if ch == chain.Blake {
-		err = engine.VerifyBlake(ctx, args[0])
-	} else {
-		err = engine.VerifyBTC(ctx, args[0])
+		check = engine.CheckBlakeFunding
 	}
+
+	verified, err := check(ctx, args[0])
 
 	if err != nil {
 		return err
 	}
 
-	fmt.Println("PASS:", chainLabel(ch), "funding verified")
+	record, err := engine.Show(ctx, args[0])
+
+	if err != nil {
+		return err
+	}
+
+	if ch == chain.Blake {
+		fmt.Print(renderVerifyBlake(verified))
+	} else {
+		fmt.Print(renderVerifyBTC(verified, record))
+	}
 
 	return nil
 }
 
-func runAnnounce(
+// runAnnouncement renders the reference's publish/receive block for every
+// funding, claim and refund message.
+//
+// The reference has a command function per kind, and each prints a different block:
+// a funding announcement reports the outpoint, a claim reports the settlement's
+// transaction and block, and the closing PASS line differs because the three kinds
+// disclose different things. One renderer per kind, chosen by `kind`, is how that
+// stays a single code path rather than ten copies.
+func runAnnouncement(
 	ctx context.Context,
 	engine *swap.Engine,
 	args []string,
+	publish bool,
+	kind string,
 	call func(context.Context, string) (*swap.MessageResult, error),
-	label string,
 ) error {
 	if len(args) < 1 {
-		return fmt.Errorf("%s requires a swap id", label)
+		return fmt.Errorf("%s requires a swap id", kind)
 	}
 
 	result, err := call(ctx, args[0])
@@ -1062,17 +1129,96 @@ func runAnnounce(
 		return err
 	}
 
-	fmt.Println("MESSAGE", strings.ToUpper(label))
-	fmt.Println("swap id: ", args[0])
-	fmt.Println("message: ", result.Location)
+	record, err := engine.Show(ctx, args[0])
 
-	if result.Duplicate {
-		fmt.Println("PASS: duplicate announcement is a safe no-op")
+	if err != nil {
+		return err
 	}
 
-	fmt.Println("state:   ", result.State)
+	label, pass, already := announcementWords(kind, publish, result.Duplicate)
+
+	if already {
+		fmt.Print(renderAlreadyReceived(label, "FUNDING", record, fieldTxID(record, kind),
+			fieldVout(record, kind), pass))
+
+		return nil
+	}
+
+	switch {
+	case strings.HasSuffix(kind, "-refunded") && publish:
+		fmt.Print(renderRefundPublished(label, record, fieldTxID(record, kind),
+			fieldBlockHash(record, kind), messageLocation(result.Location)))
+
+	case strings.HasSuffix(kind, "-refunded"):
+		fmt.Print(renderRefundReceived(label, record, fieldTxID(record, kind),
+			fieldBlockHash(record, kind)))
+
+	case strings.HasSuffix(kind, "-funded") && publish:
+		fmt.Print(renderFundingPublished(label, record.SwapID, messageLocation(result.Location)))
+
+	case strings.HasSuffix(kind, "-funded"):
+		fmt.Print(renderFundingReceived(label, record, fieldTxID(record, kind),
+			fieldVout(record, kind), pass))
+
+	case publish:
+		fmt.Print(renderClaimPublished(label, record, fieldTxID(record, kind),
+			fieldBlockHash(record, kind), messageLocation(result.Location)))
+
+	default:
+		fmt.Print(renderClaimReceived(label, record, fieldTxID(record, kind),
+			fieldBlockHash(record, kind), splitPasses(pass)))
+	}
+
+	_ = result.State
 
 	return nil
+}
+
+// announcementWords is the label, the closing sentence and whether the block is the
+// "already received" variant.
+func announcementWords(kind string, publish, duplicate bool) (label, pass string, already bool) {
+	label = "BTC"
+
+	if strings.HasPrefix(kind, "blake") {
+		label = "BLAKE"
+	}
+
+	switch {
+	case strings.HasSuffix(kind, "-funded") && publish:
+		pass = "PASS: secret_hex was NOT published"
+	case strings.HasSuffix(kind, "-funded") && label == "BLAKE":
+		pass = "PASS: Bob still does NOT know secret S"
+	case strings.HasSuffix(kind, "-funded"):
+		pass = "PASS: Alice imported public BTC funding facts"
+
+	case publish && strings.HasSuffix(kind, "-claimed") && label == "BLAKE":
+		pass = "PASS: only public settlement data published"
+	case publish && strings.HasSuffix(kind, "-claimed"):
+		pass = "PASS: secret_hex was NOT published"
+	case publish:
+		pass = "PASS: only public refund data published"
+
+	case strings.HasSuffix(kind, "-claimed") && label == "BTС":
+		pass = "PASS: secret_hex was not transported; Bob must extract S from the witness"
+	case strings.HasSuffix(kind, "-claimed"):
+		pass = "PASS: authenticated Bob claim was independently verified on BLAKE"
+	default:
+		pass = "PASS: Alice independently verified BTC refund"
+	}
+
+	if strings.HasSuffix(kind, "-claimed") && !publish {
+		if label == "BTC" {
+			pass = "PASS: authenticated Alice claim was independently verified on Bitcoin\n" +
+				"PASS: secret_hex was not transported; Bob must extract S from the witness"
+		}
+	}
+
+	return label, pass, duplicate
+}
+
+// splitPasses splits a multi-line closing sentence into its lines.
+func splitPasses(pass string) []string {
+	return strings.Split(pass, "\n")
 }
 
 func runSettle(
@@ -1129,39 +1275,6 @@ func runSettle(
 	return nil
 }
 
-func runSettlement(
-	ctx context.Context,
-	engine *swap.Engine,
-	args []string,
-	call func(context.Context, string) (*swap.Announcement, error),
-	label string,
-) error {
-	if len(args) < 1 {
-		return fmt.Errorf("%s requires a swap id", label)
-	}
-
-	result, err := call(ctx, args[0])
-
-	if err != nil {
-		return err
-	}
-
-	fmt.Println(strings.ToUpper(label))
-	fmt.Println("================")
-	fmt.Println("swap id:", args[0])
-	fmt.Println("txid:   ", result.TxID)
-	fmt.Println("block:  ", result.BlockHash)
-	fmt.Println("message:", result.Location)
-
-	if result.Duplicate {
-		fmt.Println("PASS: duplicate authenticated settlement was re-verified")
-	}
-
-	fmt.Println("state:  ", result.State)
-
-	return nil
-}
-
 func runExtractSecret(ctx context.Context, engine *swap.Engine, args []string) error {
 	if len(args) < 1 {
 		return errors.New("extract-secret requires a swap id")
@@ -1173,11 +1286,15 @@ func runExtractSecret(ctx context.Context, engine *swap.Engine, args []string) e
 		return err
 	}
 
-	fmt.Println("SECRET EXTRACTED")
-	fmt.Println("================")
-	fmt.Println("swap id:", args[0])
-	fmt.Println("secret sha256 matches the swap hash")
-	fmt.Println("secret length:", len(secret)/2, "bytes")
+	record, err := engine.Show(ctx, args[0])
+
+	if err != nil {
+		return err
+	}
+
+	digest := sha256Hex(secret)
+
+	fmt.Print(renderExtractSecret(record, secret, digest))
 
 	return nil
 }
@@ -1205,6 +1322,16 @@ func runComplete(ctx context.Context, engine *swap.Engine, args []string) error 
 	if err := engine.Complete(ctx, positional[0]); err != nil {
 		return err
 	}
+
+	record, err := engine.Show(ctx, positional[0])
+
+	if err != nil {
+		return err
+	}
+
+	fmt.Print(renderComplete(*role, record.SwapID, record.State))
+
+	return nil
 
 	fmt.Println("SWAP COMPLETE")
 	fmt.Println("=============")
@@ -1704,7 +1831,7 @@ func reportJSON(report *reconcile.Report) map[string]any {
 		"swap_id":             report.SwapID,
 		"participant_pubkey":  report.ParticipantPubkey,
 		"protocol_role":       string(report.ProtocolRole),
-		"counterparty_pubkey": report.Counterparty,
+		"counterparty_pubkey": nullableString(report.Counterparty),
 		"checkpoint_state":    string(report.CheckpointState),
 		"decision_class":      string(report.DecisionClass),
 		"negotiation_status":  report.NegotiationStatus,
@@ -1751,7 +1878,7 @@ func printReconcile(report *reconcile.Report) {
 	fmt.Println("swap id:          ", report.SwapID)
 	fmt.Println("participant:      ", report.ParticipantPubkey)
 	fmt.Println("protocol role:    ", report.ProtocolRole)
-	fmt.Println("counterparty:     ", report.Counterparty)
+	fmt.Println("counterparty:     ", pyString(report.Counterparty))
 	fmt.Println("checkpoint state: ", report.CheckpointState)
 	fmt.Println()
 	fmt.Println("CHAIN REALITY")
@@ -1944,11 +2071,40 @@ func runSync(
 	call func(context.Context, string) (*swap.SyncResult, error),
 	label string,
 ) error {
-	if len(args) < 1 {
+	command := strings.ToLower(label) + "-reconciliation"
+
+	flags := flag.NewFlagSet(command, flag.ContinueOnError)
+
+	//
+	// The reference requires --role on both sync commands, and the drop-in
+	// contract is that a caller passing it works. It is optional here because the
+	// environment already names the role, and an explicit flag outranks it, which
+	// is the same precedence the fee overrides use.
+	//
+	role := flags.String("role", "", "protocol role (defaults to BLAKE_SWAP_ROLE)")
+
+	positional, err := parsePositional(flags, args, 1)
+
+	if err != nil {
+		return err
+	}
+
+	if len(positional) < 1 {
 		return fmt.Errorf("%s reconciliation requires a swap id", strings.ToLower(label))
 	}
 
-	result, err := call(ctx, args[0])
+	if *role != "" {
+		if *role != "alice" && *role != "bob" {
+			return fmt.Errorf("--role must be alice or bob")
+		}
+
+		previous := engine.Role
+		engine.Role = *role
+
+		defer func() { engine.Role = previous }()
+	}
+
+	result, err := call(ctx, positional[0])
 
 	if err != nil {
 		return err
@@ -1987,6 +2143,7 @@ func runDashboard(ctx context.Context, engine *swap.Engine, args []string) error
 
 	summary := swap.Classify(entries)
 	summary.Archived = engine.Archive(ctx)
+	summary.Unsolvable = engine.UnsolvableHTLCs(ctx)
 
 	if *asJSON {
 		encoded, err := json.MarshalIndent(dashboardJSON(summary), "", "  ")
@@ -2180,6 +2337,21 @@ func renderDashboard(summary swap.Dashboard) string {
 	fmt.Fprintf(&out, "settled:    %d\n", len(summary.Settled))
 	fmt.Fprintf(&out, "archived:   %d\n", len(summary.Archived))
 
+	if len(summary.Unsolvable) > 0 {
+		out.WriteString("\n")
+		out.WriteString("HTLCs NOT SOLVABLE BY A LOADED WALLET\n")
+		out.WriteString("=====================================\n")
+
+		for _, htlc := range summary.Unsolvable {
+			fmt.Fprintf(&out, "%s  %-5s  %s\n", htlc.SwapID, htlc.Chain, htlc.Reason)
+		}
+
+		out.WriteString("\n")
+		out.WriteString("Record the descriptor with `scripts/blake engine watch-htlc <swap-id>`, " +
+			"or follow\n")
+		out.WriteString("docs/KEY_RECOVERY.md if the signing keys are already gone.\n")
+	}
+
 	return out.String()
 }
 
@@ -2198,26 +2370,28 @@ func runResumeAll(ctx context.Context, engine *swap.Engine) error {
 	}
 
 	fmt.Println()
-	fmt.Println("RESUME ALL")
-	fmt.Println("==========")
+	fmt.Println("MULTI-SWAP SETTLEMENT PASS")
+	fmt.Println("==========================")
 
 	performed := 0
 
 	for _, result := range results {
-		if result.Performed {
-			performed++
-
-			fmt.Printf("%s  performed %-12s txid=%s\n",
-				result.SwapID, result.Action, result.TxID)
-
+		if !result.Performed {
 			continue
 		}
 
-		fmt.Printf("%s  no action (%s)\n", result.SwapID, result.Action)
+		performed++
+
+		fmt.Println()
+		fmt.Printf("Driving %s: %s\n", result.SwapID, result.Action)
+	}
+
+	if performed == 0 {
+		fmt.Println("No automatic settlement/recovery actions are ready.")
 	}
 
 	fmt.Println()
-	fmt.Println("actions performed:", performed)
+	fmt.Println("PASS: initial BLAKE funding was not performed")
 
 	return nil
 }

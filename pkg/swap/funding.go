@@ -103,7 +103,13 @@ type FundingResult struct {
 	Watch         fund.WatchStatus
 	FeeRate       decimal.Dec
 	FeeSource     string
-	State         state.State
+	// FeeTargetBlocks is the confirmation target the estimator was asked for.
+	FeeTargetBlocks int64
+	// Address is where the HTLC was funded, as the node compiled it.
+	Address string
+	// Height is the chain height the contract was built against.
+	Height int64
+	State  state.State
 	// Note is a message the operator should see, such as a superseded intent.
 	Note string
 }
@@ -161,18 +167,33 @@ func (e *Engine) FundBlake(ctx context.Context, swapID string) (*FundingResult, 
 		return nil, err
 	}
 
+	derived, err := contract.Derive(ctx, e.Blake, swap, chain.Blake)
+
+	if err != nil {
+		return nil, err
+	}
+
+	height, err := e.Blake.Height(ctx)
+
+	if err != nil {
+		return nil, err
+	}
+
 	result := &FundingResult{
-		Chain:         chain.Blake,
-		TxID:          receipt.TxID,
-		Vout:          receipt.Vout,
-		BlockHash:     receipt.BlockHash,
-		Confirmations: receipt.Confirmations,
-		Pending:       receipt.Pending,
-		Recovered:     receipt.Recovered,
-		Watch:         receipt.Watch,
-		FeeRate:       receipt.FeeRate,
-		FeeSource:     receipt.FeeSource,
-		State:         swap.State,
+		Chain:           chain.Blake,
+		Address:         derived.Address,
+		Height:          height,
+		TxID:            receipt.TxID,
+		Vout:            receipt.Vout,
+		BlockHash:       receipt.BlockHash,
+		Confirmations:   receipt.Confirmations,
+		Pending:         receipt.Pending,
+		Recovered:       receipt.Recovered,
+		Watch:           receipt.Watch,
+		FeeRate:         receipt.FeeRate,
+		FeeSource:       receipt.FeeSource,
+		FeeTargetBlocks: e.Funding.FeeTargetBlocks,
+		State:           swap.State,
 	}
 
 	//
@@ -251,18 +272,33 @@ func (e *Engine) FundBTC(ctx context.Context, swapID string) (*FundingResult, er
 	swap.BTCFundingTxID = &txid
 	swap.BTCFundingVout = &vout
 
+	derived, err := contract.Derive(ctx, e.BTC, swap, chain.BTC)
+
+	if err != nil {
+		return nil, err
+	}
+
+	height, err := e.BTC.Height(ctx)
+
+	if err != nil {
+		return nil, err
+	}
+
 	result := &FundingResult{
-		Chain:         chain.BTC,
-		TxID:          receipt.TxID,
-		Vout:          receipt.Vout,
-		BlockHash:     receipt.BlockHash,
-		Confirmations: receipt.Confirmations,
-		Pending:       receipt.Pending,
-		Recovered:     receipt.Recovered,
-		Watch:         receipt.Watch,
-		FeeRate:       receipt.FeeRate,
-		FeeSource:     receipt.FeeSource,
-		State:         swap.State,
+		Chain:           chain.BTC,
+		Address:         derived.Address,
+		Height:          height,
+		TxID:            receipt.TxID,
+		Vout:            receipt.Vout,
+		BlockHash:       receipt.BlockHash,
+		Confirmations:   receipt.Confirmations,
+		Pending:         receipt.Pending,
+		Recovered:       receipt.Recovered,
+		Watch:           receipt.Watch,
+		FeeRate:         receipt.FeeRate,
+		FeeSource:       receipt.FeeSource,
+		FeeTargetBlocks: e.Funding.FeeTargetBlocks,
+		State:           swap.State,
 	}
 
 	if receipt.Pending {
@@ -303,13 +339,34 @@ func (e *Engine) FundBTC(ctx context.Context, swapID string) (*FundingResult, er
 
 // VerifyBlake proves the BLAKE funding output is this swap's HTLC.
 func (e *Engine) VerifyBlake(ctx context.Context, swapID string) error {
+	_, err := e.CheckBlakeFunding(ctx, swapID)
+
+	return err
+}
+
+// CheckBlakeFunding verifies the BLAKE funding and reports what it proves.
+//
+// The report exists because the verification command prints it for an operator and
+// the funding command uses the same proof before it will spend anything.
+func (e *Engine) CheckBlakeFunding(ctx context.Context, swapID string) (*contract.Check, error) {
 	swap, err := e.load(ctx, swapID)
 
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	return contract.VerifyFunding(ctx, e.Blake, swap, chain.Blake)
+	return contract.CheckFunding(ctx, e.Blake, swap, chain.Blake)
+}
+
+// CheckBTCFunding verifies the Bitcoin funding and reports what it proves.
+func (e *Engine) CheckBTCFunding(ctx context.Context, swapID string) (*contract.Check, error) {
+	swap, err := e.load(ctx, swapID)
+
+	if err != nil {
+		return nil, err
+	}
+
+	return contract.CheckFunding(ctx, e.BTC, swap, chain.BTC)
 }
 
 // VerifyBTC proves the Bitcoin funding output is this swap's HTLC.

@@ -28,7 +28,11 @@ import (
 
 // DefaultFeeTargetBlocks is the confirmation target funding asks for when the
 // caller does not choose one.
-const DefaultFeeTargetBlocks int64 = 6
+//
+// One block, which is the reference's default for funding: a funding transaction
+// is the commitment a swap depends on, so it is priced to confirm in the next block
+// rather than to wait. Settlement has its own, slower, target.
+const DefaultFeeTargetBlocks int64 = 1
 
 // Node is the chain surface funding needs. It is an interface so the whole
 // flow can be exercised against a node whose answers the test controls,

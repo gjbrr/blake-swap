@@ -15,6 +15,7 @@ package contract
 import (
 	"context"
 	"fmt"
+	"strconv"
 
 	"github.com/gjbrr/blake-swap/pkg/amount"
 	"github.com/gjbrr/blake-swap/pkg/chain"
@@ -180,38 +181,86 @@ func (c *Contract) CheckOutput(value amount.Coin, address string) error {
 //
 // This is the check a participant runs before treating a swap as funded: a
 // confirmed outpoint is not the same claim as a confirmed *HTLC*.
-func VerifyFunding(ctx context.Context, node Node, swap *model.Swap, ch chain.Chain) error {
+// Check is what a funding verification proved, in the terms an operator reads.
+type Check struct {
+	TxID string
+	Vout int64
+	// Amount is the funded output's value, rendered the way the chain renders it:
+	// a decimal for BLAKE, whole satoshis for Bitcoin.
+	Amount string
+	// Address is where the funding actually went.
+	Address string
+	// Expected is where this swap's HTLC should be.
+	Expected      string
+	Confirmations int64
+}
+
+// CheckFunding proves the funding output is this swap's HTLC and reports what it
+// found.
+//
+// The facts are returned rather than printed because two commands read them: the
+// verification command prints them for an operator, and the funding command uses
+// the same proof before it will spend anything.
+func CheckFunding(
+	ctx context.Context, node Node, swap *model.Swap, ch chain.Chain,
+) (*Check, error) {
 	txid, vout, err := Outpoint(swap, ch)
 
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	derived, err := Derive(ctx, node, swap, ch)
 
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	utxo, err := node.TxOut(ctx, txid, vout)
 
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	if utxo == nil {
-		return fmt.Errorf("%s HTLC is already spent or unavailable", Name(ch))
+		return nil, fmt.Errorf("%s HTLC is already spent or unavailable", Name(ch))
 	}
 
 	if err := derived.CheckOutput(utxo.Value, utxo.ScriptPubKey.Address); err != nil {
-		return err
+		return nil, err
 	}
 
 	if utxo.Confirmations < 1 {
-		return fmt.Errorf("%s funding transaction is not confirmed", Name(ch))
+		return nil, fmt.Errorf("%s funding transaction is not confirmed", Name(ch))
 	}
 
-	return nil
+	amount := utxo.Value.String()
+
+	if ch == chain.BTC {
+		sats, err := utxo.Value.Sats()
+
+		if err != nil {
+			return nil, err
+		}
+
+		amount = strconv.FormatInt(int64(sats), 10)
+	}
+
+	return &Check{
+		TxID:          txid,
+		Vout:          vout,
+		Amount:        amount,
+		Address:       utxo.ScriptPubKey.Address,
+		Expected:      derived.Address,
+		Confirmations: utxo.Confirmations,
+	}, nil
+}
+
+// VerifyFunding is CheckFunding without the report.
+func VerifyFunding(ctx context.Context, node Node, swap *model.Swap, ch chain.Chain) error {
+	_, err := CheckFunding(ctx, node, swap, ch)
+
+	return err
 }
 
 // Outpoint reads the recorded funding outpoint for one chain.

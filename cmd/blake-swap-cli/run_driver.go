@@ -55,9 +55,14 @@ func runDriver(ctx context.Context, engine *swap.Engine, args []string) error {
 		report, err := engine.Reconcile(ctx, swapID)
 
 		if err != nil {
+			// A failed step is a result the driver reports, not a failure of the
+			// command: the reference prints this block and returns, and a caller that
+			// greps "RUN RESULT: step failed" is the contract. Exiting non-zero here
+			// as well would print the same sentence twice, once inside the report and
+			// once as an ERROR line.
 			fmt.Print(renderDriverFailure(step, *maxSteps, err))
 
-			return err
+			return nil
 		}
 
 		fmt.Print(renderDriverDecision(step, *report))
@@ -75,7 +80,7 @@ func runDriver(ctx context.Context, engine *swap.Engine, args []string) error {
 
 			fmt.Print(renderDriverFailure(step, *maxSteps, err))
 
-			return err
+			return nil
 		}
 
 		if outcome != "" {

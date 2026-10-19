@@ -157,7 +157,7 @@ Every Python suite, and the Go package whose tests cover the same ground where o
 |---|---|---|
 | `agent_policy_tests.py` | `pkg/agent` | partial |
 | `blake_amount_tests.py` | `pkg/amount` | partial |
-| `btc_dynamic_settlement_tests.py` | — | pending |
+| `btc_dynamic_settlement_tests.py` | `pkg/settle` | partial |
 | `chain_cli_transport_tests.py` | — | pending |
 | `cli_wiring_tests.py` | — | pending |
 | `command_surface_tests.py` | — | pending |

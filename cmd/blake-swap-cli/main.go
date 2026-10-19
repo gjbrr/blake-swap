@@ -105,6 +105,7 @@ commands:
   publish-offer SWAP_ID
   accept-offer SWAP_ID [--expected-alice-pub HEX] [--allow-unpinned-author]
   receive-accept SWAP_ID
+  fund
   fund-blake SWAP_ID | fund-btc SWAP_ID
   verify-blake SWAP_ID | verify-btc SWAP_ID
   publish-blake-funded SWAP_ID | receive-blake-funded SWAP_ID
@@ -182,6 +183,8 @@ func run(ctx context.Context, engine *swap.Engine, command string, args []string
 		return runAcceptOffer(ctx, engine, args)
 	case "receive-accept":
 		return runReceiveAccept(ctx, engine, args)
+	case "fund":
+		return runFundReadySwap(ctx, engine, args)
 	case "fund-blake":
 		return runFund(ctx, engine, args, chain.Blake)
 	case "fund-btc":
@@ -501,19 +504,265 @@ func runReceiveAccept(ctx context.Context, engine *swap.Engine, args []string) e
 		return errors.New("receive-accept requires a swap id")
 	}
 
-	result, err := engine.ReceiveAccept(ctx, args[0])
+	if _, err := engine.ReceiveAccept(ctx, args[0]); err != nil {
+		return err
+	}
+
+	record, err := engine.Show(ctx, args[0])
 
 	if err != nil {
 		return err
 	}
 
-	fmt.Println("ACCEPT RECEIVED")
-	fmt.Println("===============")
-	fmt.Println("swap id:", args[0])
-	fmt.Println("message:", result.Location)
-	fmt.Println("state:  ", result.State)
+	fmt.Print(renderAcceptReceived(args[0], record))
 
 	return nil
+}
+
+// renderAcceptReceived is the reference's accept-received confirmation.
+//
+// The last line is the whole point of the message: Alice learns Bob's two public
+// contract keys and nothing else, so she can fund knowing he cannot claim without
+// revealing his secret — because he does not have one.
+func renderAcceptReceived(swapID string, record *model.Swap) string {
+	var out strings.Builder
+
+	out.WriteString("\n")
+	out.WriteString("ACCEPT RECEIVED\n")
+	out.WriteString("===============\n")
+	fmt.Fprintf(&out, "swap id: %s\n", swapID)
+	out.WriteString("\n")
+
+	if record != nil && record.BlakeBobPub != nil {
+		fmt.Fprintf(&out, "Bob BLAKE pubkey: %s\n", *record.BlakeBobPub)
+	}
+
+	if record != nil && record.BTCBobPub != nil {
+		fmt.Fprintf(&out, "Bob BTC pubkey:   %s\n", *record.BTCBobPub)
+	}
+
+	out.WriteString("\n")
+	out.WriteString("PASS: Alice received only Bob public keys\n")
+
+	return out.String()
+}
+
+// runFundReadySwap funds the only swap whose Bob acceptance is ready.
+//
+// Funding is the first command in this protocol that moves money, so it never chooses.
+// With no candidate it says so; with more than one it lists them and stops. The single
+// candidate case still goes through the ordinary fund-blake path, which keeps every
+// validation, lock and crash-recovery rule that path already has.
+func runFundReadySwap(ctx context.Context, engine *swap.Engine, args []string) error {
+	if len(args) != 0 {
+		return fmt.Errorf("fund takes no arguments")
+	}
+
+	key, err := engineKey(engine)
+
+	if err != nil {
+		return err
+	}
+
+	me := key.PublicKey()
+
+	records, err := engine.List(ctx)
+
+	if err != nil {
+		return err
+	}
+
+	candidates := fundingCandidates(ctx, engine, records, me)
+
+	if len(candidates) == 0 {
+		fmt.Print(renderNoFundingReady())
+
+		return nil
+	}
+
+	if len(candidates) > 1 {
+		fmt.Print(renderMultipleFundingReady(candidates))
+
+		return nil
+	}
+
+	candidate := candidates[0]
+
+	minimum, err := engine.BTCTradeMinimumSats(ctx)
+
+	if err != nil {
+		return err
+	}
+
+	if candidate.record.BTCSats < minimum {
+		return fmt.Errorf(
+			"swap %s BTC amount %d sats is too small; minimum settlement-feasible "+
+				"amount is %d sats under the current settlement fee policy",
+			candidate.record.SwapID, candidate.record.BTCSats, minimum,
+		)
+	}
+
+	fmt.Print(renderFundingReady(candidate.record))
+
+	if !candidate.imported {
+		fmt.Print("Importing Bob's authenticated acceptance...\n")
+
+		if err := runReceiveAccept(ctx, engine, []string{candidate.record.SwapID}); err != nil {
+			return err
+		}
+	}
+
+	updated, err := engine.Show(ctx, candidate.record.SwapID)
+
+	if err != nil {
+		return err
+	}
+
+	if updated.BlakeBobPub == nil || updated.BTCBobPub == nil || updated.NostrBobPub == nil {
+		return fmt.Errorf("SECURITY FAILURE: Bob acceptance is not fully pinned")
+	}
+
+	fmt.Print(renderExplicitCommitment())
+
+	return runFund(ctx, engine, []string{candidate.record.SwapID}, chain.Blake)
+}
+
+// fundingCandidate is one swap whose Bob acceptance is available.
+type fundingCandidate struct {
+	record   *model.Swap
+	imported bool
+}
+
+// fundingCandidates finds the swaps this participant could fund right now.
+//
+// A swap is a candidate when it is Alice's, still OFFERED, has a pinned Bob identity, and
+// either already holds Bob's settlement keys or has an authenticated accept message
+// waiting. Discovery is read-only: the message is not consumed here.
+func fundingCandidates(
+	ctx context.Context, engine *swap.Engine, records []*model.Swap, me string,
+) []fundingCandidate {
+	candidates := make([]fundingCandidate, 0, len(records))
+
+	for _, record := range records {
+		if string(record.State) != "OFFERED" {
+			continue
+		}
+
+		if record.NostrAlicePub == nil || *record.NostrAlicePub != me {
+			continue
+		}
+
+		if record.NostrBobPub == nil || *record.NostrBobPub == "" {
+			continue
+		}
+
+		if record.BlakeBobPub != nil && record.BTCBobPub != nil {
+			candidates = append(candidates, fundingCandidate{record: record, imported: true})
+
+			continue
+		}
+
+		if acceptAvailable(ctx, engine, record) {
+			candidates = append(candidates, fundingCandidate{record: record})
+		}
+	}
+
+	return candidates
+}
+
+// acceptAvailable reports whether Bob's authenticated acceptance is readable.
+func acceptAvailable(ctx context.Context, engine *swap.Engine, record *model.Swap) bool {
+	if engine.Transport == nil || record.NostrBobPub == nil {
+		return false
+	}
+
+	message, err := engine.Transport.Receive(ctx, record.SwapID, "accept", coord.ReceiveOptions{
+		ExpectedPubkey: *record.NostrBobPub,
+		Mode:           engine.Mode,
+	})
+
+	if err != nil || message == nil {
+		return false
+	}
+
+	if message.Body["type"] != "accept" {
+		return false
+	}
+
+	if message.Body["swap_id"] != record.SwapID {
+		return false
+	}
+
+	if message.Body["secret_hash"] != record.SecretHash {
+		return false
+	}
+
+	for _, field := range []string{"blake_bob_pub", "btc_bob_pub"} {
+		value, _ := message.Body[field].(string)
+
+		if value == "" {
+			return false
+		}
+	}
+
+	return true
+}
+
+// renderNoFundingReady is the empty-candidate block.
+func renderNoFundingReady() string {
+	return "\nNO FUNDING-READY SWAP\n" +
+		"=====================\n" +
+		"No local protocol-Alice OFFERED swap has an authenticated Bob acceptance ready.\n" +
+		"\n" +
+		"The taker may still need to run `accept-match`.\n"
+}
+
+// renderMultipleFundingReady refuses to choose which trade receives money.
+func renderMultipleFundingReady(candidates []fundingCandidate) string {
+	var out strings.Builder
+
+	out.WriteString("\n")
+	out.WriteString("MULTIPLE FUNDING-READY SWAPS\n")
+	out.WriteString("============================\n")
+	out.WriteString("Refusing to choose which trade receives funds.\n")
+	out.WriteString("\n")
+
+	for index, candidate := range candidates {
+		fmt.Fprintf(&out, "%d. %s  %s BLAKE / %s sats\n",
+			index+1,
+			candidate.record.SwapID,
+			pythonFloat(blakeFloat(candidate.record.BlakeAmount())),
+			thousands(candidate.record.BTCSats),
+		)
+	}
+
+	out.WriteString("\n")
+	out.WriteString("Use `fund-blake <swap-id>` for the one you intend to commit.\n")
+
+	return out.String()
+}
+
+// renderFundingReady names the trade about to be funded.
+func renderFundingReady(record *model.Swap) string {
+	var out strings.Builder
+
+	out.WriteString("\n")
+	out.WriteString("FUNDING-READY SWAP\n")
+	out.WriteString("==================\n")
+	fmt.Fprintf(&out, "swap:  %s\n", record.SwapID)
+	fmt.Fprintf(&out, "BLAKE: %s\n", pythonFloat(blakeFloat(record.BlakeAmount())))
+	fmt.Fprintf(&out, "sats:  %s\n", thousands(record.BTCSats))
+	out.WriteString("\n")
+
+	return out.String()
+}
+
+// renderExplicitCommitment says, in as many words, that money is about to move.
+func renderExplicitCommitment() string {
+	return "\nEXPLICIT COMMITMENT\n" +
+		"===================\n" +
+		"Funding the BLAKE HTLC now. This moves funds.\n" +
+		"\n"
 }
 
 func runFund(ctx context.Context, engine *swap.Engine, args []string, ch chain.Chain) error {

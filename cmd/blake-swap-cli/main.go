@@ -39,6 +39,16 @@ func main() {
 	}
 
 	command := os.Args[1]
+
+	// --help and -h answer before anything is built: a usage request must not require a
+	// participant key, a datadir or a relay, which is exactly the situation somebody
+	// typing it is in.
+	if command == "-h" || command == "--help" || command == "help" {
+		usage()
+
+		return
+	}
+
 	args := os.Args[2:]
 
 	// A market read talks to relays, not to nodes, so it runs before the engine is
@@ -150,14 +160,43 @@ commands:
   next SWAP_ID
   run SWAP_ID [--max-steps N] [--fee-rate SAT_PER_VB]
   agent SWAP_ID --role alice|bob [--interval S] [--max-ticks N]
-  resume SWAP_ID
+  resume [SWAP_ID_PREFIX] [--max-steps N] [--fee-rate SAT_PER_VB]
   watch-htlc SWAP_ID
   recovery-plan SWAP_ID
   refresh-timeouts SWAP_ID [--clear-stale-intent]
   sync-funding SWAP_ID
   sync-settlement SWAP_ID
-  dashboard
+  dashboard [--json]
   resume-all
+
+market (relays, no nodes):
+  market [--limit N]
+  market-state [--limit N] [--json]
+  publish-market-offer --blake AMOUNT --sats SATS [--minutes N] [--direction D]
+  cancel-market-offer OFFER_ID
+  inspect-market-take OFFER_ID
+  take-market-offer OFFER_ID
+  market-takes OFFER_ID [--limit N] [--json]
+  accept-take OFFER_ID
+  accept-match [MATCH_ID_OR_PREFIX]
+  accept-market-take TAKE_ID
+  accept-market-match MATCH_ID
+  accept-reverse-market-match MATCH_ID
+  accept-reverse-swap-offer MATCH_ID
+  publish-market-match TAKE_ID
+  market-matches [--limit N]
+  ignore-match MATCH_ID
+  dismiss SWAP_ID
+  rebroadcast-nostr-event EVENT_ID
+
+environment:
+  BLAKE_SWAP_STATE_DIR            records and the verified relay cache
+  BLAKE_SWAP_PARTICIPANT_KEY_FILE the Nostr identity this participant signs with
+  BLAKE_SWAP_NOSTR_RELAYS         comma-separated relays for market commands
+  BLAKE_SWAP_BTC_DATADIR          Bitcoin node datadir (RPC cookie and port are read from it)
+  BLAKE_SWAP_BLAKE_DATADIR        BLAKE node datadir
+  BLAKE_SWAP_RPC_TIMEOUT_SECONDS  node RPC deadline (default 120)
+  BLAKE_SWAP_{BTC,BLAKE}_SPEND_FEE_SATS / _RATE  settlement fee overrides
 `)
 }
 

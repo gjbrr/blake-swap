@@ -1,6 +1,8 @@
 package main
 
 import (
+	"io"
+	"os"
 	"strings"
 	"testing"
 
@@ -211,4 +213,78 @@ func TestResumeForwardsTheStepBudget(t *testing.T) {
 			t.Fatalf("args = %v, want %v", args, want)
 		}
 	}
+}
+
+// TestUsageListsEveryCommand: the usage text is the only documentation a person has at the
+// terminal, so a command missing from it is a command nobody finds.
+func TestUsageListsEveryCommand(t *testing.T) {
+	// The commands the dispatcher knows, from the parity manifest's list.
+	commands := []string{
+		"new", "show", "list", "status", "advance", "publish-offer", "accept-offer",
+		"receive-accept", "fund", "fund-blake", "fund-btc", "verify-blake", "verify-btc",
+		"publish-blake-funded", "receive-blake-funded", "publish-btc-funded",
+		"receive-btc-funded", "claim-btc", "claim-blake", "refund-btc", "refund-blake",
+		"extract-secret", "publish-btc-claimed", "receive-btc-claimed",
+		"publish-blake-claimed", "receive-blake-claimed", "publish-btc-refunded",
+		"receive-btc-refunded", "complete", "reconcile", "next", "resume", "run", "agent",
+		"watch-htlc", "recovery-plan", "refresh-timeouts", "sync-funding",
+		"sync-settlement", "dashboard", "resume-all", "market", "market-state",
+		"publish-market-offer", "cancel-market-offer", "inspect-market-take",
+		"take-market-offer", "market-takes", "accept-take", "accept-match",
+		"accept-market-take", "accept-market-match", "accept-reverse-market-match",
+		"accept-reverse-swap-offer", "publish-market-match", "market-matches",
+		"ignore-match", "dismiss", "rebroadcast-nostr-event",
+	}
+
+	text := captureUsage(t)
+
+	// The usage writes several commands per line ("publish-btc-claimed SWAP_ID |
+	// receive-btc-claimed SWAP_ID"), so the check is on whole tokens rather than on
+	// prefixes: a command listed only as an argument to another is not documented.
+	tokens := map[string]bool{}
+
+	for _, field := range strings.FieldsFunc(text, func(r rune) bool {
+		return r == ' ' || r == '\n' || r == '\t' || r == '|'
+	}) {
+		tokens[field] = true
+	}
+
+	for _, command := range commands {
+		if !tokens[command] {
+			t.Errorf("the usage text does not list %q", command)
+		}
+	}
+}
+
+// captureUsage reads the usage text by redirecting os.Stderr while usage runs.
+func captureUsage(t *testing.T) string {
+	t.Helper()
+
+	// usage writes to stderr through fmt.Fprint, so the test reads the file descriptor it
+	// is pointed at rather than the terminal's.
+	original := os.Stderr
+
+	reader, writer, err := os.Pipe()
+
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	os.Stderr = writer
+
+	defer func() { os.Stderr = original }()
+
+	usage()
+
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	raw, err := io.ReadAll(reader)
+
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	return string(raw)
 }

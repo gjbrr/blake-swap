@@ -8,6 +8,7 @@ import (
 
 	"github.com/gjbrr/blake-swap/pkg/amount"
 	"github.com/gjbrr/blake-swap/pkg/chain"
+	"github.com/gjbrr/blake-swap/pkg/coord"
 	"github.com/gjbrr/blake-swap/pkg/fund"
 	"github.com/gjbrr/blake-swap/pkg/model"
 	"github.com/gjbrr/blake-swap/pkg/nostr"
@@ -16,7 +17,7 @@ import (
 	"github.com/gjbrr/blake-swap/pkg/swap"
 )
 
-// Names the vault uses for the two values the engine needs.
+// Names the vault uses for the values the engine needs.
 const (
 	// SecretIdentity is the participant's Nostr secret key.
 	SecretIdentity = "identity"
@@ -35,14 +36,17 @@ const (
 // the ones a browser UI must be able to trust before it is allowed to move funds.
 type engineDomain struct {
 	vault *vaultDomain
+	// dialer is the relay seam the engine's coordination transport is built over. It
+	// is the browser's own WebSocket, injectable so the domain can be tested.
+	dialer nostr.Dialer
 	// nodes are built per call from the vault's proxy address, so changing the proxy
 	// takes effect without restarting the worker.
 	btc, blake *chain.Node
 }
 
-// newEngineDomain builds the engine domain over a vault.
-func newEngineDomain(vault *vaultDomain) *engineDomain {
-	return &engineDomain{vault: vault}
+// newEngineDomain builds the engine domain over a vault and a relay dialer.
+func newEngineDomain(vault *vaultDomain, dialer nostr.Dialer) *engineDomain {
+	return &engineDomain{vault: vault, dialer: dialer}
 }
 
 // Handle runs one engine command.
@@ -189,7 +193,31 @@ func (d *engineDomain) build(ctx context.Context) (*swap.Engine, error) {
 
 	engine := swap.NewEngine(d.vault.store, d.vault.intents(), d.blake, d.btc)
 
+	//
+	// The engine's coordination transport is the same relay transport the
+	// coordination domain publishes with, so `Announce*` and `Receive*` work
+	// unchanged in the browser: the only difference from the CLI is where the
+	// socket and the identity come from.
+	//
+	relays, err := readRelayList(ctx, d.vault)
+
+	if err != nil {
+		return nil, err
+	}
+
+	mode, err := d.mode(ctx)
+
+	if err != nil {
+		return nil, err
+	}
+
+	engine.Transport = &coord.NostrTransport{
+		Client:   &nostr.Client{Dialer: d.dialer, Relays: relays, Cache: nostr.NewMemoryCache()},
+		Identity: identity,
+	}
+
 	engine.Identity = identity
+	engine.Mode = mode
 	engine.Role = "alice"
 	engine.BlakeWallet = "alice"
 	engine.BTCWallet = "bob"
@@ -197,6 +225,17 @@ func (d *engineDomain) build(ctx context.Context) (*swap.Engine, error) {
 	engine.BTCWatchWallet = "bob-watch"
 
 	return engine, nil
+}
+
+// mode is the configured coordination confidentiality mode.
+func (d *engineDomain) mode(ctx context.Context) (nostr.Mode, error) {
+	stored, err := d.vault.readSecret(ctx, SecretEncryption)
+
+	if err != nil {
+		return "", err
+	}
+
+	return nostr.ParseMode(stored)
 }
 
 // identity reads the participant's Nostr key from the vault.

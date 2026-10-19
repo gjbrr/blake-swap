@@ -251,33 +251,10 @@ func (e *Engine) PublishOffer(ctx context.Context, swapID string) (*MessageResul
 		return nil, err
 	}
 
-	body := map[string]any{
-		"type":            "offer",
-		"swap_id":         swap.SwapID,
-		"blake_amount":    amount.Blake(swap.BlakeAmountBaseUnits).Format(),
-		"btc_sats":        swap.BTCSats,
-		"secret_hash":     swap.SecretHash,
-		"btc_timeout":     swap.BTCTimeout,
-		"blake_timeout":   swap.BlakeTimeout,
-		"created_at":      swap.CreatedAt,
-		"blake_alice_pub": *swap.BlakeAlicePub,
-		"btc_alice_pub":   *swap.BTCAlicePub,
-	}
+	body, err := MessageBody(swap, "offer")
 
-	if swap.TimeoutPolicyVersion != nil && *swap.TimeoutPolicyVersion == "1.5" {
-		body["timeout_policy_version"] = "1.5"
-
-		if swap.BTCTimeoutWindowSeconds != nil {
-			body["btc_timeout_window_seconds"] = *swap.BTCTimeoutWindowSeconds
-		}
-
-		if swap.BlakeTimeoutWindowSeconds != nil {
-			body["blake_timeout_window_seconds"] = *swap.BlakeTimeoutWindowSeconds
-		}
-
-		if swap.BobRecoverySeconds != nil {
-			body["bob_recovery_seconds"] = *swap.BobRecoverySeconds
-		}
+	if err != nil {
+		return nil, err
 	}
 
 	location, err := e.send(ctx, swap, "offer", body)
@@ -529,12 +506,10 @@ func (e *Engine) AcceptOffer(ctx context.Context, req AcceptRequest) (*AcceptRes
 		return nil, err
 	}
 
-	accept := map[string]any{
-		"type":          "accept",
-		"swap_id":       swap.SwapID,
-		"secret_hash":   swap.SecretHash,
-		"blake_bob_pub": blakeKey,
-		"btc_bob_pub":   btcKey,
+	accept, err := MessageBody(swap, "accept")
+
+	if err != nil {
+		return nil, err
 	}
 
 	location, err := e.send(ctx, swap, "accept", accept)

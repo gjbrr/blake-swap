@@ -94,7 +94,7 @@ func engineDomainFor(t *testing.T, proxyURL string) (*engineDomain, *vaultDomain
 		t.Fatalf("identity.set = %+v", result)
 	}
 
-	return newEngineDomain(vault), vault
+	return newEngineDomain(vault, nil), vault
 }
 
 // TestEngineStatusThroughTheProxy is the whole browser chain: the domain reads the proxy
@@ -110,7 +110,7 @@ func TestEngineStatusThroughTheProxy(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	result := handleCommand(context.Background(), nil, engine, nil, body)
+	result := handleCommand(context.Background(), nil, engine, nil, nil, body)
 
 	if !result.OK {
 		t.Fatalf("result = %+v", result)
@@ -138,7 +138,7 @@ func TestEngineRefusesWithoutAProxyOrIdentity(t *testing.T) {
 		t.Fatalf("create = %+v", result)
 	}
 
-	engine := newEngineDomain(vault)
+	engine := newEngineDomain(vault, nil)
 
 	result := engine.Handle(ctx, proto.Request{Command: "engine.status"})
 

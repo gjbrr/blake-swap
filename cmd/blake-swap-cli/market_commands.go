@@ -40,6 +40,20 @@ func isIdentityOnlyCommand(command string) bool {
 	return false
 }
 
+// isCoordPeerCommand reports whether a command is the node-free coordination peer.
+//
+// It exists for the same reason isMarketCommand does: building an engine for a
+// command that talks only to relays would demand a regtest datadir and two nodes for
+// something a laptop with neither can do.
+func isCoordPeerCommand(command string) bool {
+	switch command {
+	case coordKeyCommand, coordReadCommand, coordReplyCommand:
+		return true
+	}
+
+	return false
+}
+
 // isMarketCommand reports whether a command reads the market rather than a chain.
 //
 // The one switch that needs this is main's, which must decide whether building an

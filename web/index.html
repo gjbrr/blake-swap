@@ -123,6 +123,27 @@
       </section>
 
       <section class="panel">
+        <h2>Coordination</h2>
+        <p class="hint">
+          The seven settlement messages, published and read over the same relay
+          connection as the market. Bodies are built by the worker from the swap
+          record it holds; the page never supplies one. A reply is only accepted
+          from the counterparty the record pins.
+        </p>
+        <input id="coord-blake" class="field" type="text" placeholder="BLAKE amount" autocomplete="off" spellcheck="false">
+        <input id="coord-sats" class="field" type="text" placeholder="sats" autocomplete="off" spellcheck="false">
+        <input id="coord-peer" class="field" type="text" placeholder="counterparty x-only pubkey (optional)" autocomplete="off" spellcheck="false">
+        <button type="button" data-uicmd="coord-open">Open a swap record</button>
+        <input id="coord-kind" class="field" type="text" placeholder="message type" autocomplete="off" spellcheck="false">
+        <button type="button" data-uicmd="coord-send">Announce</button>
+        <button type="button" data-uicmd="coord-receive">Receive</button>
+        <input id="coord-mode" class="field" type="text" placeholder="nip44_v2" autocomplete="off" spellcheck="false">
+        <button type="button" data-uicmd="coord-set-mode">Set encryption</button>
+        <button type="button" data-uicmd="coord-mode">Read encryption</button>
+        <pre id="coord" aria-live="polite">not run</pre>
+      </section>
+
+      <section class="panel">
         <h2>Market</h2>
         <p class="hint">
           The marketplace, read and written over the browser's own relay

@@ -9,7 +9,6 @@ import (
 
 	"git.smesh.lol/tiny-spawn"
 
-	"github.com/gjbrr/blake-swap/pkg/nostr"
 	"github.com/gjbrr/blake-swap/pkg/platform"
 	"github.com/gjbrr/blake-swap/pkg/proto"
 )
@@ -27,23 +26,31 @@ const Greeting = "hello world"
 // Domain is the worker's event loop.
 //
 // It is intentionally a server: one long-lived loop that dispatches on Kind.
-// The work that will fill it — relay proxy connections, signature verification,
-// Nostr subscriptions — becomes sibling domains spawned by cmd/webworker, each
-// with its own channels, not more cases in this switch. A case here is a
-// message type, not a job.
+// The domains it serves — the vault, the engine, the market and the settlement
+// transport — are values built here and dispatched by command prefix, so the
+// work stays in the domain that owns it. A case in this switch is an envelope
+// kind, not a job.
 func Domain(_ struct{}, ch Chans) {
 	consoleLog("worker: domain started")
 
 	// One vault per worker: the derived key lives here and nowhere else, and it dies
 	// with the instance.
 	vault := NewVaultDomain(platform.NewIndexedDB("blake-swap", "vault"), platform.Reader{})
-	engine := newEngineDomain(vault)
 
-	// The market's connection is the browser's own WebSocket: the same relay client the
+	// Every relay connection is the browser's own WebSocket: the same relay client the
 	// CLI uses, over the platform seam, with the vault's identity as the signer.
-	market := newMarketDomain(vault, func(ctx context.Context, url string) (nostr.Conn, error) {
-		return platform.DialWebSocket(ctx, url)
-	})
+	dialer := relayDialer()
+
+	// The engine carries the same transport, so its announce and receive commands work
+	// in the browser unchanged.
+	engine := newEngineDomain(vault, dialer)
+
+	// The market's connection is that dialer over the vault's relay list.
+	market := newMarketDomain(vault, dialer)
+
+	// The settlement transport is the same dialer and the same relay list, with the
+	// seven message types the engine already knows how to build and check.
+	settlement := newCoordDomain(vault, dialer)
 
 	ctx := context.Background()
 
@@ -75,7 +82,7 @@ func Domain(_ struct{}, ch Chans) {
 
 				consoleLog("worker: command received (seq " + itoa(e.Seq) + ")")
 
-				result := handleCommand(ctx, vault, engine, market, e.Body)
+				result := handleCommand(ctx, vault, engine, market, settlement, e.Body)
 
 				consoleLog("worker: command finished (ok=" + boolText(result.OK) +
 					", " + itoa(uint32(time.Since(started).Milliseconds())) + " ms)")
@@ -97,10 +104,11 @@ func Domain(_ struct{}, ch Chans) {
 
 			default:
 				//
-				// TODO: relay proxy, signature checks, Nostr subscription
-				// management. Until then an unknown kind is logged and
-				// ignored: a worker that guesses at unknown messages is how
-				// two implementations drift apart.
+				// An unknown kind is logged and ignored. The relay work is
+				// not a message kind at all: it is the `coord.` commands,
+				// which the page sends over this same channel like every
+				// other command. A worker that guesses at unknown messages
+				// is how two implementations drift apart.
 				//
 				consoleLog("worker: ignoring unexpected kind " + string(e.Kind))
 			}

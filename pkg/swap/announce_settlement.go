@@ -150,13 +150,7 @@ func (e *Engine) AnnounceBTCCLaimed(ctx context.Context, swapID string) (*Announ
 		return nil, fmt.Errorf("Alice has no BTC claim blockhash")
 	}
 
-	return e.announceSettlement(ctx, swap, "btc-claimed", map[string]any{
-		"type":                "btc-claimed",
-		"swap_id":             swap.SwapID,
-		"secret_hash":         swap.SecretHash,
-		"btc_claim_txid":      *swap.BTCCLaimTxID,
-		"btc_claim_blockhash": *swap.BTCCLaimBlockHash,
-	}, htlc.Claim)
+	return e.announceSettlement(ctx, swap, "btc-claimed", htlc.Claim)
 }
 
 // ReceiveBTCCLaimed consumes Alice's claim as Bob.
@@ -208,13 +202,7 @@ func (e *Engine) AnnounceBlakeClaimed(ctx context.Context, swapID string) (*Anno
 		return nil, fmt.Errorf("Bob has no BLAKE claim blockhash")
 	}
 
-	return e.announceSettlement(ctx, swap, "blake-claimed", map[string]any{
-		"type":                  "blake-claimed",
-		"swap_id":               swap.SwapID,
-		"secret_hash":           swap.SecretHash,
-		"blake_claim_txid":      *swap.BlakeClaimTxID,
-		"blake_claim_blockhash": *swap.BlakeClaimBlockHash,
-	}, htlc.Claim)
+	return e.announceSettlement(ctx, swap, "blake-claimed", htlc.Claim)
 }
 
 // ReceiveBlakeClaimed consumes Bob's BLAKE claim as Alice.
@@ -258,13 +246,7 @@ func (e *Engine) AnnounceBTCRefunded(ctx context.Context, swapID string) (*Annou
 		return nil, fmt.Errorf("Bob has no BTC refund blockhash")
 	}
 
-	return e.announceSettlement(ctx, swap, "btc-refunded", map[string]any{
-		"type":                 "btc-refunded",
-		"swap_id":              swap.SwapID,
-		"secret_hash":          swap.SecretHash,
-		"btc_refund_txid":      *swap.BTCRefundTxID,
-		"btc_refund_blockhash": *swap.BTCRefundBlockHash,
-	}, htlc.Refund)
+	return e.announceSettlement(ctx, swap, "btc-refunded", htlc.Refund)
 }
 
 // ReceiveBTCRefunded consumes Bob's refund as Alice.
@@ -285,9 +267,18 @@ func (e *Engine) ReceiveBTCRefunded(ctx context.Context, swapID string) (*Announ
 }
 
 // announceSettlement sends one of the three settlement announcements.
+//
+// The body comes from the same builder the browser worker uses, so a settlement
+// announcement cannot be assembled twice and drift.
 func (e *Engine) announceSettlement(
-	ctx context.Context, swap *model.Swap, kind string, body map[string]any, branch htlc.Branch,
+	ctx context.Context, swap *model.Swap, kind string, branch htlc.Branch,
 ) (*Announcement, error) {
+	body, err := MessageBody(swap, kind)
+
+	if err != nil {
+		return nil, err
+	}
+
 	if _, present := body["secret_hex"]; present {
 		return nil, fmt.Errorf("SECURITY FAILURE: %s message contains secret_hex", kind)
 	}

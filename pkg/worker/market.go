@@ -326,7 +326,16 @@ func (d *marketDomain) client(ctx context.Context) (*nostr.Client, error) {
 
 // relayList is the configured relay list, or the default.
 func (d *marketDomain) relayList(ctx context.Context) ([]string, error) {
-	stored, err := d.vault.readSecret(ctx, SecretRelays)
+	return readRelayList(ctx, d.vault)
+}
+
+// readRelayList is the relay list every domain that talks to relays uses.
+//
+// The market and the settlement transport share it on purpose: a participant who
+// configured where they read the market has configured where they coordinate, and two
+// lists would be two answers to the same question.
+func readRelayList(ctx context.Context, vault *vaultDomain) ([]string, error) {
+	stored, err := vault.readSecret(ctx, SecretRelays)
 
 	if err != nil {
 		return nil, err

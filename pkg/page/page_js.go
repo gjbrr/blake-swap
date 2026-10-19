@@ -48,8 +48,19 @@ const (
 	UICmdEngineDashboard UICmd = "engine-dashboard"
 	UICmdEngineShow      UICmd = "engine-show"
 
-	// The market's controls: the relay list, a read, and the two acts that change
-	// the marketplace. They are the same commands the CLI's market subcommands run.
+	// The settlement transport's controls: a record to coordinate about, the seven
+	// message types, and the confidentiality mode. They are the same commands the
+	// CLI's announce and receive subcommands run.
+	UICmdCoordOpen    UICmd = "coord-open"
+	UICmdCoordSend    UICmd = "coord-send"
+	UICmdCoordReceive UICmd = "coord-receive"
+	UICmdCoordMode    UICmd = "coord-mode"
+	UICmdCoordSetMode UICmd = "coord-set-mode"
+)
+
+// The market's controls: the relay list, a read, and the two acts that change
+// the marketplace. They are the same commands the CLI's market subcommands run.
+const (
 	UICmdMarketRelays    UICmd = "market-relays"
 	UICmdMarketSetRelays UICmd = "market-set-relays"
 	UICmdMarketList      UICmd = "market-list"
@@ -102,6 +113,15 @@ const (
 	InputSwapID         = "swap-id"
 	InputPassphrase     = "passphrase"
 
+	// The coordination inputs: the record's terms, the pinned counterparty, the
+	// message type and the confidentiality mode.
+	InputCoordBlake = "coord-blake"
+	InputCoordSats  = "coord-sats"
+	InputCoordPeer  = "coord-peer"
+	InputCoordKind  = "coord-kind"
+	InputCoordMode  = "coord-mode"
+	ElementCoord    = "coord"
+
 	// The market's inputs: where to read from, what to advertise, and what to take.
 	InputRelays       = "relays"
 	InputMarketBlake  = "market-blake"
@@ -111,6 +131,7 @@ const (
 
 	// Markers set once a command of that family has succeeded here. They are what
 	// the headless check asserts, so it never has to read presentation text.
+	CoordVerifiedAttribute    = "data-coord-verified"
 	IdentityVerifiedAttribute = "data-identity-set"
 	ProxyVerifiedAttribute    = "data-proxy-set"
 	EngineVerifiedAttribute   = "data-engine-verified"
@@ -131,6 +152,21 @@ type panel struct {
 	// clears is the marker a successful run removes, for the commands whose truth can
 	// stop being true. Only locking does that today.
 	clears string
+}
+
+// settlementKinds is the message types the page may ask the worker to send or receive.
+//
+// It is written out rather than derived from the worker's table: a page that could
+// name an arbitrary command prefix would be a second dispatcher, and the worker would
+// have no way to tell a typo from an attempt.
+var settlementKinds = map[string]bool{
+	"offer":         true,
+	"accept":        true,
+	"blake-funded":  true,
+	"btc-funded":    true,
+	"btc-claimed":   true,
+	"blake-claimed": true,
+	"btc-refunded":  true,
 }
 
 // panels routes a result by the command that produced it.
@@ -156,6 +192,33 @@ var panels = map[string]panel{
 	"engine.list":      {element: ElementEngine},
 	"engine.show":      {element: ElementEngine},
 	"engine.dashboard": {element: ElementEngine},
+
+	// The settlement transport: opening a record, sending one message, receiving one,
+	// and the mode the two of them use. A receive that validated sets the marker,
+	// because that is the half of the conversation this client cannot fake.
+	"coord.open":          {element: ElementCoord},
+	"coord.mode":          {element: ElementCoord},
+	"coord.set-mode":      {element: ElementCoord},
+	"coord.offer.send":    {element: ElementCoord},
+	"coord.offer.receive": {element: ElementCoord, marker: CoordVerifiedAttribute},
+
+	"coord.accept.send":    {element: ElementCoord},
+	"coord.accept.receive": {element: ElementCoord, marker: CoordVerifiedAttribute},
+
+	"coord.blake-funded.send":    {element: ElementCoord},
+	"coord.blake-funded.receive": {element: ElementCoord, marker: CoordVerifiedAttribute},
+
+	"coord.btc-funded.send":    {element: ElementCoord},
+	"coord.btc-funded.receive": {element: ElementCoord, marker: CoordVerifiedAttribute},
+
+	"coord.btc-claimed.send":    {element: ElementCoord},
+	"coord.btc-claimed.receive": {element: ElementCoord, marker: CoordVerifiedAttribute},
+
+	"coord.blake-claimed.send":    {element: ElementCoord},
+	"coord.blake-claimed.receive": {element: ElementCoord, marker: CoordVerifiedAttribute},
+
+	"coord.btc-refunded.send":    {element: ElementCoord},
+	"coord.btc-refunded.receive": {element: ElementCoord, marker: CoordVerifiedAttribute},
 
 	// The market's read proves the relay connection works, so it sets the marker;
 	// publishing and taking report into the same panel because they are the same
@@ -292,6 +355,43 @@ func uiRequest(cmd UICmd) (proto.Request, bool) {
 		return proto.Request{
 			Command: "engine.show",
 			Args:    map[string]string{"swap_id": inputValue(InputSwapID)},
+		}, true
+
+	case UICmdCoordOpen:
+		return proto.Request{
+			Command: "coord.open",
+			Args: map[string]string{
+				"blake":         inputValue(InputCoordBlake),
+				"sats":          inputValue(InputCoordSats),
+				"nostr_bob_pub": inputValue(InputCoordPeer),
+			},
+		}, true
+
+	case UICmdCoordSend, UICmdCoordReceive:
+		kind := strings.ToLower(strings.TrimSpace(inputValue(InputCoordKind)))
+
+		if !settlementKinds[kind] {
+			return proto.Request{}, false
+		}
+
+		direction := "send"
+
+		if cmd == UICmdCoordReceive {
+			direction = "receive"
+		}
+
+		return proto.Request{
+			Command: "coord." + kind + "." + direction,
+			Args:    map[string]string{"swap_id": inputValue(InputSwapID)},
+		}, true
+
+	case UICmdCoordMode:
+		return proto.Request{Command: "coord.mode"}, true
+
+	case UICmdCoordSetMode:
+		return proto.Request{
+			Command: "coord.set-mode",
+			Args:    map[string]string{"mode": inputValue(InputCoordMode)},
 		}, true
 
 	case UICmdMarketRelays:

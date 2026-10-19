@@ -73,6 +73,17 @@ func (k *Key) PublicHex() string {
 	return hex.EncodeToString(k.signer.Pub())
 }
 
+// CompressedPublicHex is the same public key in SEC1 compressed form, 66 hex
+// characters.
+//
+// The x-only form is what Nostr signs with; the compressed form is what a contract
+// key field and the HTLC descriptor hold. Both describe one point: the signer
+// normalises keys for BIP-340, so the y coordinate is always the even one and the
+// prefix is always 0x02.
+func (k *Key) CompressedPublicHex() string {
+	return "02" + k.PublicHex()
+}
+
 // Public is a copy of the x-only public key bytes.
 func (k *Key) Public() []byte {
 	return append([]byte{}, k.signer.Pub()...)

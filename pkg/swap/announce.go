@@ -53,14 +53,10 @@ func (e *Engine) AnnounceBlakeFunding(ctx context.Context, swapID string) (*Mess
 		return nil, fmt.Errorf("Alice has no BLAKE funding vout")
 	}
 
-	body := map[string]any{
-		"type":               "blake-funded",
-		"swap_id":            swap.SwapID,
-		"secret_hash":        swap.SecretHash,
-		"blake_amount":       amount.Blake(swap.BlakeAmountBaseUnits).Format(),
-		"blake_timeout":      swap.BlakeTimeout,
-		"blake_funding_txid": *swap.BlakeFundingTxID,
-		"blake_funding_vout": int64(*swap.BlakeFundingVout),
+	body, err := MessageBody(swap, "blake-funded")
+
+	if err != nil {
+		return nil, err
 	}
 
 	location, err := e.send(ctx, swap, "blake-funded", body)
@@ -148,14 +144,10 @@ func (e *Engine) AnnounceBTCFunding(ctx context.Context, swapID string) (*Messag
 		return nil, fmt.Errorf("Bob has no BTC funding vout")
 	}
 
-	body := map[string]any{
-		"type":             "btc-funded",
-		"swap_id":          swap.SwapID,
-		"secret_hash":      swap.SecretHash,
-		"btc_sats":         swap.BTCSats,
-		"btc_timeout":      swap.BTCTimeout,
-		"btc_funding_txid": *swap.BTCFundingTxID,
-		"btc_funding_vout": int64(*swap.BTCFundingVout),
+	body, err := MessageBody(swap, "btc-funded")
+
+	if err != nil {
+		return nil, err
 	}
 
 	location, err := e.send(ctx, swap, "btc-funded", body)
@@ -434,19 +426,7 @@ func (e *Engine) peerFor(swap *model.Swap) (string, error) {
 
 // checkReceived is the part of a received announcement every type shares.
 func checkReceived(message map[string]any, swap *model.Swap, kind string) error {
-	if message["type"] != kind {
-		return fmt.Errorf("message is not %s", kind)
-	}
-
-	if message["swap_id"] != swap.SwapID {
-		return fmt.Errorf("swap_id mismatch")
-	}
-
-	if message["secret_hash"] != swap.SecretHash {
-		return fmt.Errorf("secret_hash mismatch")
-	}
-
-	return nil
+	return CheckReceived(swap, kind, message)
 }
 
 // fundingTxID reads one chain's recorded funding txid.

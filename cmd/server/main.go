@@ -32,6 +32,8 @@ func main() {
 	blakeAuth := flag.String("blake-auth", "", "BLAKE node credentials as user:password")
 	btcCookie := flag.String("btc-cookie", "", "file holding the Bitcoin node's RPC cookie")
 	blakeCookie := flag.String("blake-cookie", "", "file holding the BLAKE node's RPC cookie")
+	rpcRate := flag.Float64("rpc-rate", 40, "proxy requests per second per address")
+	rpcBurst := flag.Int("rpc-burst", 100, "proxy burst per address")
 	flag.Parse()
 
 	root, err := filepath.Abs(*dir)
@@ -66,6 +68,7 @@ func main() {
 		btcRPC: *btcRPC, blakeRPC: *blakeRPC,
 		btcAuth: *btcAuth, blakeAuth: *blakeAuth,
 		btcCookie: *btcCookie, blakeCookie: *blakeCookie,
+		rate: *rpcRate, burst: *rpcBurst,
 	})
 
 	if err != nil {
@@ -98,6 +101,12 @@ type proxyConfig struct {
 	btcRPC, blakeRPC       string
 	btcAuth, blakeAuth     string
 	btcCookie, blakeCookie string
+	// rate and burst bound one browser. The default is generous because a page that
+	// reconciles several swaps legitimately asks its node for a few dozen calls in a row,
+	// and a limit that refuses an ordinary settle would be a limit that breaks the product
+	// it was meant to protect.
+	rate  float64
+	burst int
 }
 
 // buildProxy configures the node proxy, or returns nil when no node is configured.
@@ -157,8 +166,33 @@ func buildProxy(cfg proxyConfig) (*proxy.Proxy, error) {
 		return nil, nil
 	}
 
-	return proxy.New(proxy.Config{Chains: chains})
+	return proxy.New(proxy.Config{Chains: chains, RatePerSecond: cfg.rate, Burst: cfg.burst})
 }
+
+// contentSecurityPolicy is the app's policy.
+//
+// It allows only this origin's own scripts and modules, and WebSocket connections to the
+// relays the operator configures. There is no 'unsafe-inline' and no 'unsafe-eval': the page
+// has no inline handlers and the wasm loader is a file, so neither is needed — and a policy
+// that allowed them would be decoration.
+//
+// 'wasm-unsafe-eval' is required and is not the same thing: a CSP without it makes the
+// browser refuse to compile a wasm module at all, and it permits only that, not JavaScript
+// `eval`.
+//
+// connect-src has to name ws: and wss: rather than the relay origins because the relay list
+// is the user's, not the server's: a server that pinned one relay would be choosing a
+// network for its users.
+const contentSecurityPolicy = "default-src 'self'; " +
+	"script-src 'self' 'wasm-unsafe-eval'; " +
+	"worker-src 'self'; " +
+	"style-src 'self'; " +
+	"img-src 'self' data:; " +
+	"connect-src 'self' ws: wss:; " +
+	"object-src 'none'; " +
+	"base-uri 'none'; " +
+	"form-action 'none'; " +
+	"frame-ancestors 'none'"
 
 // handler serves the app directory with the headers wasm needs.
 func handler(root string) http.Handler {
@@ -171,6 +205,9 @@ func handler(root string) http.Handler {
 		// and the server is not meant for production traffic.
 		//
 		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("Content-Security-Policy", contentSecurityPolicy)
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("Referrer-Policy", "no-referrer")
 
 		switch strings.ToLower(filepath.Ext(r.URL.Path)) {
 		case ".wasm":

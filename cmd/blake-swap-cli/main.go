@@ -52,6 +52,14 @@ func main() {
 
 	args := os.Args[2:]
 
+	// The command is checked before anything is built. Building an engine first turns
+	// "unknown command: lst" into a node or identity error, which sends an operator to
+	// look at their datadir instead of their spelling -- and makes a typo look like a
+	// broken installation.
+	if !knownCommand(command) {
+		fail(fmt.Errorf("unknown command: %s", command))
+	}
+
 	// A market read talks to relays, not to nodes, so it runs before the engine is
 	// built: looking for an offer must not require a regtest datadir and two nodes.
 	if isMarketCommand(command) {
@@ -199,6 +207,82 @@ environment:
   BLAKE_SWAP_RPC_TIMEOUT_SECONDS  node RPC deadline (default 120)
   BLAKE_SWAP_{BTC,BLAKE}_SPEND_FEE_SATS / _RATE  settlement fee overrides
 `)
+}
+
+// knownCommand reports whether the dispatcher has a case for this name.
+//
+// It exists so a typo is answered as a typo, before a node or a key is asked for.
+// It is deliberately a second statement of the dispatch surface: the registry test
+// proves both that every name here is dispatched and that every dispatched case is
+// named here, so the two cannot drift apart in either direction.
+func knownCommand(command string) bool {
+	_, known := commands[command]
+
+	return known
+}
+
+// commands is every command name the dispatcher handles, and the summary line the
+// usage text gives it.
+var commands = map[string]string{
+	"new":                         "create a swap and its offer",
+	"show":                        "print one swap record",
+	"list":                        "list local swap records",
+	"status":                      "print the local swap state",
+	"advance":                     "move a record forward (test mode only)",
+	"publish-offer":               "publish the offer of an existing swap",
+	"accept-offer":                "accept a published offer",
+	"receive-accept":              "import an authenticated acceptance",
+	"fund":                        "fund the next leg that is ready",
+	"fund-blake":                  "fund the BLAKE leg",
+	"fund-btc":                    "fund the Bitcoin leg",
+	"verify-blake":                "verify the BLAKE funding on chain",
+	"verify-btc":                  "verify the Bitcoin funding on chain",
+	"publish-blake-funded":        "announce BLAKE funding",
+	"receive-blake-funded":        "import a BLAKE funding announcement",
+	"publish-btc-funded":          "announce Bitcoin funding",
+	"receive-btc-funded":          "import a Bitcoin funding announcement",
+	"claim-btc":                   "claim the Bitcoin leg with the secret",
+	"claim-blake":                 "claim the BLAKE leg with the revealed secret",
+	"refund-btc":                  "refund the Bitcoin leg after its timelock",
+	"refund-blake":                "refund the BLAKE leg after its timelock",
+	"extract-secret":              "read the revealed secret off the Bitcoin chain",
+	"publish-btc-claimed":         "announce the Bitcoin claim",
+	"receive-btc-claimed":         "import a Bitcoin claim announcement",
+	"publish-blake-claimed":       "announce the BLAKE claim",
+	"receive-blake-claimed":       "import a BLAKE claim announcement",
+	"publish-btc-refunded":        "announce the Bitcoin refund",
+	"receive-btc-refunded":        "import a Bitcoin refund announcement",
+	"complete":                    "close a settled record",
+	"reconcile":                   "report what is safe next for one swap",
+	"next":                        "perform the one safe next step",
+	"resume":                      "pick up the swap that needs attention",
+	"run":                         "drive a swap to a checkpoint",
+	"agent":                       "run the autonomous participant loop",
+	"watch-htlc":                  "stream an HTLC's chain status",
+	"recovery-plan":               "describe how to recover an HTLC's keys",
+	"refresh-timeouts":            "re-derive the timeout plan",
+	"sync-funding":                "re-read funding from the chains",
+	"sync-settlement":             "re-read settlement from the chains",
+	"dashboard":                   "summarise every local swap",
+	"resume-all":                  "resume every swap that needs it",
+	"market":                      "read the open market",
+	"market-state":                "derive the market book",
+	"publish-market-offer":        "publish an offer to the market",
+	"cancel-market-offer":         "cancel a published offer",
+	"inspect-market-take":         "inspect a take without accepting it",
+	"take-market-offer":           "take an open offer",
+	"market-takes":                "list the takes on an offer",
+	"accept-take":                 "accept a take",
+	"accept-match":                "import the match for a swap",
+	"accept-market-take":          "accept a take by id",
+	"accept-market-match":         "import a market match by id",
+	"accept-reverse-market-match": "import a reverse-direction match",
+	"accept-reverse-swap-offer":   "accept the reverse-direction swap offer",
+	"publish-market-match":        "publish the match for a take",
+	"market-matches":              "list the matches for this participant",
+	"ignore-match":                "tombstone a match so it stops surfacing",
+	"dismiss":                     "dismiss a record from the dashboard",
+	"rebroadcast-nostr-event":     "republish a signed event",
 }
 
 // run dispatches one command.

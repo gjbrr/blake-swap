@@ -218,23 +218,9 @@ func TestResumeForwardsTheStepBudget(t *testing.T) {
 // TestUsageListsEveryCommand: the usage text is the only documentation a person has at the
 // terminal, so a command missing from it is a command nobody finds.
 func TestUsageListsEveryCommand(t *testing.T) {
-	// The commands the dispatcher knows, from the parity manifest's list.
-	commands := []string{
-		"new", "show", "list", "status", "advance", "publish-offer", "accept-offer",
-		"receive-accept", "fund", "fund-blake", "fund-btc", "verify-blake", "verify-btc",
-		"publish-blake-funded", "receive-blake-funded", "publish-btc-funded",
-		"receive-btc-funded", "claim-btc", "claim-blake", "refund-btc", "refund-blake",
-		"extract-secret", "publish-btc-claimed", "receive-btc-claimed",
-		"publish-blake-claimed", "receive-blake-claimed", "publish-btc-refunded",
-		"receive-btc-refunded", "complete", "reconcile", "next", "resume", "run", "agent",
-		"watch-htlc", "recovery-plan", "refresh-timeouts", "sync-funding",
-		"sync-settlement", "dashboard", "resume-all", "market", "market-state",
-		"publish-market-offer", "cancel-market-offer", "inspect-market-take",
-		"take-market-offer", "market-takes", "accept-take", "accept-match",
-		"accept-market-take", "accept-market-match", "accept-reverse-market-match",
-		"accept-reverse-swap-offer", "publish-market-match", "market-matches",
-		"ignore-match", "dismiss", "rebroadcast-nostr-event",
-	}
+	// The commands the dispatcher knows, shared with the registry test so the two
+	// cannot disagree about what the CLI claims to offer.
+	commands := referenceCommandNames()
 
 	text := captureUsage(t)
 

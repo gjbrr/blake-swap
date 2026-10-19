@@ -598,6 +598,31 @@ func (r *Rig) SetupSwap(t *testing.T, dir Direction) (alice, bob *Side, messages
 	return alice, bob, messages, id
 }
 
+// SetupGoSwap runs the handshake between two participants that both use this
+// implementation.
+//
+// The reference's own suites are single-implementation: the counterparty walk is a
+// separate file. A ported suite that is about this engine's behaviour — a crash
+// boundary, a reorg, an idle poll — therefore runs both sides here, and only the
+// cross-implementation walks put the reference on one side.
+func (r *Rig) SetupGoSwap(t *testing.T) (alice, bob *Side, messages, id string) {
+	t.Helper()
+
+	messages = t.TempDir()
+
+	alice = NewSide(t, "go", "alice")
+	bob = NewSide(t, "go", "bob")
+
+	output := r.Run(t, alice, messages, "new", "--blake", "0.001", "--sats", "25000")
+	id = SwapID(t, output)
+
+	r.Run(t, alice, messages, "publish-offer", id)
+	r.Run(t, bob, messages, "accept-offer", id, "--expected-alice-pub", alice.Public)
+	r.Run(t, alice, messages, "receive-accept", id)
+
+	return alice, bob, messages, id
+}
+
 // FundBothLegs funds and announces both legs.
 func (r *Rig) FundBothLegs(t *testing.T, alice, bob *Side, messages, id string) {
 	t.Helper()

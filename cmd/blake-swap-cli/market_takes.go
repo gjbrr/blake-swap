@@ -101,6 +101,8 @@ func runMarketTakes(ctx context.Context, engine *swap.Engine, args []string) err
 		return err
 	}
 
+	cacheMarketTakes(ctx, client, takeReport.Events)
+
 	evidence := append([]event.Event{}, takeReport.Events...)
 	evidence = append(evidence, cachedEvents(ctx, client.Cache)...)
 

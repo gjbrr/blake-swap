@@ -441,12 +441,12 @@ func readTakeSet(
 		candidates = append(candidates, candidate)
 	}
 
+	// Authentic takes are kept the moment they are seen, so the next command can still
+	// resolve them after a relay has forgotten the negotiation.
+	cacheMarketTakes(ctx, client, takeReport.Events)
+
 	for _, found := range takeReport.Events {
 		add(found)
-
-		// Caching is best effort here: an unwritable cache must not stop a maker from
-		// accepting a take whose signature already verified.
-		_ = client.Cache.Put(ctx, found)
 	}
 
 	for _, supplied := range extra {

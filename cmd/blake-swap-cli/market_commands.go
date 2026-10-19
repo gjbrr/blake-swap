@@ -166,6 +166,26 @@ func readMarket(ctx context.Context, limit int) (marketRead, error) {
 	return marketRead{events: events, answered: report.Answered, relays: report.Relays}, nil
 }
 
+// cacheMarketTakes retains the authentic take events one read saw.
+//
+// The reference's take validator caches an event as soon as its signature and take tag
+// verify, before it judges protocol validity, and that ordering is deliberate:
+// authenticity is immutable evidence, validity is a conclusion about it. Skipping this is
+// what makes a take prefix unresolvable on the very next command even though the take was
+// read a moment ago — and it costs the next read the history a relay may already have
+// dropped.
+func cacheMarketTakes(ctx context.Context, client *nostr.Client, events []event.Event) {
+	for _, candidate := range events {
+		if candidate.Kind != event.KindTextNote || !candidate.HasTag("t", marketflow.TakeTag) {
+			continue
+		}
+
+		// A cache write failure is not a read failure: the evidence is still in hand,
+		// and losing it from the cache costs one refetch, not a decision.
+		_ = client.Cache.Put(ctx, candidate)
+	}
+}
+
 // marketClient builds the relay client the market commands use.
 func marketClient() *nostr.Client {
 	return &nostr.Client{

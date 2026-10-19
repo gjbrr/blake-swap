@@ -9,6 +9,8 @@ import (
 	"testing"
 
 	"github.com/gjbrr/blake-swap/pkg/event"
+	"github.com/gjbrr/blake-swap/pkg/marketflow"
+	"github.com/gjbrr/blake-swap/pkg/nostr"
 )
 
 // TestCacheDirectoryMatchesTheReferenceStateTree: the event cache is shared state.
@@ -78,5 +80,44 @@ func TestDirCacheReadsAReferenceWrittenFile(t *testing.T) {
 		if _, ok := roundTripped[key]; !ok {
 			t.Fatalf("written cache file is missing %q:\n%s", key, raw)
 		}
+	}
+}
+
+// TestCacheMarketTakesRetainsOnlyAuthenticTakes: the cache keeps what a signature proved
+// and a take tag identified, and nothing else — matching the point in the reference's take
+// validator where retention happens, which is before protocol validity.
+func TestCacheMarketTakesRetainsOnlyAuthenticTakes(t *testing.T) {
+	dir := t.TempDir()
+
+	client := &nostr.Client{Cache: dirCache{dir: dir}}
+
+	take := event.Event{
+		ID:      strings.Repeat("aa", 32),
+		Kind:    event.KindTextNote,
+		Tags:    [][]string{{"t", marketflow.TakeTag}},
+		Content: `{"type":"market-take"}`,
+	}
+	offer := event.Event{
+		ID:      strings.Repeat("bb", 32),
+		Kind:    event.KindTextNote,
+		Tags:    [][]string{{"t", marketflow.MarketTag}},
+		Content: `{"type":"market-offer"}`,
+	}
+	notANote := event.Event{
+		ID:   strings.Repeat("cc", 32),
+		Kind: 7,
+		Tags: [][]string{{"t", marketflow.TakeTag}},
+	}
+
+	cacheMarketTakes(context.Background(), client, []event.Event{take, offer, notANote})
+
+	ids, err := client.Cache.IDs(context.Background())
+
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(ids) != 1 || ids[0] != take.ID {
+		t.Fatalf("cached ids = %v, want only the take", ids)
 	}
 }

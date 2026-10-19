@@ -332,11 +332,38 @@ func runList(ctx context.Context, engine *swap.Engine) error {
 		return nil
 	}
 
-	for _, record := range records {
-		fmt.Println(record.SwapID, record.State)
-	}
+	fmt.Print(renderSwapList(records))
 
 	return nil
+}
+
+// renderSwapList is the reference's list output.
+//
+// It prints one section per protocol role over the *same* directory, because a
+// participant's state tree is already participant-local: protocol Alice's and protocol
+// Bob's records of one participant live side by side, and the reference lists them twice
+// under both headings. That reads oddly, and it is what a drop-in replacement has to
+// print, because the two engines' outputs are compared by tests and by operators.
+func renderSwapList(records []*model.Swap) string {
+	var out strings.Builder
+
+	if len(records) == 0 {
+		return "No swaps.\n"
+	}
+
+	for _, role := range []string{"alice", "bob"} {
+		out.WriteString("\n")
+		out.WriteString(strings.ToUpper(role))
+		out.WriteString("\n")
+		out.WriteString(strings.Repeat("=", len(role)))
+		out.WriteString("\n")
+
+		for _, record := range records {
+			fmt.Fprintf(&out, "%s %s\n", record.SwapID, record.State)
+		}
+	}
+
+	return out.String()
 }
 
 func runStatus(ctx context.Context, engine *swap.Engine) error {
@@ -1531,49 +1558,84 @@ func isBoolFlag(flags *flag.FlagSet, name string) bool {
 }
 
 // printRecord renders one swap the way the reference CLI does, one fact per line.
+// printRecord prints one swap the way the reference does.
+//
+// The shape is the reference's, including its alignment: an operator reads this output
+// beside the Python engine's, and a field that moved or a label that shortened would make
+// the two impossible to compare.
 func printRecord(record *model.Swap) {
-	fmt.Println()
-	fmt.Println("ATOMIC SWAP")
-	fmt.Println("===========")
-	fmt.Println("swap id:      ", record.SwapID)
-	fmt.Println("state:        ", record.State)
-	fmt.Println("created:      ", record.CreatedAt)
-	fmt.Println("BLAKE amount: ", amount.Blake(record.BlakeAmountBaseUnits).Format())
-	fmt.Println("BTC sats:     ", record.BTCSats)
-	fmt.Println("secret hash:  ", record.SecretHash)
-
-	if record.SecretHex != nil {
-		fmt.Println("has secret:    yes")
-	}
-
-	if record.RevealedSecretHex != nil {
-		fmt.Println("revealed:      yes")
-	}
-
-	fmt.Println("BTC timeout:  ", record.BTCTimeout)
-	fmt.Println("BLAKE timeout:", record.BlakeTimeout)
-
-	printOutpoint("BLAKE funding", record.BlakeFundingTxID, record.BlakeFundingBlockHash)
-	printOutpoint("BTC funding", record.BTCFundingTxID, record.BTCFundingBlockHash)
-	printOutpoint("BTC claim", record.BTCCLaimTxID, record.BTCCLaimBlockHash)
-	printOutpoint("BLAKE claim", record.BlakeClaimTxID, record.BlakeClaimBlockHash)
-	printOutpoint("BTC refund", record.BTCRefundTxID, record.BTCRefundBlockHash)
-	printOutpoint("BLAKE refund", record.BlakeRefundTxID, record.BlakeRefundBlockHash)
-	fmt.Println()
+	fmt.Print(renderSwap(record))
 }
 
-func printOutpoint(label string, txid, blockHash *string) {
-	if txid == nil || *txid == "" {
-		return
+// renderSwap is the reference's print_swap, byte for byte.
+func renderSwap(record *model.Swap) string {
+	var out strings.Builder
+
+	secret := "None"
+
+	if record.SecretHex != nil {
+		secret = *record.SecretHex
 	}
 
-	fmt.Printf("%s: %s", label, *txid)
+	out.WriteString("\n")
+	out.WriteString("ATOMIC SWAP\n")
+	out.WriteString("===========\n")
+	fmt.Fprintf(&out, "swap id:        %s\n", record.SwapID)
+	fmt.Fprintf(&out, "state:          %s\n", record.State)
+	out.WriteString("\n")
+	out.WriteString("TRADE\n")
+	out.WriteString("-----\n")
+	fmt.Fprintf(&out, "BLAKE:          %s\n", pythonFloat(blakeFloat(record.BlakeAmount())))
+	fmt.Fprintf(&out, "BTC sats:       %d\n", record.BTCSats)
+	out.WriteString("\n")
+	out.WriteString("HASHLOCK\n")
+	out.WriteString("--------\n")
+	fmt.Fprintf(&out, "secret:         %s\n", secret)
+	fmt.Fprintf(&out, "SHA256:         %s\n", record.SecretHash)
+	out.WriteString("\n")
+	out.WriteString("TIMEOUTS\n")
+	out.WriteString("--------\n")
+	fmt.Fprintf(&out, "BTC timeout:    %d\n", record.BTCTimeout)
+	fmt.Fprintf(&out, "BLAKE timeout:  %d\n", record.BlakeTimeout)
 
-	if blockHash != nil && *blockHash != "" {
-		fmt.Printf(" (block %s)", *blockHash)
+	// The two CLTV heights are absolute heights on independent chains and have no
+	// ordering relationship; the v1.5 policy records the safety margins as wall-clock
+	// seconds, which is the only meaningful comparison. So the windows are printed and
+	// a height difference is not.
+	if record.TimeoutPolicyVersion != nil && *record.TimeoutPolicyVersion == "1.5" {
+		fmt.Fprintf(&out, "BTC window:     %d s\n", secondsOf(record.BTCTimeoutWindowSeconds))
+		fmt.Fprintf(&out, "Bob recovery:   %d s\n", secondsOf(record.BobRecoverySeconds))
+		fmt.Fprintf(&out, "BLAKE window:   %d s\n", secondsOf(record.BlakeTimeoutWindowSeconds))
 	}
 
-	fmt.Println()
+	out.WriteString("\n")
+	out.WriteString("TRANSACTIONS\n")
+	out.WriteString("------------\n")
+	fmt.Fprintf(&out, "BLAKE funding:  %s\n", txidOrDash(record.BlakeFundingTxID))
+	fmt.Fprintf(&out, "BTC funding:    %s\n", txidOrDash(record.BTCFundingTxID))
+	fmt.Fprintf(&out, "BTC claim:      %s\n", txidOrDash(record.BTCCLaimTxID))
+	fmt.Fprintf(&out, "BLAKE claim:    %s\n", txidOrDash(record.BlakeClaimTxID))
+
+	return out.String()
+}
+
+// secondsOf reads an optional seconds field, treating absent as zero.
+func secondsOf(value *int64) int64 {
+	if value == nil {
+		return 0
+	}
+
+	return *value
+}
+
+// txidOrDash renders a transaction id the way the reference does: a dash when there is
+// none, so the column stays readable.
+func txidOrDash(value *string) string {
+	if value == nil || *value == "" {
+		return "-"
+	}
+
+	return *value
 }
 
 func chainSuffix(ch chain.Chain) string {

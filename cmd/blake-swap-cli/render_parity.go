@@ -516,24 +516,26 @@ func runClaim(
 
 	fmt.Print(renderClaimBanner(label))
 
-	verified, err := check(ctx, args[0])
-
-	if err != nil {
-		return err
-	}
-
-	if ch == chain.Blake {
-		fmt.Print(renderVerifyBlake(verified))
-	} else {
-		fmt.Print(renderVerifyBTC(verified, record))
-	}
-
-	fmt.Print("\n")
-
 	input := record.BTCSats
 
 	if ch == chain.Blake {
 		input = record.BlakeAmountBaseUnits
+	}
+
+	//
+	// The verification is printed, not required: a second claim after a broadcast
+	// finds the HTLC spent by the transaction already recorded, and the engine's own
+	// branch proof is what decides whether that is this claim. Gating here would
+	// refuse a participant the settlement it made itself.
+	//
+	if verified, err := check(ctx, args[0]); err == nil {
+		if ch == chain.Blake {
+			fmt.Print(renderVerifyBlake(verified))
+		} else {
+			fmt.Print(renderVerifyBTC(verified, record))
+		}
+
+		fmt.Print("\n")
 	}
 
 	result, err := claim(ctx, args[0])
@@ -554,7 +556,7 @@ func runClaim(
 	return nil
 }
 
-// renderPending is the reference's block for a settlement still in the mempool.
+// renderPending is the reference's block for a claim still in the mempool.
 func renderPending(label string, result *swap.SettlementResult) string {
 	header := label + " CLAIM PENDING"
 
@@ -562,6 +564,19 @@ func renderPending(label string, result *swap.SettlementResult) string {
 		"txid:  " + result.TxID + "\n" +
 		"block:  pending\n" +
 		"state: " + string(result.State) + "\n"
+}
+
+// renderRefundBroadcast is the reference's block for a refund it has just sent and
+// that has not confirmed yet.
+func renderRefundBroadcast(label string, result *swap.SettlementResult) string {
+	header := label + " REFUND BROADCAST"
+
+	return "\n" + header + "\n" + strings.Repeat("=", len(header)) + "\n" +
+		"txid:   " + result.TxID + "\n" +
+		"block:  pending\n" +
+		"state: " + string(result.State) + "\n" +
+		"\n" +
+		labelTitle(label) + " refund is awaiting active-chain confirmation.\n"
 }
 
 // renderRefundPublished is the reference's publish confirmation for a refund.
@@ -712,7 +727,7 @@ func runRefund(
 	fmt.Print("\n")
 
 	if result.Pending {
-		fmt.Print(renderPending(label, result))
+		fmt.Print(renderRefundBroadcast(label, result))
 
 		return nil
 	}

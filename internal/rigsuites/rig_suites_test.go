@@ -328,6 +328,7 @@ func TestPreBTCRefundSuite(t *testing.T) {
 
 	if strings.Contains(output, "BLAKE_FUNDED") {
 		r.Mine(t, "blake", alice.Role, 1)
+
 		r.Run(t, alice, messages, "refund-blake", id)
 
 		after, _ := rigtest.RecordField(t, alice, id, "blake_refund_txid")

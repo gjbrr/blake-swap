@@ -27,6 +27,7 @@ import (
 	"github.com/gjbrr/blake-swap/pkg/model"
 	"github.com/gjbrr/blake-swap/pkg/nostr"
 	"github.com/gjbrr/blake-swap/pkg/reconcile"
+	"github.com/gjbrr/blake-swap/pkg/state"
 	"github.com/gjbrr/blake-swap/pkg/store"
 	"github.com/gjbrr/blake-swap/pkg/swap"
 )
@@ -1122,11 +1123,18 @@ func runNext(ctx context.Context, engine *swap.Engine, args []string) error {
 	return nil
 }
 
-// runResume performs the recommended action once.
+// runResume finds the one swap with a live automatic path and hands it to the driver.
+//
+// It is a discovery command, not a settlement command: the reference scans this
+// participant's records, reconciles each one, and refuses to guess when more than one swap
+// could be resumed. What it hands the swap to is the autonomous driver, so `resume` and
+// `run` cannot disagree about what to do next — the protocol has one decision table and this
+// is not a second one.
 func runResume(ctx context.Context, engine *swap.Engine, args []string) error {
 	flags := flag.NewFlagSet("resume", flag.ContinueOnError)
 
 	feeRate := flags.String("fee-rate", "", "settlement feerate in sat/vB")
+	maxSteps := flags.Int("max-steps", 6, "maximum reconcile/action cycles for the driver")
 
 	positional, err := parsePositional(flags, args, 1)
 
@@ -1134,34 +1142,321 @@ func runResume(ctx context.Context, engine *swap.Engine, args []string) error {
 		return err
 	}
 
-	if len(positional) < 1 {
-		return errors.New("resume requires a swap id")
+	if *maxSteps < 1 || *maxSteps > 20 {
+		return errors.New("--max-steps must be between 1 and 20")
 	}
 
 	if err := pinFeeRate(engine, *feeRate); err != nil {
 		return err
 	}
 
-	result, err := engine.Resume(ctx, positional[0])
+	key, err := engineKey(engine)
 
 	if err != nil {
 		return err
 	}
 
-	fmt.Println("swap id:", result.SwapID)
-	fmt.Println("next action:", result.Action)
-	fmt.Println("class:", result.Class)
-	fmt.Println("reason:", result.Reason)
+	me := key.PublicKey()
 
-	if result.Performed {
-		fmt.Println("performed: yes")
-		fmt.Println("txid:", result.TxID)
-		fmt.Println("state:", result.State)
-	} else {
-		fmt.Println("performed: no")
+	// The prefix is validated before the scan: a three-character prefix must be reported as
+	// too short even when the state root is empty, which is the difference between a typo
+	// and "no swap matches".
+	explicit := ""
+
+	if len(positional) > 0 {
+		explicit, err = resumePrefix(positional[0])
+
+		if err != nil {
+			return err
+		}
 	}
 
-	return nil
+	records, err := engine.List(ctx)
+
+	if err != nil {
+		return err
+	}
+
+	var resumable, attention []resumeItem
+
+	for _, record := range records {
+		if !isParty(record, me) {
+			continue
+		}
+
+		if explicit != "" && !strings.HasPrefix(record.SwapID, explicit) {
+			continue
+		}
+
+		report, err := engine.Reconcile(ctx, record.SwapID)
+
+		if err != nil {
+			attention = append(attention, resumeItem{
+				record: record,
+				reason: "reconciliation failed during discovery: " + err.Error(),
+				failed: true,
+			})
+
+			continue
+		}
+
+		item := resumeItem{
+			record: record,
+			class:  report.DecisionClass,
+			action: report.NextAction,
+			reason: report.Reason,
+		}
+
+		if report.DecisionClass == reconcile.ClassManualAttention {
+			attention = append(attention, item)
+
+			continue
+		}
+
+		resumable = append(resumable, item)
+	}
+
+	if explicit != "" {
+		return resumeOne(ctx, engine, explicit, resumable, attention, *maxSteps)
+	}
+
+	if len(resumable) == 0 {
+		fmt.Print(renderNoResumable(attention))
+
+		return nil
+	}
+
+	if len(resumable) > 1 {
+		fmt.Print(renderMultipleResumable(resumable, attention))
+
+		return nil
+	}
+
+	return handOverToDriver(ctx, engine, resumable[0], attention, *maxSteps)
+}
+
+// resumePrefix validates the optional swap-id prefix.
+//
+// The reference's minimum is four characters, and the check happens before the scan: a
+// three-character prefix must be reported as too short even when the state root is empty,
+// which is the difference between a typo and "no swap matches".
+func resumePrefix(raw string) (string, error) {
+	value := strings.ToLower(strings.TrimSpace(raw))
+
+	if value == "" {
+		return "", nil
+	}
+
+	if len(value) < 4 {
+		return "", errors.New("swap ID prefix is too short; use at least 4 characters")
+	}
+
+	return value, nil
+}
+
+// shouldHandOff reports whether a classified swap goes to the driver.
+//
+// A manual-attention swap, or one whose report could not be built, is not a candidate: the
+// driver would only refuse it, and a command that says "resuming" and then refuses is worse
+// than one that refuses.
+func shouldHandOff(item resumeItem) bool {
+	return !item.failed && item.class != reconcile.ClassManualAttention
+}
+
+// resumeItem is one swap the resume scan classified.
+type resumeItem struct {
+	record *model.Swap
+	class  reconcile.Class
+	action reconcile.Action
+	reason string
+	failed bool
+}
+
+// resumeOne handles an explicit prefix.
+func resumeOne(
+	ctx context.Context,
+	engine *swap.Engine,
+	prefix string,
+	resumable, attention []resumeItem,
+	maxSteps int,
+) error {
+	matches := append(append([]resumeItem{}, resumable...), attention...)
+
+	if len(matches) == 0 {
+		// A terminal swap is deliberately out of the live queue, but an explicit prefix
+		// should still answer for it rather than claim it does not exist.
+		terminal, err := engine.List(ctx)
+
+		if err != nil {
+			return err
+		}
+
+		var settled []*model.Swap
+
+		for _, record := range terminal {
+			if !strings.HasPrefix(record.SwapID, prefix) {
+				continue
+			}
+
+			if record.State == state.Complete || record.State == state.BlakeRefunded {
+				settled = append(settled, record)
+			}
+		}
+
+		switch len(settled) {
+		case 0:
+			return fmt.Errorf("No live local swap matches prefix '%s'", prefix)
+		case 1:
+			fmt.Print(renderTerminal(settled[0]))
+
+			return nil
+		}
+
+		return fmt.Errorf(
+			"More than one terminal local swap matches prefix '%s'; use a longer prefix", prefix,
+		)
+	}
+
+	if len(matches) > 1 {
+		fmt.Print(renderAmbiguousResume(matches))
+
+		return errors.New("Swap prefix is ambiguous; use more characters")
+	}
+
+	item := matches[0]
+
+	if !shouldHandOff(item) {
+		fmt.Print(renderResumeAttention(item))
+
+		return nil
+	}
+
+	return handOverToDriver(ctx, engine, item, nil, maxSteps)
+}
+
+// handOverToDriver prints what is about to happen and runs the driver.
+func handOverToDriver(
+	ctx context.Context, engine *swap.Engine, item resumeItem, attention []resumeItem, maxSteps int,
+) error {
+	fmt.Print(renderResuming(item, attention))
+
+	args := []string{item.record.SwapID, "--max-steps", strconv.Itoa(maxSteps)}
+
+	return runDriver(ctx, engine, args)
+}
+
+// renderNoResumable is what an empty resume queue prints.
+func renderNoResumable(attention []resumeItem) string {
+	out := "\nNO RESUMABLE SWAPS\n" +
+		"==================\n" +
+		"No swap currently has an automatic recovery, settlement, or waiting path.\n"
+
+	if len(attention) > 0 {
+		out += "\nNEEDS MANUAL ATTENTION\n" +
+			"======================\n"
+
+		for _, item := range attention {
+			out += item.record.SwapID + "  " + string(item.record.State) + "  " + item.reason + "\n"
+		}
+	}
+
+	return out
+}
+
+// renderMultipleResumable refuses to guess which swap the operator meant.
+func renderMultipleResumable(resumable, attention []resumeItem) string {
+	out := "\nMULTIPLE ACTIVE SWAPS\n" +
+		"=====================\n" +
+		"More than one swap has a live automatic path.\n" +
+		"Refusing to guess which one you intend to resume.\n" +
+		"\n" +
+		"Swap          State             Next\n" +
+		"------------  ----------------  ----------------\n"
+
+	for _, item := range resumable {
+		out += padRight(item.record.SwapID, 12) + "  " +
+			padRight(string(item.record.State), 16) + "  " +
+			padRight(string(item.action), 16) + "\n"
+	}
+
+	if len(attention) > 0 {
+		out += "\nOther records needing manual attention:\n"
+
+		for _, item := range attention {
+			out += "  " + item.record.SwapID + "  " + string(item.record.State) + "\n"
+		}
+	}
+
+	out += "\nRun `resume <short-swap-prefix>` for the active swap you want.\n"
+
+	return out
+}
+
+// renderResuming names the swap and the action before the driver starts.
+func renderResuming(item resumeItem, attention []resumeItem) string {
+	out := "\nRESUMING SWAP\n" +
+		"=============\n" +
+		"swap:        " + item.record.SwapID + "\n" +
+		"checkpoint:  " + string(item.record.State) + "\n" +
+		"next:        " + string(item.action) + "\n"
+
+	if len(attention) > 0 {
+		out += fmt.Sprintf(
+			"\nNOTE: %d unrelated record(s) need manual attention but do not block this swap.\n",
+			len(attention),
+		)
+	}
+
+	out += "\nHanding this swap to the existing autonomous driver.\n\n"
+
+	return out
+}
+
+// renderResumeAttention refuses to hand a manual-attention swap to the driver.
+func renderResumeAttention(item resumeItem) string {
+	return "\nMANUAL ATTENTION REQUIRED\n" +
+		"=========================\n" +
+		"swap:   " + item.record.SwapID + "\n" +
+		"state:  " + string(item.record.State) + "\n" +
+		"reason: " + item.reason + "\n" +
+		"\n" +
+		"Refusing to hand a manual-attention swap to the autonomous runner.\n"
+}
+
+// renderAmbiguousResume lists the candidates a prefix matched.
+func renderAmbiguousResume(matches []resumeItem) string {
+	out := "\nAMBIGUOUS SWAP PREFIX\n" +
+		"=====================\n"
+
+	for _, item := range matches {
+		out += item.record.SwapID + " " + string(item.class) + " " + string(item.action) + "\n"
+	}
+
+	return out
+}
+
+// renderTerminal answers for a swap that is already finished.
+func renderTerminal(record *model.Swap) string {
+	title, underline := "SWAP ALREADY SETTLED", "===================="
+
+	if record.State == state.BlakeRefunded {
+		title, underline = "SWAP ALREADY REFUNDED", "====================="
+	}
+
+	return "\n" + title + "\n" + underline + "\n" +
+		"swap:  " + record.SwapID + "\n" +
+		"state: " + string(record.State) + "\n" +
+		"\n" +
+		"No action required.\n"
+}
+
+// padRight pads a value to a column width.
+func padRight(value string, width int) string {
+	for len(value) < width {
+		value += " "
+	}
+
+	return value
 }
 
 // runWatchHTLC records the HTLC in the watch-only wallet.

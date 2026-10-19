@@ -177,6 +177,16 @@ jobs:
           tinygo version
           make wasm
 
+          #
+          # And then the packages where the browser build differs from the host in a way
+          # a compile cannot show: secp256k1, Schnorr and ECDH come from a dependency with
+          # tinygo/wasm build-tagged variants, so a host build exercises the amd64 assembly
+          # while the browser runs the pure-Go field and group code. Signing the BIP-340
+          # vectors and encrypting a NIP-44 payload are the operations that would silently
+          # differ, so they are run in the target they run in for real.
+          #
+          tinygo test -target=wasm ./pkg/keys ./pkg/event ./pkg/nostr ./pkg/nip44 ./pkg/coord
+
       - name: Parity manifest
         run: |
           set -euo pipefail

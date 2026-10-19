@@ -163,7 +163,7 @@ Every Python suite, and the Go package whose tests cover the same ground where o
 | `driver_policy_tests.py` | — | pending |
 | `dynamic_settlement_builder_tests.py` | — | pending |
 | `fail_closed_tests.py` | `pkg/htlc` | partial |
-| `fee_policy_tests.py` | — | pending |
+| `fee_policy_tests.py` | `pkg/fees` | partial |
 | `htlc_key_recovery_tests.py` | — | pending |
 | `implementation_adapter_tests.py` | `pkg/adapter` | partial |
 | `installed_wheel_tests.py` | — | pending |

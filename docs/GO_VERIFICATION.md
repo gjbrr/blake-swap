@@ -61,6 +61,7 @@ Run on a live swap, in the same state tree, one implementation after the other:
 | `dashboard` and `--json` | identical |
 | `resume` and `resume PREFIX` | identical |
 | `run SWAP` | identical |
+| `status` | identical |
 | `market`, `market-state`, `market-state --json` | identical on live relay evidence |
 
 Three divergences are deliberate and are recorded in
@@ -94,7 +95,7 @@ the reference's eight default schedules (seeds 4, 17, 184467, 20261004 × claim/
 
 Recorded here rather than left to be inferred from the manifest:
 
-- **26 of the 60 reference suites are not mapped to a Go replacement.** Most are rig-driven
+- **25 of the 60 reference suites are not mapped to a Go replacement.** Most are rig-driven
   integration suites — the settlement crash, fault, race and recovery matrices, the isolated
   full-chain swap, the reorg and peer-recovery suites, the banned/adversarial schedulers — that
   drive a full two-chain swap with injected faults. Their Go counterparts would be integration

@@ -6,7 +6,7 @@ It records what replaces each part of the Python engine in Go, and what has not 
 
 Statuses: **ported** (behaviour and tests), **partial** (in progress), **pending** (not started).
 
-## Modules (27/33 ported)
+## Modules (27/34 ported)
 
 | Python | Go | Status | Contents |
 |---|---|---|---|
@@ -41,6 +41,7 @@ Statuses: **ported** (behaviour and tests), **partial** (in progress), **pending
 | `(new)` | `pkg/proxy` | ported | the node RPC proxy: credentials stay server-side, the method allowlist and a per-address rate limit are the boundary |
 | `(new)` | `pkg/worker` | partial | the browser worker's domains: the event loop, the encrypted-state domain, the read-only engine domain it drives through the app server's proxy, and the command dispatcher |
 | `(new)` | `pkg/client` | partial | the browser client's encrypted state: a store.Store whose records are sealed with a passphrase-derived key before they reach IndexedDB, with a pluggable entropy source |
+| `src/swap_v2.py (seeded adversarial corpus scheduler)` | `pkg/adversary` | partial | the corpus's language-independent scheduler: the documented SHA-256 derivation, the stage vocabulary it chooses at, the fault profiles, and the rule that no seed may degenerate into the happy path; replaying the generated events against a live pair remains the reference harness's |
 | `(new)` | `pkg/adapter` | partial | the portable participant interface `blake-swap-adapter-v1`: capabilities, role-pinned commands and the portable state projection, served one JSON request per process; the pair orchestration and seeded scenario scheduling remain the reference harness's |
 | `(new)` | `pkg/platform` | ported | the platform seams: clock, console, durable KV, a relay WebSocket and a JSON-RPC transport, each with a browser implementation (IndexedDB, WebSocket, fetch) and a host one (memory or files, TCP socket, HTTP POST) |
 
@@ -79,6 +80,7 @@ Statuses: **ported** (behaviour and tests), **partial** (in progress), **pending
 | `run_chain_cli`, `chain_dispatch` | `Proxy`, `Config`, `Endpoint`, `DefaultAllowlist` | `pkg/proxy` |
 | — | `NewVaultDomain`, `Domain`, `Chans` | `pkg/worker` |
 | `load_swap`, `save_swap`, `atomic_write_json` | `Encrypted`, `Create`, `Open`, `KV`, `Memory` | `pkg/client` |
+| `deterministic_schedule_choice`, `build_fault_schedule`, `DEFAULT_SEEDS` | `Choice`, `Build`, `Corpus`, `Schedule`, `DefaultSeeds`, `FaultProfiles`, `FaultVocabulary`, `Paths` | `pkg/adversary` |
 | `PARTICIPANT_ADAPTER_SURFACE`, `PythonParticipantAdapter`, `SwapImplementationPair` | `Capabilities`, `Handle`, `PortableState`, `Decode`, `Encode`, `Protocol`, `Operations`, `Roles`, `PortableFields` | `pkg/adapter` |
 | `chain_dispatch`, `nostr_publish_event_to_relay` | `KV`, `Clock`, `Console`, `HTTP`, `IndexedDB`, `WebSocket`, `Fetch`, `MemoryKV`, `DialWebSocket`, `NewTransport` | `pkg/platform` |
 
@@ -153,14 +155,14 @@ Every Python suite, and the Go package whose tests cover the same ground where o
 
 | Python suite | Go | Status |
 |---|---|---|
-| `agent_policy_tests.py` | — | pending |
+| `agent_policy_tests.py` | `pkg/agent` | partial |
 | `blake_amount_tests.py` | `pkg/amount` | partial |
 | `btc_dynamic_settlement_tests.py` | — | pending |
 | `chain_cli_transport_tests.py` | — | pending |
 | `cli_wiring_tests.py` | — | pending |
 | `command_surface_tests.py` | — | pending |
 | `docs_alignment_tests.py` | — | pending |
-| `driver_policy_tests.py` | — | pending |
+| `driver_policy_tests.py` | `cmd/blake-swap-cli` | partial |
 | `dynamic_settlement_builder_tests.py` | — | pending |
 | `fail_closed_tests.py` | `pkg/htlc` | partial |
 | `fee_policy_tests.py` | `pkg/fees` | partial |
@@ -178,7 +180,7 @@ Every Python suite, and the Go package whose tests cover the same ground where o
 | `production_settlement_pending_tests.py` | — | pending |
 | `schema_equality_tests.py` | `pkg/coord` | partial |
 | `security_conformance_tests.py` | — | pending |
-| `swap_autonomous_agents_tests.py` | — | pending |
+| `swap_autonomous_agents_tests.py` | `pkg/agent` | partial |
 | `swap_bounded_scan_tests.py` | — | pending |
 | `swap_chain_autonomy_tests.py` | — | pending |
 | `swap_cross_impl_accept_tests.py` | — | pending |
@@ -204,7 +206,7 @@ Every Python suite, and the Go package whose tests cover the same ground where o
 | `swap_reorg_safety_tests.py` | — | pending |
 | `swap_resume_step_budget_tests.py` | — | pending |
 | `swap_reverse_market_flow_tests.py` | — | pending |
-| `swap_seeded_adversarial_tests.py` | — | pending |
+| `swap_seeded_adversarial_tests.py` | `pkg/adversary` | partial |
 | `swap_settlement_crash_matrix_tests.py` | — | pending |
 | `swap_settlement_fault_matrix_tests.py` | — | pending |
 | `swap_settlement_race_tests.py` | — | pending |

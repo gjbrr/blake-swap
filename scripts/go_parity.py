@@ -446,6 +446,13 @@ MODULES: list[Module] = [
         ["load_swap", "save_swap", "atomic_write_json"],
     ),
     Module(
+        "src/swap_v2.py (seeded adversarial corpus scheduler)", "pkg/adversary", "partial",
+        "the corpus's language-independent scheduler: the documented SHA-256 derivation, the stage vocabulary it chooses at, the fault profiles, and the rule that no seed may degenerate into the happy path; replaying the generated events against a live pair remains the reference harness's",
+        ["Choice", "Build", "Corpus", "Schedule", "DefaultSeeds", "FaultProfiles", "FaultVocabulary",
+         "Paths"],
+        ["deterministic_schedule_choice", "build_fault_schedule", "DEFAULT_SEEDS"],
+    ),
+    Module(
         "(new)", "pkg/adapter", "partial",
         "the portable participant interface `blake-swap-adapter-v1`: capabilities, role-pinned commands and the portable state projection, served one JSON request per process; the pair orchestration and seeded scenario scheduling remain the reference harness's",
         ["Capabilities", "Handle", "PortableState", "Decode", "Encode", "Protocol", "Operations", "Roles",
@@ -479,6 +486,10 @@ class Suite:
 SUITE_REPLACEMENTS: dict[str, tuple[str, str]] = {
     "implementation_adapter_tests.py": ("pkg/adapter", "partial"),
     "moxie_adapter_smoke_tests.py": ("pkg/adapter", "partial"),
+    "swap_seeded_adversarial_tests.py": ("pkg/adversary", "partial"),
+    "swap_autonomous_agents_tests.py": ("pkg/agent", "partial"),
+    "agent_policy_tests.py": ("pkg/agent", "partial"),
+    "driver_policy_tests.py": ("cmd/blake-swap-cli", "partial"),
 }
 
 
@@ -647,14 +658,12 @@ def check() -> int:
     }
 
     #
-    # The participant adapter lives beside its suites rather than in src/, because it is a
-    # test-facing boundary. It is still a Python module the manifest anchors on, so it is
-    # read here rather than being claimed without a source.
+    # Some contracts live beside the suites rather than in src/: the participant adapter and
+    # the seeded corpus scheduler are test-facing boundaries, and both are Python modules the
+    # manifest anchors on. They are read here rather than being claimed without a source.
     #
-    adapter_module = TESTS / "swap_impl_adapter.py"
-
-    if adapter_module.is_file():
-        python[adapter_module.name] = python_defs(adapter_module)
+    for extra in sorted(TESTS.glob("*.py")):
+        python[extra.name] = python_defs(extra)
 
     for module in MODULES:
         package = module.go.split(" ")[0].removeprefix("pkg/")

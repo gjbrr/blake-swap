@@ -1156,3 +1156,36 @@ func WalletReady(t *testing.T, r *Rig) {
 		}
 	}
 }
+
+// BestBlockHash is one chain's active tip hash.
+func (r *Rig) BestBlockHash(t *testing.T, which string) string {
+	t.Helper()
+
+	return strings.TrimSpace(r.Node(t, which, "getbestblockhash"))
+}
+
+// InvalidateBlock disconnects one block and everything after it.
+//
+// It returns a function that reconnects the chain, so a test can defer the
+// restoration and cannot leave the rig on a stale fork.
+func (r *Rig) InvalidateBlock(t *testing.T, which, blockHash string) (restore func()) {
+	t.Helper()
+
+	r.Node(t, which, "invalidateblock", blockHash)
+
+	restored := false
+
+	restore = func() {
+		if restored {
+			return
+		}
+
+		restored = true
+
+		r.Node(t, which, "reconsiderblock", blockHash)
+	}
+
+	t.Cleanup(restore)
+
+	return restore
+}

@@ -3,6 +3,7 @@ package amount
 import (
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 )
 
@@ -22,11 +23,14 @@ type Coin string
 
 // UnmarshalJSON accepts a quoted or a bare decimal amount.
 //
-// A bare JSON number is only accepted when it is a plain decimal: digits with
-// at most one decimal point and an optional sign. Exponents and the JSON
-// non-numbers are refused, because the node never writes them and a parser
-// that guessed at them could silently read a different amount than the one on
-// the wire.
+// A node writes an amount in one of two shapes: a plain decimal, or -- for a
+// small enough value -- a JSON number in exponent notation. Core really does
+// print `1.13e-06` for a 113-satoshi output, so refusing exponents would refuse a
+// real answer, and reading one through a float would lose the exact amount.
+//
+// Exponent notation is therefore expanded into a plain decimal by moving the
+// point, digit by digit, and then parsed by the same exact path as every other
+// amount. Nothing is rounded and nothing goes through a float.
 func (c *Coin) UnmarshalJSON(data []byte) error {
 	text := strings.TrimSpace(string(data))
 
@@ -44,22 +48,123 @@ func (c *Coin) UnmarshalJSON(data []byte) error {
 			return fmt.Errorf("amount %s: %w", text, err)
 		}
 
+		expanded, err := expandExponent(quoted)
+
+		if err != nil {
+			return err
+		}
+
 		// Quoting is not a way around the shape check: a node's string
 		// amounts have the same digits as its numeric ones.
-		if !isPlainDecimal(quoted) {
+		if !isPlainDecimal(expanded) {
 			return fmt.Errorf("amount %q is not a plain decimal number", quoted)
 		}
 
-		*c = Coin(quoted)
+		*c = Coin(expanded)
 
 		return nil
-	case !isPlainDecimal(text):
+	}
+
+	expanded, err := expandExponent(text)
+
+	if err != nil {
+		return err
+	}
+
+	if !isPlainDecimal(expanded) {
 		return fmt.Errorf("amount %q is not a plain decimal number", text)
 	}
 
-	*c = Coin(text)
+	*c = Coin(expanded)
 
 	return nil
+}
+
+// expandExponent rewrites exponent notation as a plain decimal.
+//
+// `1.13e-06` becomes `0.00000113`: the digits are moved, never rounded, so the
+// value that reaches Sats is exactly the one the node sent.
+func expandExponent(text string) (string, error) {
+	if !strings.ContainsAny(text, "eE") {
+		return text, nil
+	}
+
+	mantissa := text
+	exponent := 0
+
+	if index := strings.IndexAny(text, "eE"); index >= 0 {
+		mantissa = text[:index]
+
+		parsed, err := strconv.Atoi(strings.TrimSpace(text[index+1:]))
+
+		if err != nil {
+			return "", fmt.Errorf("amount %q has an unreadable exponent", text)
+		}
+
+		exponent = parsed
+	}
+
+	sign := ""
+
+	switch {
+	case strings.HasPrefix(mantissa, "-"):
+		sign = "-"
+		mantissa = mantissa[1:]
+	case strings.HasPrefix(mantissa, "+"):
+		mantissa = mantissa[1:]
+	}
+
+	integer := mantissa
+	fraction := ""
+
+	if index := strings.IndexByte(mantissa, '.'); index >= 0 {
+		integer = mantissa[:index]
+		fraction = mantissa[index+1:]
+	}
+
+	for _, part := range []string{integer, fraction} {
+		for _, digit := range part {
+			if digit < '0' || digit > '9' {
+				return "", fmt.Errorf("amount %q is not a decimal number", text)
+			}
+		}
+	}
+
+	digits := integer + fraction
+	point := len(integer) + exponent
+
+	// A point at or before the first digit needs leading zeros; past the last
+	// digit needs trailing zeros. Both are the same move of the point.
+	switch {
+	case point <= 0:
+		digits = strings.Repeat("0", 1-point) + digits
+		point = 1
+	case point > len(digits):
+		digits += strings.Repeat("0", point-len(digits))
+	}
+
+	whole := digits[:point]
+	part := digits[point:]
+
+	whole = strings.TrimLeft(whole, "0")
+
+	if whole == "" {
+		whole = "0"
+	}
+
+	part = strings.TrimRight(part, "0")
+
+	expanded := whole
+
+	if part != "" {
+		expanded += "." + part
+	}
+
+	if sign == "-" && expanded != "0" {
+		expanded = "-" + expanded
+	}
+
+	return expanded, nil
 }
 
 // MarshalJSON writes an amount back as a quoted decimal string.

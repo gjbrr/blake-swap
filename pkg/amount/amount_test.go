@@ -6,6 +6,7 @@ import (
 	"github.com/gjbrr/blake-swap/pkg/decimal"
 )
 
+// Parity: tests/blake_amount_tests.py
 func TestParseBlakeExact(t *testing.T) {
 	cases := map[string]int64{
 		"0.00000001":  1,

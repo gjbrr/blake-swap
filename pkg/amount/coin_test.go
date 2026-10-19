@@ -59,13 +59,14 @@ func TestCoinRefusesNegativeAmounts(t *testing.T) {
 }
 
 // TestCoinRefusesWhatTheNodeNeverWrites keeps the exactness claim honest: if a
-// float-shaped amount ever reached this type it would be read as a different
+// shape that is not a decimal reached this type it could be read as a different
 // number than the one on the wire.
+//
+// Exponent notation is not in this list: Core writes it for small amounts, and
+// TestCoinAcceptsExponentNotationFromTheNode pins that it is expanded exactly
+// rather than silently refused or read as a float.
 func TestCoinRefusesWhatTheNodeNeverWrites(t *testing.T) {
 	for _, input := range []string{
-		`1e-05`,       // an exponent hides the digit positions
-		`1E5`,         //
-		`"1e-05"`,     // quoting is not an excuse to pass the check
 		`NaN`,         // not a JSON number at all
 		`Infinity`,    //
 		`0x10`,        // hex is a different number
@@ -74,6 +75,9 @@ func TestCoinRefusesWhatTheNodeNeverWrites(t *testing.T) {
 		`""`,          // a node never reports an empty amount
 		`true`,        // a boolean is not an amount
 		`{"value":1}`, // an object is not an amount
+		`1e`,          // an exponent with no value
+		`e-6`,         // no mantissa
+		`1.2e-6.5`,    // a fractional exponent is not a number
 	} {
 		t.Run(input, func(t *testing.T) {
 			var coin Coin
@@ -167,5 +171,62 @@ func TestCoinRoundTripsAsString(t *testing.T) {
 
 	if sats != 10000 {
 		t.Fatalf("round trip lost value: %d sats", sats)
+	}
+}
+
+// TestCoinAcceptsExponentNotationFromTheNode: Bitcoin Core writes a small enough
+// amount as a JSON number in exponent notation. `1.13e-06` is 113 satoshis, and a
+// parser that refused it would refuse a real answer; one that read it as a float
+// would read it as a different amount.
+func TestCoinAcceptsExponentNotationFromTheNode(t *testing.T) {
+	cases := map[string]int64{
+		"1.13e-06":       113,
+		"1.13E-6":        113,
+		"2.1e-05":        2100,
+		"1e-08":          1,
+		"5e-08":          5,
+		"0.00000001":     1,
+		"1.5":            150000000,
+		"0e-8":           0,
+		"0.0":            0,
+		"2.1e+5":         21000000000000,
+		`"1.13e-06"`:     113,
+		"1.00000000e+00": 100000000,
+	}
+
+	for text, want := range cases {
+		var coin Coin
+
+		if err := json.Unmarshal([]byte(text), &coin); err != nil {
+			t.Errorf("%s: %v", text, err)
+
+			continue
+		}
+
+		sats, err := coin.Sats()
+
+		if err != nil {
+			t.Errorf("%s: %v", text, err)
+
+			continue
+		}
+
+		if int64(sats) != want {
+			t.Errorf("%s = %d sats, want %d", text, sats, want)
+		}
+	}
+}
+
+// TestCoinRefusesWhatIsNotADecimal keeps the parser strict about everything the
+// node does not write.
+func TestCoinRefusesWhatIsNotADecimal(t *testing.T) {
+	for _, text := range []string{
+		"NaN", "Infinity", "1.2.3", "0x10", "1e", "e-6", "1.2e-6.5", "1,5", "  ",
+	} {
+		var coin Coin
+
+		if err := json.Unmarshal([]byte(text), &coin); err == nil {
+			t.Errorf("%q was accepted as %q", text, coin)
+		}
 	}
 }

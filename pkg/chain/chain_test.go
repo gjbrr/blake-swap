@@ -257,7 +257,31 @@ func TestRigTxOut(t *testing.T) {
 	}
 
 	// A mature coinbase output is unspent.
-	out, err := node.TxOut(ctx, tx.TxID, 0)
+	//
+	// The output to sample is the one carrying the subsidy: a segwit block's
+	// coinbase also carries a zero-value witness commitment, and which index that
+	// lands in is the node's business, not this test's.
+	index := int64(-1)
+
+	for _, output := range tx.Vout {
+		value, err := output.Value.Sats()
+
+		if err != nil {
+			t.Fatalf("output %d: %v", output.N, err)
+		}
+
+		if int64(value) > 0 {
+			index = output.N
+
+			break
+		}
+	}
+
+	if index < 0 {
+		t.Skip("the sampled coinbase pays nothing at all")
+	}
+
+	out, err := node.TxOut(ctx, tx.TxID, index)
 
 	if err != nil {
 		t.Fatal(err)

@@ -132,15 +132,7 @@ func Validate(swapID, kind string, body map[string]any, allowInternal bool) erro
 		)
 	}
 
-	view := make(map[string]any, len(body))
-
-	for key, value := range body {
-		if strings.HasPrefix(key, "_") {
-			continue
-		}
-
-		view[key] = value
-	}
+	view := WireView(body)
 
 	expected := wire.Kind(kind)
 
@@ -152,6 +144,26 @@ func Validate(swapID, kind string, body map[string]any, allowInternal bool) erro
 	}
 
 	return nil
+}
+
+// WireView is a message without its engine-internal annotations.
+//
+// The receive path attaches the authenticated sender as `_nostr_pubkey`, and the file
+// envelope carries its own underscore keys. Those are transport bookkeeping rather than
+// protocol content, so the canonical schema is applied to the message without them — a key
+// is internal exactly when it begins with an underscore, and no wire field does.
+func WireView(body map[string]any) map[string]any {
+	view := make(map[string]any, len(body))
+
+	for key, value := range body {
+		if strings.HasPrefix(key, "_") {
+			continue
+		}
+
+		view[key] = value
+	}
+
+	return view
 }
 
 // sorted returns a copy of a string list in ascending order, so an error message

@@ -176,7 +176,7 @@ Every Python suite, and the Go package whose tests cover the same ground where o
 | `pre_btc_refund_tests.py` | — | pending |
 | `production_funding_pending_tests.py` | — | pending |
 | `production_settlement_pending_tests.py` | — | pending |
-| `schema_equality_tests.py` | — | pending |
+| `schema_equality_tests.py` | `pkg/coord` | partial |
 | `security_conformance_tests.py` | — | pending |
 | `swap_autonomous_agents_tests.py` | — | pending |
 | `swap_bounded_scan_tests.py` | — | pending |

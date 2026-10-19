@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -259,5 +260,219 @@ func TestRepeatAcceptMarketMatchRefusesDifferentTerms(t *testing.T) {
 		if !strings.Contains(err.Error(), "SECURITY FAILURE") {
 			t.Errorf("%s: refusal = %v", name, err)
 		}
+	}
+}
+
+// reverseSwap is the record a reverse import creates.
+func reverseSwap() *model.Swap {
+	alice, bob := strings.Repeat("44", 32), strings.Repeat("33", 32)
+	btcWindow, blakeWindow, recovery := int64(64_800), int64(79_200), int64(14_400)
+
+	return &model.Swap{
+		SwapID:                    "aaaa00000001",
+		State:                     "OFFERED",
+		SecretHash:                strings.Repeat("00", 32),
+		BlakeAmountBaseUnits:      12_500_000_000,
+		BTCSats:                   150_000,
+		BTCTimeout:                900,
+		BlakeTimeout:              800,
+		BTCTimeoutWindowSeconds:   &btcWindow,
+		BlakeTimeoutWindowSeconds: &blakeWindow,
+		BobRecoverySeconds:        &recovery,
+		NostrAlicePub:             &alice,
+		NostrBobPub:               &bob,
+	}
+}
+
+// TestRenderReverseMatchImportedMatchesTheReference pins the reverse import block,
+// including the window hours, which are the numbers a participant checks before funding.
+func TestRenderReverseMatchImportedMatchesTheReference(t *testing.T) {
+	matchID := strings.Repeat("ab", 32)
+	alice, bob := strings.Repeat("44", 32), strings.Repeat("33", 32)
+	record := reverseSwap()
+
+	got := renderReverseMatchImported(matchID, record, alice, bob)
+
+	want := "\nREVERSE MARKET MATCH IMPORTED\n" +
+		"=============================\n" +
+		"match id: " + matchID + "\n" +
+		"swap id: aaaa00000001\n" +
+		"\n" +
+		"direction: btc-for-blake\n" +
+		"maker is protocol: bob\n" +
+		"taker is protocol: alice\n" +
+		"\n" +
+		"Alice Nostr: " + alice + "\n" +
+		"Bob Nostr:   " + bob + "\n" +
+		"\n" +
+		"BTC timeout:   900\n" +
+		"BLAKE timeout: 800\n" +
+		"\n" +
+		"BTC window: 18.00 h\n" +
+		"Bob recovery: 4.00 h\n" +
+		"BLAKE window: 22.00 h\n" +
+		"\n" +
+		"PASS: reverse match independently validated\n" +
+		"PASS: current participant derived as protocol Alice\n" +
+		"PASS: reserved swap_id adopted\n" +
+		"PASS: fresh secret S created only by Alice\n" +
+		"PASS: timeout plan independently derived\n" +
+		"PASS: no funds moved\n"
+
+	if got != want {
+		t.Fatalf("renderReverseMatchImported mismatch:\n--- got ---\n%q\n--- want ---\n%q", got, want)
+	}
+}
+
+// TestRenderReverseMatchAlreadyImportedMatchesTheReference: the duplicate path must say
+// that no second secret was generated.
+func TestRenderReverseMatchAlreadyImportedMatchesTheReference(t *testing.T) {
+	matchID := strings.Repeat("ab", 32)
+
+	got := renderReverseMatchAlreadyImported(matchID, "aaaa00000001")
+
+	want := "\nREVERSE MARKET MATCH ALREADY IMPORTED\n" +
+		"=====================================\n" +
+		"match id: " + matchID + "\n" +
+		"swap id:  aaaa00000001\n" +
+		"\n" +
+		"PASS: existing Alice swap reused\n" +
+		"PASS: no second secret was generated\n" +
+		"PASS: no funds moved\n"
+
+	if got != want {
+		t.Fatalf("renderReverseMatchAlreadyImported mismatch:\n--- got ---\n%q\n--- want ---\n%q", got, want)
+	}
+}
+
+// TestHoursRendersTwoDecimals: the window hours are compared by eye, so the format is
+// part of the contract, and an absent window is zero rather than a blank.
+func TestHoursRendersTwoDecimals(t *testing.T) {
+	cases := map[int64]string{
+		3600:   "1.00",
+		5400:   "1.50",
+		64_800: "18.00",
+		0:      "0.00",
+	}
+
+	for seconds, want := range cases {
+		value := seconds
+
+		if got := hours(&value); got != want {
+			t.Errorf("%d seconds = %q, want %q", seconds, got, want)
+		}
+	}
+
+	if got := hours(nil); got != "0.00" {
+		t.Errorf("a nil window = %q, want 0.00", got)
+	}
+}
+
+// TestRepeatAcceptReverseMarketMatchRefusesDifferentIdentities: an existing Alice swap
+// that names another counterparty is a different negotiation.
+func TestRepeatAcceptReverseMarketMatchRefusesDifferentIdentities(t *testing.T) {
+	record := reverseSwap()
+	item := &marketflow.ParsedMatch{Match: marketMatch("aaaa00000001")}
+
+	// The fixture's Alice is the taker the match names, so this passes.
+	if err := repeatAcceptReverseMarketMatch(record, item, strings.Repeat("55", 32),
+		strings.Repeat("44", 32), strings.Repeat("33", 32)); err != nil {
+		t.Fatalf("a consistent swap was refused: %v", err)
+	}
+
+	if err := repeatAcceptReverseMarketMatch(record, item, strings.Repeat("55", 32),
+		strings.Repeat("99", 32), strings.Repeat("33", 32)); err == nil ||
+		!strings.Contains(err.Error(), "different Alice identity") {
+		t.Fatalf("a foreign Alice identity was accepted: %v", err)
+	}
+
+	if err := repeatAcceptReverseMarketMatch(record, item, strings.Repeat("55", 32),
+		strings.Repeat("44", 32), strings.Repeat("99", 32)); err == nil ||
+		!strings.Contains(err.Error(), "different Bob identity") {
+		t.Fatalf("a foreign Bob identity was accepted: %v", err)
+	}
+}
+
+// TestReverseMatchBindingCarriesTheDirectionAndRoles: the reverse binding says which
+// protocol participant each market role was, because that is what makes it reverse.
+func TestReverseMatchBindingCarriesTheDirectionAndRoles(t *testing.T) {
+	item := &marketflow.ParsedMatch{Match: marketMatch("aaaa00000001")}
+	item.Direction = market.BTCForBlake
+	item.MakerRole = "bob"
+	item.TakerRole = "alice"
+
+	binding := reverseMatchBinding(item, strings.Repeat("55", 32))
+
+	for key, want := range map[string]string{
+		"direction":  "btc-for-blake",
+		"maker_role": "bob",
+		"taker_role": "alice",
+		"swap_id":    "aaaa00000001",
+	} {
+		if fmt.Sprint(binding[key]) != want {
+			t.Errorf("%s = %v, want %s", key, binding[key], want)
+		}
+	}
+
+	if binding["version"] != 2 {
+		t.Errorf("version = %v, want 2", binding["version"])
+	}
+}
+
+// TestReverseMatchRolesRefusesEveryWayAMatchIsNotThisParticipants pins the four guards
+// that keep a reverse import from adopting somebody else's negotiation.
+func TestReverseMatchRolesRefusesEveryWayAMatchIsNotThisParticipants(t *testing.T) {
+	alice := strings.Repeat("44", 32)
+	taker := alice
+
+	cases := map[string]struct {
+		mutate func(*marketflow.ParsedMatch)
+		want   string
+	}{
+		"wrong direction": {func(m *marketflow.ParsedMatch) {
+			m.Direction = market.BlakeForBTC
+		}, "not btc-for-blake"},
+		"maker not Bob": {func(m *marketflow.ParsedMatch) {
+			m.MakerRole = "alice"
+		}, "maker is not protocol Bob"},
+		"taker not Alice": {func(m *marketflow.ParsedMatch) {
+			m.TakerRole = "bob"
+		}, "taker is not protocol Alice"},
+		"another taker": {func(m *marketflow.ParsedMatch) {
+			m.Taker = strings.Repeat("99", 32)
+		}, "not the matched taker"},
+	}
+
+	for name, test := range cases {
+		item := &marketflow.ParsedMatch{Match: marketMatch("aaaa00000001")}
+		item.Direction = market.BTCForBlake
+		item.MakerRole = "bob"
+		item.TakerRole = "alice"
+		item.Taker = taker
+
+		test.mutate(item)
+
+		err := reverseMatchRoles(item, alice)
+
+		if err == nil {
+			t.Errorf("%s: was accepted", name)
+
+			continue
+		}
+
+		if !strings.Contains(err.Error(), test.want) {
+			t.Errorf("%s: refusal = %v, want it to mention %q", name, err, test.want)
+		}
+	}
+
+	// And the matching case passes, so the test is not merely asserting refusal.
+	item := &marketflow.ParsedMatch{Match: marketMatch("aaaa00000001")}
+	item.Direction = market.BTCForBlake
+	item.MakerRole = "bob"
+	item.TakerRole = "alice"
+	item.Taker = alice
+
+	if err := reverseMatchRoles(item, alice); err != nil {
+		t.Fatalf("a matching reverse trade was refused: %v", err)
 	}
 }

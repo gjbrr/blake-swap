@@ -3,10 +3,10 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>BLAKE swap — two-instance skeleton</title>
+  <title>blake-swap</title>
   <link rel="stylesheet" href="style.css">
 </head>
-<body>
+<body data-view="setup">
   <!--
     Boot gate: covers the app until both wasm instances are running and the
     channel has been proven. It is plain HTML so it paints before any script
@@ -44,141 +44,424 @@
     </div>
   </div>
 
-  <main id="app" class="app">
-    <header>
-      <h1>blake-swap</h1>
-      <p class="sub">page <span class="sep">↔</span> service worker, two wasm instances</p>
+  <main id="app" class="app" data-active-view="setup">
+    <header class="top">
+      <div class="brand">
+        <h1>blake-swap</h1>
+        <p class="sub">BLAKE ↔ BTC, settled by a browser participant</p>
+      </div>
+
+      <nav class="nav" aria-label="views">
+        <button type="button" id="nav-setup" data-uicmd="view-setup">Setup</button>
+        <button type="button" id="nav-market" data-uicmd="view-market">Market</button>
+        <button type="button" id="nav-swaps" data-uicmd="view-swaps">Swaps</button>
+        <button type="button" id="nav-swap" data-uicmd="view-swap">Swap</button>
+        <button type="button" id="nav-settings" data-uicmd="view-settings">Settings</button>
+        <button type="button" id="nav-coordination" data-uicmd="view-coordination">Coordination</button>
+        <button type="button" id="nav-diagnostics" data-uicmd="view-diagnostics">Diagnostics</button>
+      </nav>
+
+      <dl class="chips">
+        <div class="chip"><dt>page</dt><dd><span id="page-status" class="pill state-wait">starting</span></dd></div>
+        <div class="chip"><dt>worker</dt><dd><span id="worker-status" class="pill state-wait">starting</span></dd></div>
+        <div class="chip"><dt>vault</dt><dd><span id="vault-chip" class="pill state-wait">locked</span></dd></div>
+      </dl>
     </header>
 
-    <section class="card">
-      <p class="lede">
-        The text in the box was produced by the <strong>worker</strong> wasm
-        instance and delivered over the channel shim. If you can read it, the
-        page domain and the worker domain are talking.
+    <!-- The busy line names the one command in flight. It is the visible half of
+         the rule that one command runs at a time. -->
+    <p id="busy-line" class="busy" role="status" aria-live="polite" hidden></p>
+
+    <!-- Errors are inline and persistent until dismissed. alert() is never used. -->
+    <section id="alert" class="alert" role="alert" hidden>
+      <div>
+        <strong id="alert-command">error</strong>
+        <pre id="alert-text" class="mono"></pre>
+      </div>
+      <button type="button" data-uicmd="dismiss-error">dismiss</button>
+    </section>
+
+    <!-- ---------------------------------------------------------------- setup -->
+    <section class="view" id="view-setup" data-view="setup" hidden>
+      <h2>Setup</h2>
+
+      <div class="grid">
+        <section class="card">
+          <h3>Vault</h3>
+          <p class="hint">
+            Every record, key and settings value is sealed with a key derived from this
+            passphrase before it is stored. The passphrase never leaves this page, and
+            losing it loses the records.
+          </p>
+          <input id="passphrase" class="field" type="password" placeholder="passphrase" autocomplete="off">
+          <div class="row">
+            <button type="button" data-uicmd="vault-create">Create vault</button>
+            <button type="button" data-uicmd="vault-unlock">Unlock vault</button>
+            <button type="button" data-uicmd="vault-lock">Lock vault</button>
+          </div>
+          <pre id="vault" class="out" aria-live="polite">not run</pre>
+        </section>
+
+        <section class="card">
+          <h3>Identity</h3>
+          <p class="hint">
+            The Nostr key this client signs with. It is sealed like every other record.
+            The public key is shown; the secret is never shown again after it is entered
+            or generated.
+          </p>
+          <input id="identity-secret" class="field" type="password" placeholder="64 hex characters" autocomplete="off" spellcheck="false">
+          <div class="row">
+            <button type="button" data-uicmd="identity-set">Set identity</button>
+            <button type="button" data-uicmd="identity-generate">Generate identity</button>
+            <button type="button" data-uicmd="identity-status">Read identity</button>
+          </div>
+          <p id="identity-secret-once" class="once" hidden>
+            <span class="warn">Write this down now — it is shown once.</span>
+            <code id="identity-secret-value" class="mono"></code>
+          </p>
+          <pre id="identity" class="out" aria-live="polite">not read</pre>
+        </section>
+
+        <section class="card">
+          <h3>Node proxy</h3>
+          <p class="hint">
+            The app server's address. Both chains are reached through it; no node
+            credentials are in this page. When the app is served by the app server, its
+            own origin is used unless you set something else.
+          </p>
+          <input id="proxy-url" class="field" type="url" placeholder="http://127.0.0.1:8787" autocomplete="off" spellcheck="false">
+          <div class="row">
+            <button type="button" data-uicmd="proxy-set">Set proxy</button>
+            <button type="button" data-uicmd="proxy-status">Read proxy</button>
+            <button type="button" data-uicmd="wallets-status">Wallet status</button>
+          </div>
+          <pre id="proxy" class="out" aria-live="polite">not read</pre>
+        </section>
+
+        <section class="card">
+          <h3>Wallets</h3>
+          <p class="hint">
+            One signing wallet and one watch-only wallet per chain. These are names your
+            node knows; they are not a role.
+          </p>
+          <label class="field-label" for="wallet-blake">BLAKE wallet</label>
+          <input id="wallet-blake" class="field" type="text" placeholder="blake" autocomplete="off" spellcheck="false">
+          <label class="field-label" for="wallet-btc">BTC wallet</label>
+          <input id="wallet-btc" class="field" type="text" placeholder="btc" autocomplete="off" spellcheck="false">
+          <label class="field-label" for="wallet-blake-watch">BLAKE watch-only</label>
+          <input id="wallet-blake-watch" class="field" type="text" placeholder="blake-watch" autocomplete="off" spellcheck="false">
+          <label class="field-label" for="wallet-btc-watch">BTC watch-only</label>
+          <input id="wallet-btc-watch" class="field" type="text" placeholder="btc-watch" autocomplete="off" spellcheck="false">
+          <div class="row">
+            <button type="button" data-uicmd="wallets-set">Set wallets</button>
+          </div>
+          <pre id="wallets" class="out" aria-live="polite">not read</pre>
+        </section>
+
+        <section class="card">
+          <h3>Chains</h3>
+          <p class="hint">Both chain tips, read through the proxy.</p>
+          <div class="row">
+            <button type="button" data-uicmd="engine-status">Read chain heights</button>
+          </div>
+          <pre id="engine-status-out" class="out" aria-live="polite">not read</pre>
+        </section>
+      </div>
+    </section>
+
+    <!-- --------------------------------------------------------------- market -->
+    <section class="view" id="view-market" data-view="market" hidden>
+      <h2>Market</h2>
+
+      <div class="row">
+        <button type="button" data-uicmd="market-list">Refresh market</button>
+        <span id="market-read" class="mono muted"></span>
+      </div>
+
+      <section class="card">
+        <h3>Open offers</h3>
+        <table class="table" id="market-open">
+          <thead>
+            <tr><th>offer</th><th>maker</th><th>direction</th><th>BLAKE</th><th>sats</th><th>age</th><th></th></tr>
+          </thead>
+          <tbody id="market-open-rows"></tbody>
+        </table>
+        <p class="hint" id="market-open-empty">No open offers.</p>
+      </section>
+
+      <section class="card">
+        <h3>Your offers</h3>
+        <table class="table" id="market-mine">
+          <thead><tr><th>offer</th><th>state</th><th>BLAKE</th><th>sats</th><th>expires</th></tr></thead>
+          <tbody id="market-mine-rows"></tbody>
+        </table>
+        <p class="hint" id="market-mine-empty">You have not advertised an offer.</p>
+
+        <h4>Takes</h4>
+        <table class="table" id="market-takes">
+          <thead><tr><th>take</th><th>taker</th><th>BLAKE</th><th>sats</th><th></th></tr></thead>
+          <tbody id="market-takes-rows"></tbody>
+        </table>
+        <p class="hint" id="market-takes-empty">No valid takes on your offers.</p>
+
+        <h4>Matches</h4>
+        <table class="table" id="market-matches">
+          <thead><tr><th>match</th><th>swap</th><th>trace</th><th></th></tr></thead>
+          <tbody id="market-matches-rows"></tbody>
+        </table>
+        <p class="hint" id="market-matches-empty">No matches yet.</p>
+      </section>
+
+      <section class="card">
+        <h3>Publish an offer</h3>
+        <div class="row">
+          <input id="market-blake" class="field narrow" type="text" placeholder="BLAKE amount" autocomplete="off" spellcheck="false">
+          <input id="market-sats" class="field narrow" type="text" placeholder="sats" autocomplete="off" spellcheck="false">
+          <input id="market-minutes" class="field narrow" type="text" placeholder="minutes (60)" autocomplete="off" spellcheck="false">
+          <select id="market-direction" class="field narrow">
+            <option value="blake-for-btc">BLAKE for BTC</option>
+            <option value="btc-for-blake">BTC for BLAKE</option>
+          </select>
+          <button type="button" data-uicmd="market-publish">Publish</button>
+        </div>
+        <pre id="market" class="out" aria-live="polite">not read</pre>
+      </section>
+
+      <section class="card">
+        <h3>Relays</h3>
+        <input id="relays" class="field" type="text" placeholder="wss://relay.example" autocomplete="off" spellcheck="false">
+        <div class="row">
+          <button type="button" data-uicmd="market-set-relays">Set relays</button>
+          <button type="button" data-uicmd="market-relays">Read relays</button>
+        </div>
+        <pre id="market-relays-out" class="out" aria-live="polite">not read</pre>
+      </section>
+    </section>
+
+    <!-- ---------------------------------------------------------------- swaps -->
+    <section class="view" id="view-swaps" data-view="swaps" hidden>
+      <h2>Swaps</h2>
+
+      <div class="row">
+        <button type="button" data-uicmd="engine-dashboard">Refresh</button>
+        <button type="button" data-uicmd="engine-resume-all">Resume all</button>
+        <span id="dashboard-heights" class="mono muted"></span>
+      </div>
+
+      <p id="dashboard-unsolvable" class="alert warn" hidden></p>
+
+      <section class="group">
+        <h3>Active</h3>
+        <ul class="list" id="list-active"></ul>
+      </section>
+      <section class="group">
+        <h3>Needs attention</h3>
+        <ul class="list" id="list-attention"></ul>
+      </section>
+      <section class="group">
+        <h3>Settled</h3>
+        <ul class="list" id="list-settled"></ul>
+      </section>
+      <section class="group">
+        <h3>Archived</h3>
+        <ul class="list" id="list-archived"></ul>
+      </section>
+
+      <section class="card">
+        <h3>Create a swap</h3>
+        <div class="row">
+          <input id="new-blake" class="field narrow" type="text" placeholder="BLAKE amount" autocomplete="off" spellcheck="false">
+          <input id="new-sats" class="field narrow" type="text" placeholder="sats" autocomplete="off" spellcheck="false">
+          <input id="new-peer" class="field" type="text" placeholder="counterparty x-only pubkey (optional)" autocomplete="off" spellcheck="false">
+          <button type="button" data-uicmd="engine-new">Create swap</button>
+        </div>
+        <p class="hint">
+          The two deadlines are computed from the current chain tips unless both are
+          given. Creating a swap moves no funds.
+        </p>
+        <pre id="engine-new-out" class="out" aria-live="polite">not created</pre>
+      </section>
+
+      <section class="card">
+        <h3>Accept an offer somebody sent you</h3>
+        <p class="hint">
+          Alice's swap id and her public key. Pinning her key is what makes this an
+          acceptance of <em>her</em> offer rather than of whichever offer answers first.
+        </p>
+        <div class="row">
+          <input id="accept-swap-id" class="field" type="text" placeholder="swap id" autocomplete="off" spellcheck="false">
+          <input id="accept-alice-pub" class="field" type="text" placeholder="maker's x-only pubkey" autocomplete="off" spellcheck="false">
+          <button type="button" data-uicmd="engine-accept-offer">Accept offer</button>
+        </div>
+        <pre id="engine-accept-out" class="out" aria-live="polite">not accepted</pre>
+      </section>
+
+      <section class="card">
+        <h3>Open by id</h3>
+        <div class="row">
+          <input id="swap-id" class="field" type="text" placeholder="swap id" autocomplete="off" spellcheck="false">
+          <button type="button" data-uicmd="swap-open">Open</button>
+        </div>
+      </section>
+    </section>
+
+    <!-- ----------------------------------------------------------- swap detail -->
+    <section class="view" id="view-swap" data-view="swap" hidden>
+      <div class="row between">
+        <h2>Swap <span id="swap-title" class="mono">—</span></h2>
+        <div class="row">
+          <button type="button" data-uicmd="swap-refresh">Refresh</button>
+          <button type="button" data-uicmd="swap-close">Close</button>
+        </div>
+      </div>
+
+      <!-- The state a page-level check reads. -->
+      <p class="summary">
+        <span class="badge" id="swap-state-badge" data-swap-state="">no swap</span>
+        <span class="muted">role</span> <span id="swap-role" class="mono">—</span>
+        <span class="muted">next</span> <span id="swap-next" class="mono" data-next-action="">—</span>
       </p>
 
-      <pre id="hello" class="hello" aria-live="polite">…</pre>
+      <div class="grid">
+        <section class="card">
+          <h3>Terms</h3>
+          <dl class="facts" id="swap-terms"></dl>
+        </section>
 
-      <section class="panel">
-        <h2>Vault</h2>
-        <p class="hint">
-          Everything the worker keeps — swap records, the participant key, the proxy
-          address — is sealed with a key derived from this passphrase before it reaches
-          IndexedDB. The passphrase never leaves the page.
-        </p>
-        <input id="passphrase" class="field" type="password" placeholder="passphrase" autocomplete="off">
-        <button type="button" data-uicmd="vault-create">Create vault</button>
-        <button type="button" data-uicmd="vault-unlock">Unlock vault</button>
-        <button type="button" data-uicmd="vault-lock">Lock vault</button>
-        <pre id="vault" aria-live="polite">not run</pre>
+        <section class="card">
+          <h3>Reconcile</h3>
+          <dl class="facts" id="swap-chains"></dl>
+          <p id="swap-reason" class="hint"></p>
+        </section>
+      </div>
+
+      <section class="card">
+        <h3>Timeline</h3>
+        <ol class="timeline" id="swap-timeline"></ol>
       </section>
 
-      <section class="panel">
-        <h2>Encrypted state</h2>
+      <section class="card">
+        <h3>Transactions</h3>
+        <dl class="facts" id="swap-txs"></dl>
+      </section>
+
+      <section class="card">
+        <h3>Actions</h3>
         <p class="hint">
-          The worker seals swap records before they reach IndexedDB. This runs the
-          encrypted round trip inside the worker and reports what it did.
+          Buttons are enabled from the latest reconciliation. The engine still refuses
+          anything it would refuse; this only stops the page offering it.
+        </p>
+        <div class="row wrap" id="swap-actions"></div>
+        <pre id="swap-action-out" class="out" aria-live="polite"></pre>
+      </section>
+
+      <section class="card">
+        <h3>Recovery</h3>
+        <div class="row">
+          <button type="button" data-uicmd="swap-recovery-plan">Recovery plan</button>
+        </div>
+        <pre id="swap-recovery-out" class="out" aria-live="polite">not asked</pre>
+      </section>
+    </section>
+
+    <!-- -------------------------------------------------------------- settings -->
+    <section class="view" id="view-settings" data-view="settings" hidden>
+      <h2>Settings</h2>
+      <p class="hint">
+        Every value here is sealed in the vault. The vault, identity and wallet panels
+        are on the Setup view; this is a summary of what this client is configured with.
+      </p>
+      <section class="card">
+        <h3>This participant</h3>
+        <dl class="facts" id="settings-summary"></dl>
+        <div class="row">
+          <button type="button" data-uicmd="settings-refresh">Refresh</button>
+        </div>
+      </section>
+      <section class="card">
+        <h3>Coordination encryption</h3>
+        <div class="row">
+          <input id="coord-mode-setting" class="field narrow" type="text" placeholder="nip44_v2" autocomplete="off" spellcheck="false">
+          <button type="button" data-uicmd="coord-set-mode">Set encryption</button>
+          <button type="button" data-uicmd="coord-mode">Read encryption</button>
+        </div>
+        <pre id="coord-mode-out" class="out" aria-live="polite">not read</pre>
+      </section>
+    </section>
+
+    <!-- ---------------------------------------------------------- coordination -->
+    <section class="view" id="view-coordination" data-view="coordination" hidden>
+      <h2>Coordination</h2>
+      <p class="hint">
+        The settlement messages, published and read over the relay. Bodies are built by
+        the worker from the swap record it holds; this page never supplies one. A normal
+        swap uses the buttons on the Swap view — this panel is for diagnosis and for a
+        hand-driven handshake.
+      </p>
+
+      <section class="card">
+        <h3>Announce or receive</h3>
+        <div class="row">
+          <input id="coord-kind" class="field narrow" type="text" placeholder="message type" autocomplete="off" spellcheck="false">
+          <button type="button" data-uicmd="coord-send">Announce</button>
+          <button type="button" data-uicmd="coord-receive">Receive</button>
+        </div>
+        <p class="hint">
+          Types: offer, accept, blake-funded, btc-funded, btc-claimed, blake-claimed,
+          btc-refunded.
+        </p>
+        <pre id="coord" class="out" aria-live="polite">not run</pre>
+      </section>
+
+      <section class="card">
+        <h3>Open a record without nodes</h3>
+        <div class="row">
+          <input id="coord-blake" class="field narrow" type="text" placeholder="BLAKE amount" autocomplete="off" spellcheck="false">
+          <input id="coord-sats" class="field narrow" type="text" placeholder="sats" autocomplete="off" spellcheck="false">
+          <input id="coord-peer" class="field" type="text" placeholder="counterparty x-only pubkey (optional)" autocomplete="off" spellcheck="false">
+          <button type="button" data-uicmd="coord-open">Open a swap record</button>
+        </div>
+      </section>
+    </section>
+
+    <!-- ----------------------------------------------------------- diagnostics -->
+    <section class="view" id="view-diagnostics" data-view="diagnostics" hidden>
+      <h2>Diagnostics</h2>
+
+      <section class="card">
+        <h3>Channel</h3>
+        <p class="hint">
+          The text below was produced by the worker wasm instance and delivered over the
+          channel shim. If you can read it, both domains are talking.
+        </p>
+        <pre id="hello" class="hello" aria-live="polite">…</pre>
+        <dl class="rows">
+          <div class="row"><dt>round trip</dt><dd><span id="round-trip" class="mono">—</span></dd></div>
+        </dl>
+        <button id="ping" type="button">ping the worker again</button>
+      </section>
+
+      <section class="card">
+        <h3>Encrypted state</h3>
+        <p class="hint">
+          Seals a record in a throwaway vault, reopens it, and checks a wrong passphrase
+          is refused. It leaves your vault alone.
         </p>
         <button type="button" data-uicmd="vault-selftest">Run encrypted self-test</button>
-        <pre id="vaulttest" aria-live="polite">not run</pre>
+        <pre id="vaulttest" class="out" aria-live="polite">not run</pre>
       </section>
 
-      <section class="panel">
-        <h2>Identity</h2>
-        <p class="hint">
-          The Nostr key the worker signs with. It is sealed by the vault like every
-          other record; the field is only a way in, and the worker refuses anything
-          that is not a key.
-        </p>
-        <input id="identity-secret" class="field" type="password" placeholder="64 hex characters" autocomplete="off" spellcheck="false">
-        <button type="button" data-uicmd="identity-set">Set identity</button>
-        <button type="button" data-uicmd="identity-status">Read identity</button>
-        <pre id="identity" aria-live="polite">not read</pre>
-      </section>
-
-      <section class="panel">
-        <h2>Node proxy</h2>
-        <p class="hint">
-          The app server's address. The worker reaches both chains through it,
-          because this page holds no node credentials and never will.
-        </p>
-        <input id="proxy-url" class="field" type="url" placeholder="http://127.0.0.1:8787" autocomplete="off" spellcheck="false">
-        <button type="button" data-uicmd="proxy-set">Set proxy</button>
-        <button type="button" data-uicmd="proxy-status">Read proxy</button>
-        <pre id="proxy" aria-live="polite">not read</pre>
-      </section>
-
-      <section class="panel">
-        <h2>Engine</h2>
-        <p class="hint">
-          Read-only reads of both chains through the proxy: block heights, the
-          records sealed in the vault, and the reconciliation view of each one.
-        </p>
-        <button type="button" data-uicmd="engine-status">Chain heights</button>
-        <button type="button" data-uicmd="engine-list">List swaps</button>
-        <button type="button" data-uicmd="engine-dashboard">Dashboard</button>
-        <input id="swap-id" class="field" type="text" placeholder="swap id" autocomplete="off" spellcheck="false">
-        <button type="button" data-uicmd="engine-show">Show swap</button>
-        <pre id="engine" aria-live="polite">not read</pre>
-      </section>
-
-      <section class="panel">
-        <h2>Coordination</h2>
-        <p class="hint">
-          The seven settlement messages, published and read over the same relay
-          connection as the market. Bodies are built by the worker from the swap
-          record it holds; the page never supplies one. A reply is only accepted
-          from the counterparty the record pins.
-        </p>
-        <input id="coord-blake" class="field" type="text" placeholder="BLAKE amount" autocomplete="off" spellcheck="false">
-        <input id="coord-sats" class="field" type="text" placeholder="sats" autocomplete="off" spellcheck="false">
-        <input id="coord-peer" class="field" type="text" placeholder="counterparty x-only pubkey (optional)" autocomplete="off" spellcheck="false">
-        <button type="button" data-uicmd="coord-open">Open a swap record</button>
-        <input id="coord-kind" class="field" type="text" placeholder="message type" autocomplete="off" spellcheck="false">
-        <button type="button" data-uicmd="coord-send">Announce</button>
-        <button type="button" data-uicmd="coord-receive">Receive</button>
-        <input id="coord-mode" class="field" type="text" placeholder="nip44_v2" autocomplete="off" spellcheck="false">
-        <button type="button" data-uicmd="coord-set-mode">Set encryption</button>
-        <button type="button" data-uicmd="coord-mode">Read encryption</button>
-        <pre id="coord" aria-live="polite">not run</pre>
-      </section>
-
-      <section class="panel">
-        <h2>Market</h2>
-        <p class="hint">
-          The marketplace, read and written over the browser's own relay
-          connection. Offers are signed by the vault's identity, so the page can
-          advertise and take without ever handing a key to a node.
-        </p>
-        <input id="relays" class="field" type="text" placeholder="wss://relay.example" autocomplete="off" spellcheck="false">
-        <button type="button" data-uicmd="market-set-relays">Set relays</button>
-        <button type="button" data-uicmd="market-relays">Read relays</button>
-        <button type="button" data-uicmd="market-list">Read market</button>
-        <input id="market-blake" class="field" type="text" placeholder="BLAKE amount" autocomplete="off" spellcheck="false">
-        <input id="market-sats" class="field" type="text" placeholder="sats" autocomplete="off" spellcheck="false">
-        <input id="market-minutes" class="field" type="text" placeholder="minutes (60)" autocomplete="off" spellcheck="false">
-        <button type="button" data-uicmd="market-publish">Publish offer</button>
-        <input id="market-offer-id" class="field" type="text" placeholder="offer id to take" autocomplete="off" spellcheck="false">
-        <button type="button" data-uicmd="market-take">Take offer</button>
-        <pre id="market" aria-live="polite">not read</pre>
-      </section>
-
-      <dl class="rows">
+      <section class="card">
+        <h3>Engine reads</h3>
         <div class="row">
-          <dt>page</dt>
-          <dd><span id="page-status" class="pill state-wait">starting</span></dd>
+          <button type="button" data-uicmd="engine-list">List swaps</button>
+          <button type="button" data-uicmd="engine-show">Show swap</button>
+          <button type="button" data-uicmd="engine-reconcile">Reconcile swap</button>
+          <button type="button" data-uicmd="engine-next">Next action</button>
         </div>
-        <div class="row">
-          <dt>worker</dt>
-          <dd><span id="worker-status" class="pill state-wait">starting</span></dd>
-        </div>
-        <div class="row">
-          <dt>round trip</dt>
-          <dd><span id="round-trip" class="mono">—</span></dd>
-        </div>
-      </dl>
+        <pre id="engine" class="out" aria-live="polite">not read</pre>
+      </section>
 
-      <button id="ping" type="button">ping the worker again</button>
       <pre id="trace" class="trace" hidden></pre>
     </section>
 
@@ -187,6 +470,21 @@
       <span class="mono">web/worker.wasm</span> owns the services
     </footer>
   </main>
+
+  <!--
+    One dialog for every confirmation. It is a real <dialog>, so Escape cancels it and
+    the browser traps focus; the page returns focus to the button that opened it.
+  -->
+  <dialog id="confirm-dialog" class="dialog" data-confirm-open="false">
+    <form method="dialog">
+      <h2 id="confirm-title">Confirm</h2>
+      <div id="confirm-body" class="confirm-body"></div>
+      <div class="row end">
+        <button type="button" id="confirm-cancel" data-uicmd="confirm-cancel">Cancel</button>
+        <button type="button" id="confirm-ok" data-uicmd="confirm-ok" class="primary">Confirm</button>
+      </div>
+    </form>
+  </dialog>
 
   <script src="wasm_exec.js"></script>
   <script src="page.js"></script>

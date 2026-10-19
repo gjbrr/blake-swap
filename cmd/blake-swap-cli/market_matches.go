@@ -43,9 +43,43 @@ func runMarketMatches(ctx context.Context, engine *swap.Engine, args []string) e
 		return err
 	}
 
+	// A match this participant dismissed is not a decision waiting for them any more.
+	// Filtering here rather than in MatchesFor keeps the suppression local: it is this
+	// machine's opinion, not a fact about the evidence.
+	matches, err = withoutIgnoredMatches(matches)
+
+	if err != nil {
+		return err
+	}
+
 	fmt.Print(renderMarketMatches(me, matches))
 
 	return nil
+}
+
+// withoutIgnoredMatches drops the matches this participant has dismissed.
+func withoutIgnoredMatches(matches []marketflow.MatchEntry) ([]marketflow.MatchEntry, error) {
+	ignored, err := ignoredMatchIDs()
+
+	if err != nil {
+		return nil, err
+	}
+
+	if len(ignored) == 0 {
+		return matches, nil
+	}
+
+	kept := make([]marketflow.MatchEntry, 0, len(matches))
+
+	for _, entry := range matches {
+		if ignored[entry.Event.ID] {
+			continue
+		}
+
+		kept = append(kept, entry)
+	}
+
+	return kept, nil
 }
 
 // missingReferences lists the offer and take ids that match events name but the evidence

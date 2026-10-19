@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -183,4 +184,111 @@ func renderAmbiguousMatches(candidates []marketflow.MatchEntry) string {
 	}
 
 	return out.String()
+}
+
+// ignoredMatchTTL is how long an ignored match stays suppressed.
+//
+// Zero means forever, which is the original behaviour. A positive value bounds it: an expired
+// tombstone is both ignored and removed when the tombstones are next read, so a match that was
+// dismissed by mistake comes back rather than disappearing for good.
+//
+// Override with BLAKE_SWAP_IGNORED_MATCH_TTL_SECONDS.
+func ignoredMatchTTL() (int64, error) {
+	raw := strings.TrimSpace(os.Getenv("BLAKE_SWAP_IGNORED_MATCH_TTL_SECONDS"))
+
+	if raw == "" {
+		return 0, nil
+	}
+
+	value, err := strconv.ParseInt(raw, 10, 64)
+
+	if err != nil {
+		return 0, fmt.Errorf("BLAKE_SWAP_IGNORED_MATCH_TTL_SECONDS must be an integer")
+	}
+
+	if value < 0 {
+		return 0, fmt.Errorf("BLAKE_SWAP_IGNORED_MATCH_TTL_SECONDS must not be negative")
+	}
+
+	return value, nil
+}
+
+// ignoredMatchIDs is the set of match ids this participant has dismissed.
+//
+// A tombstone only counts when it is named after the match it records and there is 64
+// hexadecimal characters of it — a file that is not a tombstone is not a suppression. An
+// expired tombstone is removed here rather than left to rot, because a file that no longer
+// suppresses anything is a file an operator will eventually misread.
+func ignoredMatchIDs() (map[string]bool, error) {
+	ttl, err := ignoredMatchTTL()
+
+	if err != nil {
+		return nil, err
+	}
+
+	dir := filepath.Join(stateDirectory(), ignoreDirectory)
+
+	entries, err := os.ReadDir(dir)
+
+	if os.IsNotExist(err) {
+		return map[string]bool{}, nil
+	}
+
+	if err != nil {
+		return nil, err
+	}
+
+	ignored := make(map[string]bool, len(entries))
+
+	now := time.Now().Unix()
+
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+
+		matchID := strings.TrimSuffix(entry.Name(), ".json")
+
+		if len(matchID) != 64 {
+			continue
+		}
+
+		path := filepath.Join(dir, entry.Name())
+
+		raw, readErr := os.ReadFile(path)
+
+		if readErr != nil {
+			continue
+		}
+
+		var record map[string]any
+
+		if err := json.Unmarshal(raw, &record); err != nil {
+			continue
+		}
+
+		if value, _ := record["match_id"].(string); value != matchID {
+			continue
+		}
+
+		if ttl > 0 {
+			ignoredAt := int64(0)
+
+			if value, ok := record["ignored_at"].(float64); ok {
+				ignoredAt = int64(value)
+			}
+
+			// An undated tombstone cannot be aged, so it is treated as expired rather
+			// than suppressing a match forever.
+			if now-ignoredAt >= ttl {
+				_ = os.Remove(path)
+
+				continue
+			}
+		}
+
+		ignored[matchID] = true
+	}
+
+	return ignored, nil
 }

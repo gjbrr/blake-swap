@@ -55,6 +55,12 @@ func runAcceptMatch(ctx context.Context, engine *swap.Engine, args []string) err
 
 	records := store.NewFile(stateDirectory())
 
+	ignored, err := ignoredMatchIDs()
+
+	if err != nil {
+		return err
+	}
+
 	candidates := pendingMatches(
 		me,
 		marketflow.MatchesFor(me, events, now),
@@ -65,6 +71,19 @@ func runAcceptMatch(ctx context.Context, engine *swap.Engine, args []string) err
 			return err == nil && retired
 		},
 	)
+
+	// A dismissed match is not pending, so accepting one by prefix must not find it.
+	kept := candidates[:0]
+
+	for _, candidate := range candidates {
+		if ignored[candidate.Event.ID] {
+			continue
+		}
+
+		kept = append(kept, candidate)
+	}
+
+	candidates = kept
 
 	if requested := strings.ToLower(strings.TrimSpace(firstArg(args))); requested != "" {
 		if len(requested) < 8 {

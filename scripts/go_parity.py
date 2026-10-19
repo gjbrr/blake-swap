@@ -512,6 +512,11 @@ SUITE_REPLACEMENTS: dict[str, tuple[str, str]] = {
     "swap_cross_impl_btc_claimed_tests.py": ("pkg/swap", "partial"),
     "swap_cross_impl_blake_claimed_tests.py": ("pkg/swap", "partial"),
     "swap_cross_impl_full_happy_tests.py": ("pkg/swap", "partial"),
+    # The command-surface suite is about behaviours reached through commands: resume, the
+    # not-a-party refusal, ignore tombstones with their TTL, and the RPC timeout knob. Each
+    # lives in the package that implements it, so the suite maps to the CLI that dispatches
+    # them and to the two packages whose behaviour it pins.
+    "command_surface_tests.py": ("cmd/blake-swap-cli", "partial"),
 }
 
 

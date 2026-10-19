@@ -96,11 +96,24 @@ the reference's eight default schedules (seeds 4, 17, 184467, 20261004 × claim/
 
 Recorded here rather than left to be inferred from the manifest:
 
-- **20 of the 60 reference suites are not mapped to a Go replacement.** Most are rig-driven
-  integration suites — the settlement crash, fault, race and recovery matrices, the isolated
-  full-chain swap, the reorg and peer-recovery suites, the banned/adversarial schedulers — that
-  drive a full two-chain swap with injected faults. Their Go counterparts would be integration
-  tests of the same size, and they are not written.
+- **20 of the 60 reference suites are not mapped to a Go replacement.** Their Go
+  counterparts would be integration tests of the same size, and they are not written:
+
+  `chain_cli_transport_tests.py`, `cli_wiring_tests.py`, `docs_alignment_tests.py`,
+  `htlc_key_recovery_tests.py`, `installed_wheel_tests.py`, `node_config_tests.py`,
+  `packaging_tests.py`, `pre_btc_refund_tests.py`, `security_conformance_tests.py`,
+  `swap_chain_autonomy_tests.py`, `swap_isolated_full_chain_swap_tests.py`,
+  `swap_isolated_nostr_handshake_tests.py`, `swap_participant_isolation_tests.py`,
+  `swap_peer_recovery_tests.py`, `swap_protocol_tests.py`, `swap_reorg_safety_tests.py`,
+  `swap_settlement_crash_matrix_tests.py`, `swap_settlement_fault_matrix_tests.py`,
+  `swap_settlement_race_tests.py`, `swap_settlement_recovery_tests.py`.
+
+  Eighteen of those drive a full two-chain swap with injected faults — settlement crashes,
+  faults, races, reorgs, peer recovery, isolated chains — and are the largest remaining piece
+  of the port. The other two (`chain_cli_transport`, `cli_wiring`) test the Python engine's
+  *argument rendering and parser wiring*, which this port does not have because it speaks
+  JSON-RPC and parses flags in Go: their transport half (the retry allowlist, the refusal
+  vocabulary) is covered by `pkg/rpc`'s tests, and their argv half has no counterpart.
 - **`next` is a different command.** The reference's `next` takes no argument: it discovers the
   single unambiguous non-economic coordination step across the whole state tree (an offer to
   take, an accept to import, a match to import) and performs it. This port's `next SWAP_ID`

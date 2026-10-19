@@ -192,7 +192,7 @@ Every Python suite, and the Go package whose tests cover the same ground where o
 | `swap_cross_impl_offer_tests.py` | — | pending |
 | `swap_dashboard_json_tests.py` | — | pending |
 | `swap_driver_surface_tests.py` | — | pending |
-| `swap_dynamic_fee_integration_tests.py` | — | pending |
+| `swap_dynamic_fee_integration_tests.py` | `pkg/swap` | partial |
 | `swap_encrypted_coordination_tests.py` | — | pending |
 | `swap_isolated_full_chain_swap_tests.py` | — | pending |
 | `swap_isolated_nostr_handshake_tests.py` | — | pending |

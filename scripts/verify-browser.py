@@ -184,7 +184,74 @@ def start_relay(work: Path):
     return process, f"ws://127.0.0.1:{port}"
 
 
-async def drive(url: str, budget: float, relay_url: str = "") -> int:
+def cli_binary() -> Path:
+    """Build the Go CLI the coordination peer commands live in.
+
+    It is rebuilt rather than reused: a stale binary in bin/ would make the check assert
+    the transport of last week's source, which is exactly the kind of pass that hides a
+    regression.
+    """
+    binary = ROOT / "bin" / "blake-swap-cli"
+
+    subprocess.run(
+        ["go", "build", "-o", str(binary), "./cmd/blake-swap-cli"],
+        cwd=ROOT,
+        check=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+    return binary
+
+
+def write_key(work: Path, name: str, secret_hex: str) -> Path:
+    """Write a participant key file, which is where the CLI reads its identity."""
+    path = work / name
+    path.write_text(secret_hex + "\n")
+
+    return path
+
+
+def peer(work: Path, key_file: Path, relay_url: str, *args: str, encryption: str = "off"):
+    """Run one coordination peer command and return (exit code, combined output).
+
+    The peer is the Go CLI with no node: it reads the same relay the browser wrote to,
+    and its key file is the participant the check controls.
+    """
+    environment = dict(os.environ)
+    environment.update(
+        {
+            "BLAKE_SWAP_STATE_DIR": str(work / "peer-state"),
+            "BLAKE_SWAP_PARTICIPANT_KEY_FILE": str(key_file),
+            "BLAKE_SWAP_NOSTR_RELAYS": relay_url,
+            "BLAKE_SWAP_NOSTR_ENCRYPTION": encryption,
+        }
+    )
+
+    completed = subprocess.run(
+        [str(cli_binary())] + list(args),
+        cwd=ROOT,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+
+    return completed.returncode, (completed.stdout or "") + (completed.stderr or "")
+
+
+def field(text: str, label: str) -> str:
+    """Read one `name: value` line out of a rendered result or a printout."""
+    for line in str(text).splitlines():
+        stripped = line.strip()
+
+        if stripped.startswith(label):
+            return stripped[len(label):].strip()
+
+    return ""
+
+
+async def drive(url: str, budget: float, work: Path, relay_url: str = "") -> int:
     targets = json.load(urllib.request.urlopen(f"{url}/json/list"))
     pages = [target for target in targets if target.get("type") == "page"]
 
@@ -255,6 +322,16 @@ async def drive(url: str, budget: float, relay_url: str = "") -> int:
             print(f"PASS: market panel read and published through the relay: {market}")
         else:
             print("SKIP: no local relay was started for the market check")
+
+        if relay_url:
+            coordination = await coordination_round_trip(ws, budget, work, relay_url)
+
+            if coordination is False:
+                return 1
+
+            print(f"PASS: settlement transport round trip: {coordination}")
+        else:
+            print("SKIP: no local relay was started for the coordination check")
 
         engine = await engine_round_trip(ws, budget)
 
@@ -435,6 +512,369 @@ async def market_round_trip(ws, budget: float, relay_url: str):
     return " ".join(str(text).split())
 
 
+async def coordination_round_trip(ws, budget: float, work: Path, relay_url: str):
+    """Drive the settlement transport through the cockpit, with the Go CLI as the peer.
+
+    Six asserts, in the order the protocol has them:
+
+      a. the browser publishes a signed coordination message to the local relay;
+      b. a second client — the Go CLI, no node, the same relay — reads and validates it;
+      c. the second client replies with its acceptance;
+      d. the browser receives and validates that reply against the pinned author;
+      e. a reply signed by the wrong key is refused, and the refusal names the author;
+      f. one encrypted round trip under the configured NIP-44 mode, preceded by the
+         proof that a plaintext reply in that mode is refused as a downgrade.
+
+    Every step is a real click on a real control, and the page drives the worker over the
+    channel it already had. The peer is a process the check owns, so both sides are
+    ordinary clients of the same relay rather than one program agreeing with itself.
+    """
+    bob = write_key(work, "bob.nostr-key", "22" * 32)
+    mallory = write_key(work, "mallory.nostr-key", "33" * 32)
+
+    code, output = peer(work, bob, relay_url, "coord-key")
+
+    if code != 0:
+        print(f"FAIL: the peer could not read its key:\n{output}", file=sys.stderr)
+
+        return False
+
+    bob_pub = field(output, "public key:")
+
+    code, output = peer(work, mallory, relay_url, "coord-key")
+
+    if code != 0:
+        print(f"FAIL: the wrong-key peer could not read its key:\n{output}", file=sys.stderr)
+
+        return False
+
+    mallory_pub = field(output, "public key:")
+
+    if len(bob_pub) != 64 or len(mallory_pub) != 64:
+        print(f"FAIL: peer keys are not x-only keys ({bob_pub!r}, {mallory_pub!r})", file=sys.stderr)
+
+        return False
+
+    print(f"PASS: coordination peers ready (bob {bob_pub[:12]}…, wrong key {mallory_pub[:12]}…)")
+
+    async def panel() -> str:
+        return str(await evaluate(ws, "document.getElementById('coord').innerText", [1200]))
+
+    async def wait_for(needle: str):
+        reached = await poll(
+            ws,
+            "document.getElementById('coord').innerText.includes(" + repr(needle) + ") ? 'true' : ''",
+            budget,
+        )
+
+        if reached != "true":
+            text = await panel()
+
+            print(f"FAIL: the coordination panel never showed {needle!r}:\n{text}", file=sys.stderr)
+
+            return None
+
+        return await panel()
+
+    async def open_record(pinned: str):
+        """Click the control that opens a swap record, and read its id back."""
+        await evaluate(ws, (
+            "(() => {"
+            "  document.getElementById('coord-blake').value = '10';"
+            "  document.getElementById('coord-sats').value = '50000';"
+            "  document.getElementById('coord-peer').value = " + repr(pinned) + ";"
+            "  document.querySelector(\"[data-uicmd='coord-open']\").click();"
+            "  return 'clicked';"
+            "})()"
+        ), [1000])
+
+        text = await wait_for("COORDINATION SWAP OPENED")
+
+        if text is None:
+            return None
+
+        swap_id = field(text, "swap id:")
+
+        if len(swap_id) != 12:
+            print(f"FAIL: the opened record printed no swap id:\n{text}", file=sys.stderr)
+
+            return None
+
+        return swap_id
+
+    async def announce(kind: str, swap_id: str):
+        """Click announce, and read the published event id and sender back."""
+        await evaluate(ws, (
+            "(() => {"
+            "  document.getElementById('swap-id').value = " + repr(swap_id) + ";"
+            "  document.getElementById('coord-kind').value = " + repr(kind) + ";"
+            "  document.querySelector(\"[data-uicmd='coord-send']\").click();"
+            "  return 'clicked';"
+            "})()"
+        ), [1000])
+
+        text = await wait_for("COORDINATION MESSAGE PUBLISHED")
+
+        if text is None:
+            return None
+
+        event_id = field(text, "event id:")
+
+        if len(event_id) != 64:
+            print(f"FAIL: the announcement printed no event id:\n{text}", file=sys.stderr)
+
+            return None
+
+        return {"event_id": event_id, "sender": field(text, "sender:"), "text": text}
+
+    async def receive(kind: str, swap_id: str):
+        """Click receive and return the panel, whatever it says."""
+        await evaluate(ws, (
+            "(() => {"
+            "  document.getElementById('swap-id').value = " + repr(swap_id) + ";"
+            "  document.getElementById('coord-kind').value = " + repr(kind) + ";"
+            "  document.querySelector(\"[data-uicmd='coord-receive']\").click();"
+            "  return 'clicked';"
+            "})()"
+        ), [1000])
+
+        # Either answer is a fact about the transport, so wait for the command to leave
+        # its pending line rather than for one particular outcome.
+        reached = await poll(ws, (
+            "(() => {"
+            "  const text = document.getElementById('coord').innerText;"
+            "  if (text.includes('running coord.')) { return ''; }"
+            "  return text.includes('COORDINATION MESSAGE') || text.includes('failed') ? 'true' : '';"
+            "})()"
+        ), budget)
+
+        if reached != "true":
+            print(f"FAIL: the receive step never answered:\n{await panel()}", file=sys.stderr)
+
+            return None
+
+        return await panel()
+
+    #
+    # (a) the browser publishes a signed coordination message.
+    #
+    swap_a = await open_record(bob_pub)
+
+    if swap_a is None:
+        return False
+
+    print(f"PASS: a: opened swap {swap_a} pinned to the peer")
+
+    offer_a = await announce("offer", swap_a)
+
+    if offer_a is None:
+        return False
+
+    print(f"PASS: a: the browser published a signed offer ({offer_a['event_id'][:12]}…)")
+
+    alice_pub = offer_a["sender"]
+
+    if len(alice_pub) != 64:
+        print(f"FAIL: the announcement did not print the sender:\n{offer_a['text']}", file=sys.stderr)
+
+        return False
+
+    #
+    # (b) the second client reads and validates it.
+    #
+    code, output = peer(work, bob, relay_url, "coord-read", swap_a, "--author", alice_pub,
+                        "--kind", "offer")
+
+    if code != 0:
+        print(f"FAIL: the peer could not read the offer:\n{output}", file=sys.stderr)
+
+        return False
+
+    if "COORDINATION MESSAGE VALIDATED" not in output or f"sender:   {alice_pub}" not in output:
+        print(f"FAIL: the peer validated something else:\n{output}", file=sys.stderr)
+
+        return False
+
+    if f'"swap_id":"{swap_a}"' not in output or '"type":"offer"' not in output:
+        print(f"FAIL: the validated body is not the offer for {swap_a}:\n{output}", file=sys.stderr)
+
+        return False
+
+    print(f"PASS: b: the peer read and validated the signed offer from {alice_pub[:12]}…")
+
+    #
+    # (c) the second client replies.
+    #
+    code, output = peer(work, bob, relay_url, "coord-reply", swap_a, "--author", alice_pub,
+                        "--blake-bob-pub", "02" + "ab" * 32, "--btc-bob-pub", "03" + "cd" * 32)
+
+    if code != 0:
+        print(f"FAIL: the peer could not reply:\n{output}", file=sys.stderr)
+
+        return False
+
+    reply_event = field(output, "event id:")
+
+    if len(reply_event) != 64:
+        print(f"FAIL: the reply printed no event id:\n{output}", file=sys.stderr)
+
+        return False
+
+    print(f"PASS: c: the peer replied with an accept ({reply_event[:12]}…)")
+
+    #
+    # (d) the browser receives and validates the reply.
+    #
+    text = await receive("accept", swap_a)
+
+    if text is None:
+        return False
+
+    if "COORDINATION MESSAGE RECEIVED" not in text:
+        print(f"FAIL: the browser refused the peer's reply:\n{text}", file=sys.stderr)
+
+        return False
+
+    if field(text, "sender:") != bob_pub:
+        print(f"FAIL: the reply was accepted from the wrong author:\n{text}", file=sys.stderr)
+
+        return False
+
+    if '"type":"accept"' not in text or f'"swap_id":"{swap_a}"' not in text:
+        print(f"FAIL: the validated reply is not the accept for {swap_a}:\n{text}", file=sys.stderr)
+
+        return False
+
+    if await evaluate(ws, "document.body.dataset.coordVerified || ''", [200]) != "true":
+        print("FAIL: a validated receive never set its marker", file=sys.stderr)
+
+        return False
+
+    print(f"PASS: d: the browser received and validated the reply from {bob_pub[:12]}…")
+
+    #
+    # (e) a message signed by the wrong key is refused.
+    #
+    swap_b = await open_record(bob_pub)
+
+    if swap_b is None:
+        return False
+
+    if await announce("offer", swap_b) is None:
+        return False
+
+    code, output = peer(work, mallory, relay_url, "coord-reply", swap_b, "--author", alice_pub,
+                        "--blake-bob-pub", "02" + "ab" * 32, "--btc-bob-pub", "03" + "cd" * 32)
+
+    if code != 0:
+        print(f"FAIL: the wrong-key peer could not publish:\n{output}", file=sys.stderr)
+
+        return False
+
+    text = await receive("accept", swap_b)
+
+    if text is None:
+        return False
+
+    if "SECURITY FAILURE" not in text:
+        print(f"FAIL: a reply signed by the wrong key was not refused:\n{text}", file=sys.stderr)
+
+        return False
+
+    if mallory_pub not in text or bob_pub not in text:
+        print(f"FAIL: the refusal does not name both authors:\n{text}", file=sys.stderr)
+
+        return False
+
+    print("PASS: e: a reply signed by the wrong key was refused, naming both authors")
+
+    #
+    # (f) one encrypted round trip under the configured NIP-44 mode.
+    #
+    await evaluate(ws, (
+        "document.getElementById('coord-mode').value = 'nip44_v2';"
+        "document.querySelector(\"[data-uicmd='coord-set-mode']\").click(); 'clicked'"
+    ), [1000])
+
+    if await wait_for("encryption set: nip44_v2") is None:
+        return False
+
+    print("PASS: f: the browser is configured for nip44_v2")
+
+    bobs_keys = ("--blake-bob-pub", "02" + "ab" * 32, "--btc-bob-pub", "03" + "cd" * 32)
+
+    # A plaintext reply in this mode is a downgrade, not a message.
+    swap_c = await open_record(bob_pub)
+
+    if swap_c is None:
+        return False
+
+    offer_c = await announce("offer", swap_c)
+
+    if offer_c is None:
+        return False
+
+    if "ciphertext: none (offer is exempt" not in offer_c["text"]:
+        print(f"FAIL: the offer is not exempt from encryption:\n{offer_c['text']}", file=sys.stderr)
+
+        return False
+
+    code, output = peer(work, bob, relay_url, "coord-reply", swap_c, "--author", alice_pub,
+                        *bobs_keys)
+
+    if code != 0:
+        print(f"FAIL: the peer could not publish a plaintext reply:\n{output}", file=sys.stderr)
+
+        return False
+
+    text = await receive("accept", swap_c)
+
+    if text is None:
+        return False
+
+    if "SECURITY FAILURE" not in text or "downgrade" not in text:
+        print(f"FAIL: a plaintext accept under nip44_v2 was not refused:\n{text}", file=sys.stderr)
+
+        return False
+
+    print("PASS: f: a plaintext reply under nip44_v2 was refused as a downgrade")
+
+    # And the encrypted reply decrypts.
+    swap_d = await open_record(bob_pub)
+
+    if swap_d is None:
+        return False
+
+    if await announce("offer", swap_d) is None:
+        return False
+
+    code, output = peer(work, bob, relay_url, "coord-reply", swap_d, "--author", alice_pub,
+                        *bobs_keys, encryption="nip44_v2")
+
+    if code != 0:
+        print(f"FAIL: the peer could not publish an encrypted reply:\n{output}", file=sys.stderr)
+
+        return False
+
+    text = await receive("accept", swap_d)
+
+    if text is None:
+        return False
+
+    if "COORDINATION MESSAGE RECEIVED" not in text or field(text, "sender:") != bob_pub:
+        print(f"FAIL: the encrypted accept was not received:\n{text}", file=sys.stderr)
+
+        return False
+
+    if "mode:       nip44_v2" not in text or "ciphertext: required" not in text:
+        print(f"FAIL: the accepted reply was not encrypted under the configured mode:\n{text}",
+              file=sys.stderr)
+
+        return False
+
+    return " ".join(str(text).split())
+
+
 async def engine_round_trip(ws, budget: float):
     """Drive the vault, identity, proxy and engine panels the way a person would.
 
@@ -576,7 +1016,9 @@ def main() -> int:
 
             return 1
 
-        return asyncio.run(drive(f"http://127.0.0.1:{debug_port}", args.budget, relay_url))
+        return asyncio.run(
+            drive(f"http://127.0.0.1:{debug_port}", args.budget, work, relay_url)
+        )
     finally:
         for process in (chromium, server, relay_process):
             process.terminate()

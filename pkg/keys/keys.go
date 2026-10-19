@@ -170,7 +170,7 @@ func VerifySchnorr(publicHex string, message, signature []byte) (bool, error) {
 		return false, fmt.Errorf("signature must be %d bytes", SignatureSize)
 	}
 
-	return verifyBIP340(pub, message, signature), nil
+	return verifySchnorr(pub, message, signature), nil
 }
 
 // EqualSecrets compares two secret byte slices in constant time.

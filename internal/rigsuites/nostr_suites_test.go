@@ -1,6 +1,6 @@
 //go:build !js
 
-package swap_test
+package rigsuites
 
 import (
 	"fmt"

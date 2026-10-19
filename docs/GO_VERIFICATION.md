@@ -21,7 +21,7 @@ directions, the refund path in both directions, a stage-by-stage walk of every c
 and a record written by Go being loaded by Python. The rest of the rig-driven suites run
 this implementation on both sides.
 
-`internal/...` is part of the gate as well (`make test` runs
+The `internal` packages are part of the gate as well (`make test` runs
 `./pkg/... ./internal/... ./cmd/server`), because the packaging, documentation,
 conformance and clean-install checks live there.
 
@@ -220,17 +220,31 @@ port work:
   suite above was run on its own against the same rig, and the reference suites quoted in §2
   were run individually; the runner has not swept all 60 in one go since the last of them
   landed.
-- **The two `try`-shaped guarantees are bounded, not absolute.** A restarted node re-submits
-  its wallets' unconfirmed transactions, so "the node forgot the mempool" is not
-  reproducible for a wallet transaction (§5); and a refund submitted exactly at its CLTV
-  height can be final for the next block rather than this one, which the suites handle by
-  adopting the recorded transaction rather than by mining differently.
+- **Three guarantees are bounded, not absolute.** A restarted node re-submits its wallets'
+  unconfirmed transactions, so "the node forgot the mempool" is not reproducible for a
+  wallet transaction (§5). A refund submitted exactly at its CLTV height can be final for
+  the next block rather than this one, which the suites handle by adopting the recorded
+  transaction rather than by mining differently. And the key-recovery drill proves that a
+  wallet created after the fact **owns and can solve** an HTLC whose key it holds, but not
+  that it can *spend* it: the node will not complete a PSBT signature for an
+  announced-descriptor wallet unless the descriptor is active, and activating it would
+  change the script the drill is about. The refund spend itself is proven end to end by the
+  settlement and pre-Bitcoin refund suites, on wallets that existed when the HTLC was
+  funded.
+- **The go tool's package timeout is shorter than this repository's rig suites.** A single
+  `go test ./pkg/... ./cmd/...` on a machine without the rig skips them and finishes in a
+  minute; with the rig up, `internal/rigsuites` alone runs for longer than the ten minutes
+  `go test` allows a package, so `make test` and CI pass `-timeout 45m` (and `30m`). The
+  budget is a real deadline, not a disabled one: a hung suite still fails and still names
+  the test it was in.
 
 ## 12. Recorded command results
 
 | Command | Result |
 |---|---|
-| `go test ./pkg/... ./cmd/...` | see the run recorded with the final commit |
+| `go test ./pkg/... ./cmd/...` | exit 0: 36 packages ok; the rig-driven suites skip with a reason when no rig is present, which is what CI runs |
+| `go test -timeout 45m ./pkg/... ./internal/... ./cmd/...` | exit 0 with the rig up; every package above plus `internal/rigsuites` |
+| `./scripts/test.sh` | all 60 reference suites, run by the reference runner |
 | `tinygo test -target=wasm ./pkg/keys ./pkg/event ./pkg/nostr ./pkg/nip44 ./pkg/coord` | pass, all five packages |
 | `make wasm` | pass, both modules |
 | `python3 scripts/verify-browser.py` | exit 0: hello, boot gate, encrypted self-test, vault, identity, market relays/publish/list/take, coordination a–f, proxy, engine heights |

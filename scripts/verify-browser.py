@@ -1191,6 +1191,85 @@ async def reverse_taker_handshake(ui: Ui, work: Path, relay_url: str) -> bool:
     print(f"PASS: reverse taker: the browser imported the match as {reserved} and holds the "
           f"secret")
 
+    # The rest is an ordinary swap from Alice's side: the direction decided who made the
+    # market, and the protocol does the same thing with the money either way.
+    if not await ui.swap_action("publish-offer"):
+        return require(False, "publishing the taker's protocol offer was not confirmed")
+
+    code, output = peer_swap(work, maker_key, relay_url, "accept-reverse-swap-offer", match_id)
+
+    if not require(code == 0, f"the CLI maker could not import the taker's offer:\n{output}"):
+        return False
+
+    print("PASS: reverse taker: the CLI maker imported the taker's offer and sent its accept")
+
+    if not await ui.swap_action("receive-accept"):
+        return False
+
+    if not await ui.swap_action("fund-blake"):
+        return False
+
+    mine("blake")
+
+    if not await ui.swap_action("sync-funding"):
+        return False
+
+    if not await browser_swap_state(ui, "BLAKE_FUNDED"):
+        return False
+
+    print("PASS: reverse taker: browser Alice funded BLAKE")
+
+    if not await ui.swap_action("publish-blake-funded"):
+        return False
+
+    for command in ("receive-blake-funded", "fund-btc", "publish-btc-funded"):
+        code, output = peer_swap(work, maker_key, relay_url, command, reserved)
+
+        if not require(code == 0, f"the CLI Bob could not {command}:\n{output}"):
+            return False
+
+    print("PASS: reverse taker: CLI Bob received the BLAKE funding and funded BTC")
+
+    if not await ui.swap_action("receive-btc-funded"):
+        return False
+
+    if not await browser_swap_state(ui, "BTC_FUNDED"):
+        return False
+
+    if not await ui.swap_action("claim-btc"):
+        return False
+
+    mine("btc")
+
+    if not await ui.swap_action("sync-settlement"):
+        return False
+
+    if not await browser_swap_state(ui, "BTC_CLAIMED"):
+        return False
+
+    print("PASS: reverse taker: browser Alice claimed BTC")
+
+    if not await ui.swap_action("publish-btc-claimed"):
+        return False
+
+    for command in ("receive-btc-claimed", "extract-secret", "claim-blake",
+                    "publish-blake-claimed"):
+        code, output = peer_swap(work, maker_key, relay_url, command, reserved)
+
+        if not require(code == 0, f"the CLI Bob could not {command}:\n{output}"):
+            return False
+
+    if not await ui.swap_action("receive-blake-claimed"):
+        return False
+
+    if not await ui.swap_action("complete"):
+        return False
+
+    if not await browser_swap_state(ui, "COMPLETE"):
+        return False
+
+    print("PASS: reverse taker: the browser completed the swap as Alice")
+
     return True
 
 

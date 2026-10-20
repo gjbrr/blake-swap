@@ -32,6 +32,8 @@ func TestIgnoreMatchWritesTheTombstoneTheReferenceWrites(t *testing.T) {
 	fixture := ignoreFixture(t)
 	ctx := context.Background()
 
+	before := len(fixture.stub.Events())
+
 	ignored, err := IgnoreMatch(ctx, fixture.env, fixture.matchID, 0)
 
 	if err != nil {
@@ -67,15 +69,10 @@ func TestIgnoreMatchWritesTheTombstoneTheReferenceWrites(t *testing.T) {
 		}
 	}
 
-	// The ignore sent nothing and created nothing.
-	for _, published := range fixture.stub.Events() {
-		if published.ID == fixture.matchID {
-			continue
-		}
-
-		if published.HasTag("t", "ignored") {
-			t.Fatal("ignoring a match published an event")
-		}
+	// The ignore sent nothing: the relay holds exactly what it held before, on a path where
+	// every other market operation publishes something.
+	if after := len(fixture.stub.Events()); after != before {
+		t.Fatalf("ignoring a match published %d event(s)", after-before)
 	}
 
 	if _, err := fixture.env.Records.Load(ctx, fixture.swapID); err == nil {

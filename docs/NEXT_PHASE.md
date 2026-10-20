@@ -8,9 +8,10 @@ clean-room gate is green.
 
 the product is a non-custodial swap client for BTC and XBT, and it is one web app. the
 wallet, the swap engine and the chain client are one Go codebase compiled to wasm. the
-chain data is BIP157 compact filters served by the Start9 package over a Nostr rendezvous.
-the Start9 is a commodity chain-data source and relay host, not a custodian and not an
-indexer.
+chain data is BIP157 compact filters served by the Start9 package over a Nostr
+rendezvous, and the same package keeps the coordination record and history for the swaps
+that pass through it. the Start9 is a commodity chain-data source and rendezvous host,
+not a custodian and not a chain indexer.
 
 there is one build and one client. there is no native client, no mobile app, no sidecar
 and no second codebase. the same wasm bundle can be wrapped in a desktop shell later with
@@ -50,16 +51,19 @@ bug, not just a test problem.
    signs the HTLC funding, claim and refund paths, and broadcasts the signed bytes. the
    node never holds the client's keys and never signs for the client.
 3. **compact filters are the chain source.** the client matches its own scripts locally,
-   so neither the gateway nor the relay sees the wallet's addresses. only the funding
-   transaction reveals the exact UTXOs, on-chain, at funding time.
+   so the gateway never sees the wallet's scanning set or its other addresses. it sees
+   only what the swap record carries and what funding reveals on-chain.
 4. **one transport for the page and the gateway.** a browser cannot open a Bitcoin P2P
    TCP socket and the Start9 has no inbound port, so both ends meet at a public Nostr
    relay. the gateway dials out and starts the rendezvous listener; the page opens a
    WebSocket bridge for bulk filters. Nostr is discovery and control only.
-5. **the Start9 package is the chain-data source.** its configuration enables
-   `blockfilterindex=basic` for BTC Core and XBT Knots, and it runs the gateway server
-   that serves filter headers and filters and starts the rendezvous listener. it holds no
-   keys and signs nothing. any BIP157 peer can replace it.
+5. **the Start9 package is the chain-data source and the swap record.** its
+   configuration enables `blockfilterindex=basic` for BTC Core and XBT Knots, and it runs
+   the gateway server that serves filter headers and filters and starts the rendezvous
+   listener. it also stores the coordination record of each swap done through it: terms,
+   participants, state and txids. it holds no keys, signs nothing and learns nothing
+   beyond the coordination. any BIP157 peer can replace the chain-data half; the swap
+   record belongs to the rendezvous half.
 6. **offers carry terms, not outpoints.** an offer names direction, amount, price, timeout
    policy, secret hash and the maker's pubkeys. the taker supplies their pubkeys and a
    payout address. the wallet selects UTXOs at funding time. the receiver supplies no
@@ -149,9 +153,21 @@ the gateway server:
 - health: node tip against gateway tip, filter index height per chain, relay connections,
   bridge sessions.
 
+the swap record:
+
+- both ends use the same gateway, so the gateway is the natural holder of the interaction
+  history. it stores, per swap: the offer terms, the participant pubkeys, the state
+  machine position, the funding txids, the claim or refund txid, and timestamps.
+- it stores nothing else. no seed, no private key, no wallet descriptor, no address scan,
+  no preimage before the claim reveals it on-chain. no KYC and no external query.
+- the record is what lets either end resume after a restart and what the web app shows as
+  history. it is the coordination history, not a chain index.
+- retention is a setting: keep, or prune after a stated period. clarity here matters more
+  than the default.
+
 the gateway holds no keys and signs nothing. the relay sees ciphertext; the gateway sees
-the requested heights and hashes. the gateway can withhold data, but the client verifies
-the header and filter chain, so it cannot forge it.
+the requested heights and hashes plus the swap record it stores. the gateway can withhold
+data, but the client verifies the header and filter chain, so it cannot forge it.
 
 the package's current operator-driven CLI alpha is not the target shape. its swap actions
 either become operator actions behind the new gateway or retire; the package's primary
@@ -202,8 +218,8 @@ protocol failure. multiple relays and multiple gateways remove the single point.
 
 - no keys on the gateway; no signing; no wallet RPC.
 - the relay sees ciphertext and traffic metadata, not the wallet's addresses.
-- the gateway sees the requested heights, hashes and transactions, not the wallet's
-  addresses or UTXOs.
+- the gateway sees the requested heights, hashes and transactions, plus the swap record
+  it stores. it does not see the wallet's scanning set, its other addresses or its UTXOs.
 - the client verifies the header chain and the filter headers. a gateway can withhold,
   not forge.
 - only the funding transaction reveals the exact UTXOs, on-chain, at funding time.
@@ -219,6 +235,10 @@ the existing market, reverse maker and taker, ignore-match, vault, wallet slot a
 activity views are reused. the web app adds gateway discovery, the sync status, the wallet
 balance, receive and funding. the page holds no node credentials and makes no wallet RPC
 calls.
+
+the history view reads the gateway's swap record for swaps coordinated there, and the
+local vault for everything else. the record is the interaction history, never a balance
+authority: balances come from the client's own filter scan.
 
 the browser is the only place the seed lives, so the vault and the export path are the
 security surface. the UI states this plainly. storage is persistent only if the user
@@ -270,6 +290,7 @@ web app:
 - the node holds no keys and the page makes no wallet RPC calls.
 - only the funding inputs are visible on-chain; the seed backup restores the wallet.
 - the restored wallet rescans and sees an already-funded HTLC.
+- the gateway keeps the swap record across a restart and both ends see the same history.
 - the existing browser assertions and the new ones pass in a clean checkout.
 
 Start9 package:
@@ -289,6 +310,8 @@ Start9 package:
   not the MVP.
 - operations: who runs the public rendezvous relays and the gateways; how they are
   funded; how abuse is handled.
+- swap record retention and deletion: how long a gateway keeps history, and whether a
+  user can ask for deletion.
 - whether the existing package's swap actions are kept as operator actions or retired
   once the web app owns the flow.
 
@@ -316,7 +339,7 @@ Start9 package:
 - hardware wallets.
 - fiat on-ramps.
 - a general-purpose wallet, coinjoin or multi-account history.
-- a custodian, a central indexer or a wallet RPC for the client.
+- a custodian, a central chain indexer or a wallet RPC for the client.
 - WebRTC or WebTransport before the WebSocket bridge is proven.
 
 ## immediate stopping point

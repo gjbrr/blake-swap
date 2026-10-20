@@ -9,12 +9,15 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gjbrr/blake-swap/pkg/amount"
 	"github.com/gjbrr/blake-swap/pkg/event"
 	"github.com/gjbrr/blake-swap/pkg/market"
 	"github.com/gjbrr/blake-swap/pkg/marketflow"
 	"github.com/gjbrr/blake-swap/pkg/nostr"
 	"github.com/gjbrr/blake-swap/pkg/platform"
+	"github.com/gjbrr/blake-swap/pkg/model"
 	"github.com/gjbrr/blake-swap/pkg/proto"
+	"github.com/gjbrr/blake-swap/pkg/store"
 	"github.com/gjbrr/blake-swap/pkg/relaystub"
 )
 
@@ -198,5 +201,190 @@ func TestMarketAcceptTakeReverseDirection(t *testing.T) {
 
 	if len(live) != 0 {
 		t.Fatalf("the reverse accept created swap state: %v", live)
+	}
+}
+
+// workerMatch is a reverse negotiation on a stub relay, seen by its taker: the vault identity
+// is the one the match addresses, which is what an ignore acts on.
+type workerMatch struct {
+	domain  *marketDomain
+	vault   *vaultDomain
+	stub    *relaystub.Stub
+	dialer  func(ctx context.Context, url string) (nostr.Conn, error)
+	match   market.Match
+	matchID string
+}
+
+// newWorkerMatch builds a match whose taker is this browser's identity.
+func newWorkerMatch(t *testing.T) *workerMatch {
+	t.Helper()
+
+	stub, err := relaystub.New()
+
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Cleanup(stub.Close)
+
+	vault := openMarketVault(t)
+
+	if err := vault.writeSecret(context.Background(), SecretRelays, stub.URL); err != nil {
+		t.Fatal(err)
+	}
+
+	dialer := func(ctx context.Context, url string) (nostr.Conn, error) {
+		return platform.DialWebSocket(ctx, url)
+	}
+
+	// The vault's identity is the taker; the maker is somebody else.
+	secret, err := vault.readSecret(context.Background(), SecretIdentity)
+
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	alice, err := nostr.NewKey(secret)
+
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	bob, err := nostr.NewKey(strings.Repeat("22", 32))
+
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	now := time.Now().Unix()
+
+	offerEvent, _, err := marketflow.BuildOffer(bob, marketflow.BuildOfferOptions{
+		BlakeAmount: amount.MustParseBlake("10"),
+		BTCSats:     50_000,
+		Minutes:     30,
+		Direction:   market.BTCForBlake,
+		CreatedAt:   now,
+	})
+
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	listed, err := marketflow.ParseOffer(offerEvent, time.Now())
+
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	takeEvent, take, err := marketflow.BuildTake(alice, marketflow.BuildTakeOptions{
+		Offer: *listed, CreatedAt: now,
+	})
+
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	matchEvent, match, err := marketflow.BuildMatch(bob, marketflow.BuildMatchOptions{
+		Offer:       *listed,
+		OfferEvent:  offerEvent,
+		TakeEvent:   takeEvent,
+		Taker:       &take,
+		SwapID:      "aaaa00000001",
+		BlakeAmount: listed.BlakeAmount,
+		BTCSats:     listed.BTCSats,
+		CreatedAt:   now,
+	})
+
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, published := range []event.Event{offerEvent, takeEvent, matchEvent} {
+		stub.Inject(published)
+	}
+
+	return &workerMatch{
+		domain: newMarketDomain(vault, dialer), vault: vault, stub: stub, dialer: dialer,
+		match: match, matchID: matchEvent.ID,
+	}
+}
+
+// asTaker is the fixture's default state: the vault identity is the match's taker. It exists
+// so a test that changes it says so.
+func (m *workerMatch) asTaker() {}
+
+// TestMarketIgnoreMatchIsLocalAndDurable: ignoring a match writes a sealed tombstone, is
+// repeatable, and reaches no relay.
+func TestMarketIgnoreMatchIsLocalAndDurable(t *testing.T) {
+	fixture := newWorkerMatch(t)
+
+	// The taker's own client is the one that can ignore the match it was addressed.
+	fixture.asTaker()
+
+	before := len(fixture.stub.Events())
+
+	ignored := ask(t, fixture.domain, "market.ignore-match", map[string]string{
+		"match_id": fixture.matchID[:8],
+	})
+
+	if !ignored.OK {
+		t.Fatalf("ignoring the match: %+v", ignored)
+	}
+
+	if got := len(fixture.stub.Events()); got != before {
+		t.Fatalf("ignoring a match published %d event(s)", got-before)
+	}
+
+	// The tombstone is in the vault, so it survives a reload: a second domain over the same
+	// vault reads it without any state.
+	reopened := newMarketDomain(fixture.vault, fixture.dialer)
+	reopened.now = time.Now
+
+	listed := ask(t, reopened, "market.matches", nil)
+
+	if !listed.OK {
+		t.Fatalf("listing matches: %+v", listed)
+	}
+
+	if strings.Contains(listed.Text, fixture.matchID) {
+		t.Fatalf("an ignored match is still listed:\n%s", listed.Text)
+	}
+
+	again := ask(t, fixture.domain, "market.ignore-match", map[string]string{
+		"match_id": fixture.matchID,
+	})
+
+	if !again.OK || !strings.Contains(again.Text, "already ignored") {
+		t.Fatalf("the repeat was not reported: %+v", again)
+	}
+}
+
+// TestMarketIgnoreMatchRefusesATradeInProgress: a match with local swap state is a trade here,
+// and hiding it would hide the trade.
+func TestMarketIgnoreMatchRefusesATradeInProgress(t *testing.T) {
+	fixture := newWorkerMatch(t)
+	fixture.asTaker()
+
+	record := &model.Swap{
+		SwapID:               fixture.matchID[:0] + "aaaa00000001",
+		State:                "OFFERED",
+		SecretHash:           strings.Repeat("00", 32),
+		BlakeAmountBaseUnits: 1_000_000_000,
+		BTCSats:              50_000,
+	}
+
+	alice := fixture.match.Taker
+	record.NostrAlicePub = &alice
+
+	if err := fixture.vault.store.Save(context.Background(), store.Alice, record); err != nil {
+		t.Fatal(err)
+	}
+
+	refused := ask(t, fixture.domain, "market.ignore-match", map[string]string{
+		"match_id": fixture.matchID,
+	})
+
+	if refused.OK || !strings.Contains(refused.Error, "already has local swap state") {
+		t.Fatalf("a live trade was ignorable: %+v", refused)
 	}
 }

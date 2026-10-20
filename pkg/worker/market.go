@@ -109,6 +109,9 @@ func (d *marketDomain) Handle(ctx context.Context, request proto.Request) proto.
 	case "market.accept-reverse-offer":
 		return d.acceptReverseOffer(ctx, request)
 
+	case "market.ignore-match":
+		return d.ignoreMatch(ctx, request)
+
 	case "market.cancel":
 		return d.cancel(ctx, request)
 	}
@@ -548,6 +551,39 @@ func (f vaultFiles) Write(ctx context.Context, name string, data []byte) error {
 	return f.vault.writeSecret(ctx, marketFilePrefix+name, string(data))
 }
 
+// Names implements marketops.TombstoneStore.
+//
+// The tombstones are sealed like every other market document, so the enumeration is over the
+// vault's own secret names rather than over a filesystem the browser does not have.
+func (f vaultFiles) Names(ctx context.Context, directory string) ([]string, error) {
+	names, err := f.vault.store.SecretNames(ctx)
+
+	if err != nil {
+		return nil, err
+	}
+
+	prefix := marketFilePrefix + directory + "/"
+
+	var found []string
+
+	for _, name := range names {
+		if !strings.HasPrefix(name, prefix) {
+			continue
+		}
+
+		found = append(found, directory+"/"+strings.TrimPrefix(name, prefix))
+	}
+
+	sort.Strings(found)
+
+	return found, nil
+}
+
+// Remove implements marketops.TombstoneStore.
+func (f vaultFiles) Remove(ctx context.Context, name string) error {
+	return f.vault.store.DeleteSecret(ctx, marketFilePrefix+name)
+}
+
 // marketFilePrefix keeps the market's documents in their own corner of the vault.
 const marketFilePrefix = "market/"
 
@@ -558,6 +594,31 @@ func (d *marketDomain) engineFor(ctx context.Context) (*swap.Engine, error) {
 	}
 
 	return d.engine(ctx)
+}
+
+// readEnv builds the environment a market read needs: the relays, the identity and the
+// durable documents, without a swap engine.
+func (d *marketDomain) readEnv(ctx context.Context) (*marketops.Env, error) {
+	key, err := d.identity(ctx)
+
+	if err != nil {
+		return nil, err
+	}
+
+	client, err := d.client(ctx)
+
+	if err != nil {
+		return nil, err
+	}
+
+	return &marketops.Env{
+		Client:   client,
+		Identity: key,
+		Records:  d.vault.store,
+		Files:    vaultFiles{vault: d.vault},
+		Random:   randomReader{},
+		Now:      d.now,
+	}, nil
 }
 
 // acceptEnv builds the environment the market operations run in.
@@ -640,7 +701,7 @@ func (d *marketDomain) takes(ctx context.Context, request proto.Request) proto.R
 
 // matches lists the verified matches that name this participant.
 func (d *marketDomain) matches(ctx context.Context, request proto.Request) proto.Result {
-	env, _, err := d.acceptEnv(ctx)
+	env, err := d.readEnv(ctx)
 
 	if err != nil {
 		return failed(request.Command, err)
@@ -653,6 +714,27 @@ func (d *marketDomain) matches(ctx context.Context, request proto.Request) proto
 	}
 
 	found := marketflow.MatchesFor(env.Identity.Public, evidence, d.now())
+
+	// A tombstone is this machine's opinion, not a fact about the evidence, so it filters the
+	// listing and nothing else. Losing it would make an ignored match resurface on the next
+	// refresh, which is the one thing "ignore" promises not to do.
+	ignored, err := marketops.IgnoredMatchIDs(ctx, env, 0)
+
+	if err != nil {
+		return failed(request.Command, err)
+	}
+
+	kept := make([]marketflow.MatchEntry, 0, len(found))
+
+	for _, match := range found {
+		if ignored[match.Event.ID] {
+			continue
+		}
+
+		kept = append(kept, match)
+	}
+
+	found = kept
 
 	var lines []string
 
@@ -901,6 +983,72 @@ func (d *marketDomain) acceptReverseOffer(ctx context.Context, request proto.Req
 	text := "imported reverse offer for match " + imported.MatchID + " as swap " + imported.SwapID
 
 	return withView(proto.Result{Command: request.Command, OK: true, Text: text}, action)
+}
+
+// ignoreMatch tombstones one valid match locally.
+//
+// The tombstone is local and durable: nothing is published, no record is created and no funds
+// move. The browser has no process environment to read a lifetime from, so its tombstones last
+// until they are removed — the TTL the CLI can configure has no browser equivalent to configure
+// it from, and inventing one would be a policy nobody chose.
+func (d *marketDomain) ignoreMatch(ctx context.Context, request proto.Request) proto.Result {
+	matchID := strings.ToLower(strings.TrimSpace(request.Args["match_id"]))
+
+	if matchID == "" {
+		return proto.Result{Command: request.Command, Error: "match_id is required"}
+	}
+
+	env, err := d.readEnv(ctx)
+
+	if err != nil {
+		return failed(request.Command, err)
+	}
+
+	ignored, err := marketops.IgnoreMatch(ctx, env, matchID, 0)
+
+	if ambiguous, ok := marketops.IsAmbiguous(err); ok {
+		return proto.Result{
+			Command: request.Command,
+			Error:   ambiguous.Error() + ": " + strings.Join(matchIDs(ambiguous.Candidates), ", "),
+		}
+	}
+
+	if err != nil {
+		return failed(request.Command, err)
+	}
+
+	action := view.Action(request.Command, "", "ignore-market-match")
+	action.Message = ignored.MatchID
+	action.Details = []proto.ActionFact{
+		{Label: "match id", Value: ignored.MatchID},
+		{Label: "swap id", Value: ignored.SwapID},
+		{Label: "where", Value: "local tombstone, sealed in the vault"},
+	}
+
+	if ignored.AlreadyIgnored {
+		action.Details = append(action.Details, proto.ActionFact{
+			Label: "note", Value: "this match was already ignored; nothing changed",
+		})
+	}
+
+	text := "ignored match " + ignored.MatchID
+
+	if ignored.AlreadyIgnored {
+		text = "match " + ignored.MatchID + " was already ignored"
+	}
+
+	return withView(proto.Result{Command: request.Command, OK: true, Text: text}, action)
+}
+
+// matchIDs lists the candidates of an ambiguous match prefix.
+func matchIDs(candidates []marketflow.MatchEntry) []string {
+	ids := make([]string, 0, len(candidates))
+
+	for _, entry := range candidates {
+		ids = append(ids, entry.Event.ID)
+	}
+
+	return ids
 }
 
 // cancel publishes this participant's cancellation of an offer they made.

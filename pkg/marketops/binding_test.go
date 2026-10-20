@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"io/fs"
+	"sort"
 	"strings"
 	"testing"
 
@@ -33,6 +34,28 @@ func (m memoryFiles) Read(_ context.Context, name string) ([]byte, error) {
 
 func (m memoryFiles) Write(_ context.Context, name string, data []byte) error {
 	m[name] = data
+
+	return nil
+}
+
+// Names implements TombstoneStore.
+func (m memoryFiles) Names(_ context.Context, directory string) ([]string, error) {
+	names := make([]string, 0, len(m))
+
+	for name := range m {
+		if strings.HasPrefix(name, directory+"/") {
+			names = append(names, name)
+		}
+	}
+
+	sort.Strings(names)
+
+	return names, nil
+}
+
+// Remove implements TombstoneStore.
+func (m memoryFiles) Remove(_ context.Context, name string) error {
+	delete(m, name)
 
 	return nil
 }

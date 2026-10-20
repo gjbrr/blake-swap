@@ -467,6 +467,18 @@ func (e *Encrypted) GetSecret(ctx context.Context, name string) ([]byte, bool, e
 	return e.get(ctx, secretPrefix+name)
 }
 
+// DeleteSecret removes one sealed named value.
+//
+// It exists for the local records a client must be able to forget: an expired match
+// tombstone that is left behind is a document an operator will eventually misread.
+func (e *Encrypted) DeleteSecret(ctx context.Context, name string) error {
+	if name == "" {
+		return fmt.Errorf("a secret needs a name")
+	}
+
+	return e.kv.Delete(ctx, secretPrefix+name)
+}
+
 // SecretNames lists the stored secret names.
 func (e *Encrypted) SecretNames(ctx context.Context) ([]string, error) {
 	keys, err := e.kv.Keys(ctx, secretPrefix)

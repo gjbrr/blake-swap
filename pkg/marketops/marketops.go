@@ -113,6 +113,23 @@ func (e *Env) check() error {
 	return nil
 }
 
+// checkMarket validates the environment a market read needs.
+//
+// It is a smaller requirement than check: a read has no swap to create, so a client that can
+// only read the market must not be refused for lacking an engine.
+func (e *Env) checkMarket() error {
+	switch {
+	case e.Client == nil:
+		return fmt.Errorf("the market operations need a relay client")
+	case e.Identity == nil:
+		return fmt.Errorf("the market operations need an identity")
+	case e.Files == nil:
+		return fmt.Errorf("the market operations need a durable store")
+	}
+
+	return nil
+}
+
 // TakeSet is one offer together with the valid takes of it.
 type TakeSet struct {
 	// Offer is the exact signed offer event.

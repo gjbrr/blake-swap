@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"testing"
 
+	"strings"
+
 	"github.com/gjbrr/blake-swap/internal/rigtest"
 	"github.com/gjbrr/blake-swap/pkg/relaystub"
 )
@@ -100,6 +102,33 @@ func marketWalk(t *testing.T, r *rigtest.Rig, impl string) map[string]string {
 	//
 	bob := participant("bob")
 
+	failing := func(name string, side *rigtest.Side, args ...string) string {
+		t.Helper()
+
+		output, exit, err := r.Exec(t, side, spool, env, args...)
+
+		if err != nil {
+			t.Fatalf("%s %v: %v", impl, args, err)
+		}
+
+		if exit == 0 {
+			t.Fatalf("%s %v was accepted:\n%s", impl, args, output)
+		}
+
+		// The reference raises, so its refusal arrives inside a traceback and the port
+		// prints one `ERROR:` line. What both claim is the sentence, and that is what is
+		// compared — the same rule the parity walk's other refusals use.
+		sentence := portMessage(output)
+
+		if impl == "python" {
+			sentence = referenceMessage(output)
+		}
+
+		outputs[name] = sentence
+
+		return output
+	}
+
 	taken := run("take-market-offer", bob, "take-market-offer", offerID)
 	takeID := marketValue(t, taken, "take id")
 
@@ -161,6 +190,48 @@ func marketWalk(t *testing.T, r *rigtest.Rig, impl string) map[string]string {
 	run("reverse accept-reverse-swap-offer again", reverseBob,
 		"accept-reverse-swap-offer", reverseMatchID)
 	//
+	// The local tombstone, with a fresh pair so the taker has no imported swap yet. The
+	// listing runs first, which warms both clients' caches: a comparison after one client
+	// had already cached the match's offer and take would compare cache population rather
+	// than what the command does.
+	//
+	ignoreMaker := participant("alice")
+	ignoreTaker := participant("bob")
+
+	ignoreOffer := run("ignore publish-market-offer", ignoreMaker,
+		"publish-market-offer", "--blake", "7", "--sats", "70000", "--minutes", "30")
+	ignoreOfferID := marketValue(t, ignoreOffer, "offer id")
+
+	ignoreTaken := run("ignore take-market-offer", ignoreTaker,
+		"take-market-offer", ignoreOfferID)
+	ignoreTakeID := marketValue(t, ignoreTaken, "take id")
+
+	ignoreAccepted := run("ignore accept-market-take", ignoreMaker,
+		"accept-market-take", ignoreTakeID)
+	ignoreMatchID := marketValue(t, ignoreAccepted, "match id")
+
+	//
+	// What the tombstone changes is compared here; what it does to the *listing* is not,
+	// because the two clients reach this point with different caches and the reference
+	// reports every event it had to fetch. `market-matches` is compared in the forward
+	// phase, and the suppression of pending work is covered by the Go tests on both
+	// front ends.
+	//
+	//
+	// `ignore-match` reads the match and its two references, and how much of that read the
+	// client already had cached is not what this step is about: the reference fetches an
+	// offer it has cached and reports where from. The block the command prints is compared,
+	// and the scan chatter is compared in the forward phase.
+	//
+	ignored := run("ignore-match", ignoreTaker, "ignore-match", ignoreMatchID[:12])
+	outputs["ignore-match"] = blockFrom(ignored, "MARKET MATCH IGNORED")
+
+	again := run("ignore-match again", ignoreTaker, "ignore-match", ignoreMatchID[:12])
+	outputs["ignore-match again"] = blockFrom(again, "MATCH ALREADY IGNORED")
+	failing("ignore-match no candidate", ignoreTaker, "ignore-match", strings.Repeat("ab", 32))
+	failing("ignore-match short prefix", ignoreTaker, "ignore-match", "abc")
+
+	//
 	// The listing itself is compared in the forward phase, where both implementations
 	// cache the same events. A reverse `market-matches` would compare which events each
 	// client had already cached rather than what the command does: the port caches every
@@ -169,6 +240,21 @@ func marketWalk(t *testing.T, r *rigtest.Rig, impl string) map[string]string {
 	//
 
 	return outputs
+}
+
+// blockFrom keeps a command's own block, dropping the relay chatter it printed while reading.
+func blockFrom(output, marker string) string {
+	at := indexOf(output, marker)
+
+	if at < 0 {
+		return output
+	}
+
+	if newline := indexOf(output[at:], "\n"); newline == 1 {
+		at--
+	}
+
+	return output[at:]
 }
 
 // bridgeOffset is where the market-to-swap bridge block starts, which is where the match

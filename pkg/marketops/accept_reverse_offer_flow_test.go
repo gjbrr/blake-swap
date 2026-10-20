@@ -130,6 +130,7 @@ func (t *recordingTransport) Receive(
 // reverseOfferFixture is one reverse negotiation with a valid signed match.
 type reverseOfferFixture struct {
 	env       *Env
+	stub      *relaystub.Stub
 	engine    *handshakeEngine
 	bob, hers *nostr.Key
 	match     event.Event
@@ -231,7 +232,7 @@ func newReverseOfferFixture(t *testing.T) *reverseOfferFixture {
 	}
 
 	return &reverseOfferFixture{
-		env: env, engine: engine, bob: bob, hers: alice,
+		env: env, stub: stub, engine: engine, bob: bob, hers: alice,
 		match: built, matchID: built.ID, swapID: swapID,
 	}
 }

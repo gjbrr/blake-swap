@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -11,10 +10,15 @@ import (
 	"time"
 
 	"github.com/gjbrr/blake-swap/pkg/marketflow"
+	"github.com/gjbrr/blake-swap/pkg/marketops"
 	"github.com/gjbrr/blake-swap/pkg/swap"
 )
 
 // ignoreDirectory holds the local tombstones for matches a participant has dismissed.
+//
+// The directory name is the reference's, and so is the shape of one tombstone: a participant
+// who runs the Python engine one day and this one the next must find the matches they
+// dismissed still dismissed.
 const ignoreDirectory = "ignored-market-matches"
 
 // runIgnoreMatch records that a valid, unimported match should stop being offered.
@@ -28,70 +32,43 @@ func runIgnoreMatch(ctx context.Context, engine *swap.Engine, args []string) err
 		return fmt.Errorf("ignore-match takes one match id or prefix")
 	}
 
-	key, err := engineKey(engine)
+	if _, err := engineKey(engine); err != nil {
+		return err
+	}
+
+	client := marketClient()
+
+	env, err := marketEnvOrError(engine, client, func(line string) { fmt.Print(line) })
 
 	if err != nil {
 		return err
 	}
 
-	requested := strings.ToLower(strings.TrimSpace(args[0]))
-
-	if len(requested) < 8 {
-		return fmt.Errorf("match ID prefix is too short; use at least 8 characters")
-	}
-
-	matches, err := fetchMatches(ctx, key, 200)
+	ttl, err := ignoredMatchTTL()
 
 	if err != nil {
 		return err
 	}
 
-	var candidates []marketflow.MatchEntry
+	ignored, err := marketops.IgnoreMatch(ctx, env, args[0], time.Duration(ttl)*time.Second)
 
-	for _, entry := range matches {
-		if strings.HasPrefix(entry.Event.ID, requested) {
-			candidates = append(candidates, entry)
-		}
+	if ambiguous, ok := marketops.IsAmbiguous(err); ok {
+		fmt.Print(renderAmbiguousMatches(ambiguous.Candidates))
+
+		return err
 	}
 
-	if len(candidates) == 0 {
-		return fmt.Errorf("No valid market match begins with '%s'", requested)
+	if err != nil {
+		return err
 	}
 
-	if len(candidates) > 1 {
-		fmt.Print(renderAmbiguousMatches(candidates))
-
-		return fmt.Errorf("Match prefix is ambiguous; use more characters")
-	}
-
-	entry := candidates[0]
-	matchID := entry.Event.ID
-	swapID := entry.Match.SwapID
-
-	// A match that already has local swap state is being negotiated here; ignoring it
-	// would hide a trade in progress.
-	if swapID != "" && localSwapExists(swapID) {
-		return fmt.Errorf("Refusing to ignore: this match already has local swap state")
-	}
-
-	dir := filepath.Join(stateDirectory(), ignoreDirectory)
-	path := filepath.Join(dir, matchID+".json")
-
-	if _, err := os.Stat(path); err == nil {
-		fmt.Print(renderAlreadyIgnored(matchID))
+	if ignored.AlreadyIgnored {
+		fmt.Print(renderAlreadyIgnored(ignored.MatchID))
 
 		return nil
 	}
 
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return err
-	}
-
-	if err := writeTombstone(path, matchID, entry); err != nil {
-		return err
-	}
-
-	fmt.Print(renderIgnored(matchID, swapID))
+	fmt.Print(renderIgnored(ignored.MatchID, ignored.SwapID))
 
 	return nil
 }
@@ -105,40 +82,6 @@ func localSwapExists(swapID string) bool {
 	_, err := os.Stat(filepath.Join(stateDirectory(), swapID+".json"))
 
 	return err == nil
-}
-
-// writeTombstone writes the local record atomically.
-//
-// A half-written tombstone is worse than none: the next run would see the file, say
-// "already ignored", and never retry — so the rename is what publishes it.
-func writeTombstone(path, matchID string, entry marketflow.MatchEntry) error {
-	record := map[string]any{
-		"match_id":     matchID,
-		"swap_id":      nilIfEmpty(entry.Match.SwapID),
-		"offer_id":     entry.Match.OfferID,
-		"take_id":      entry.Match.TakeID,
-		"maker":        entry.Match.Maker,
-		"taker":        entry.Match.Taker,
-		"direction":    string(entry.Match.Direction),
-		"blake_amount": json.RawMessage(pythonFloat(blakeFloat(entry.Match.BlakeAmount))),
-		"btc_sats":     entry.Match.BTCSats,
-		"ignored_at":   time.Now().Unix(),
-		"local_only":   true,
-	}
-
-	encoded, err := json.MarshalIndent(record, "", "  ")
-
-	if err != nil {
-		return err
-	}
-
-	temporary := path + ".tmp"
-
-	if err := os.WriteFile(temporary, append(encoded, '\n'), 0o600); err != nil {
-		return err
-	}
-
-	return os.Rename(temporary, path)
 }
 
 // renderIgnored is the reference's confirmation for a new tombstone.
@@ -192,7 +135,8 @@ func renderAmbiguousMatches(candidates []marketflow.MatchEntry) string {
 // tombstone is both ignored and removed when the tombstones are next read, so a match that was
 // dismissed by mistake comes back rather than disappearing for good.
 //
-// Override with BLAKE_SWAP_IGNORED_MATCH_TTL_SECONDS.
+// Override with BLAKE_SWAP_IGNORED_MATCH_TTL_SECONDS. The browser client has no process
+// environment, so it always uses zero; its tombstones last until they are removed.
 func ignoredMatchTTL() (int64, error) {
 	raw := strings.TrimSpace(os.Getenv("BLAKE_SWAP_IGNORED_MATCH_TTL_SECONDS"))
 
@@ -215,10 +159,8 @@ func ignoredMatchTTL() (int64, error) {
 
 // ignoredMatchIDs is the set of match ids this participant has dismissed.
 //
-// A tombstone only counts when it is named after the match it records and there is 64
-// hexadecimal characters of it — a file that is not a tombstone is not a suppression. An
-// expired tombstone is removed here rather than left to rot, because a file that no longer
-// suppresses anything is a file an operator will eventually misread.
+// The predicate and the expiry check are the shared ones: the browser filters its match list
+// with the same code, so the two clients cannot disagree about which matches were dismissed.
 func ignoredMatchIDs() (map[string]bool, error) {
 	ttl, err := ignoredMatchTTL()
 
@@ -226,69 +168,7 @@ func ignoredMatchIDs() (map[string]bool, error) {
 		return nil, err
 	}
 
-	dir := filepath.Join(stateDirectory(), ignoreDirectory)
+	env := &marketops.Env{Files: stateFiles{root: stateDirectory()}}
 
-	entries, err := os.ReadDir(dir)
-
-	if os.IsNotExist(err) {
-		return map[string]bool{}, nil
-	}
-
-	if err != nil {
-		return nil, err
-	}
-
-	ignored := make(map[string]bool, len(entries))
-
-	now := time.Now().Unix()
-
-	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
-			continue
-		}
-
-		matchID := strings.TrimSuffix(entry.Name(), ".json")
-
-		if len(matchID) != 64 {
-			continue
-		}
-
-		path := filepath.Join(dir, entry.Name())
-
-		raw, readErr := os.ReadFile(path)
-
-		if readErr != nil {
-			continue
-		}
-
-		var record map[string]any
-
-		if err := json.Unmarshal(raw, &record); err != nil {
-			continue
-		}
-
-		if value, _ := record["match_id"].(string); value != matchID {
-			continue
-		}
-
-		if ttl > 0 {
-			ignoredAt := int64(0)
-
-			if value, ok := record["ignored_at"].(float64); ok {
-				ignoredAt = int64(value)
-			}
-
-			// An undated tombstone cannot be aged, so it is treated as expired rather
-			// than suppressing a match forever.
-			if now-ignoredAt >= ttl {
-				_ = os.Remove(path)
-
-				continue
-			}
-		}
-
-		ignored[matchID] = true
-	}
-
-	return ignored, nil
+	return marketops.IgnoredMatchIDs(context.Background(), env, time.Duration(ttl)*time.Second)
 }

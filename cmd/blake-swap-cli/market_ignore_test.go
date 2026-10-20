@@ -96,39 +96,6 @@ func TestRenderAmbiguousMatchesListsCandidates(t *testing.T) {
 // eventWithID builds a bare event carrying an id, for renderers that print one.
 func eventWithID(id string) event.Event { return event.Event{ID: id} }
 
-// TestWriteTombstoneIsAtomicAndComplete: the marker must exist whole or not at all, and
-// it must carry the facts the next run needs to recognise the match.
-func TestWriteTombstoneIsAtomicAndComplete(t *testing.T) {
-	dir := t.TempDir()
-	entry := ignoreEntry(strings.Repeat("ef", 32), "aaaa00000001")
-	path := dir + "/" + entry.Event.ID + ".json"
-
-	if err := writeTombstone(path, entry.Event.ID, entry); err != nil {
-		t.Fatal(err)
-	}
-
-	raw, err := os.ReadFile(path)
-
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	for _, want := range []string{
-		`"match_id"`, `"swap_id": "aaaa00000001"`, `"offer_id"`, `"take_id"`,
-		`"direction": "blake-for-btc"`, `"blake_amount": 0.1`, `"btc_sats": 25000`,
-		`"local_only": true`,
-	} {
-		if !strings.Contains(string(raw), want) {
-			t.Fatalf("tombstone is missing %q:\n%s", want, raw)
-		}
-	}
-
-	// No temporary file is left behind, which is what makes the rename the publish.
-	if entries, _ := os.ReadDir(dir); len(entries) != 1 {
-		t.Fatalf("directory holds %d files, want 1", len(entries))
-	}
-}
-
 // TestLocalSwapExists: the refusal that protects a trade in progress.
 func TestLocalSwapExists(t *testing.T) {
 	dir := t.TempDir()

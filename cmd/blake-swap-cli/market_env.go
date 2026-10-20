@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/gjbrr/blake-swap/pkg/coord"
 	"github.com/gjbrr/blake-swap/pkg/marketops"
@@ -63,6 +64,36 @@ func (f stateFiles) Write(_ context.Context, name string, data []byte) error {
 	}
 
 	return writeAtomically(path, data)
+}
+
+// Names implements marketops.TombstoneStore: the tombstone directory, on disk.
+func (f stateFiles) Names(_ context.Context, directory string) ([]string, error) {
+	entries, err := os.ReadDir(filepath.Join(f.root, directory))
+
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+
+	if err != nil {
+		return nil, err
+	}
+
+	names := make([]string, 0, len(entries))
+
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+
+		names = append(names, directory+"/"+entry.Name())
+	}
+
+	return names, nil
+}
+
+// Remove implements marketops.TombstoneStore.
+func (f stateFiles) Remove(_ context.Context, name string) error {
+	return os.Remove(f.marketPath(name))
 }
 
 // cutSlash splits "a/b" into ("a", "b", true).

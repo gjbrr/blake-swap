@@ -235,6 +235,39 @@ wallet cannot hold a watch-only descriptor. A wallet whose kind does not suit it
 refused in words that name both: `wallet NAME exists as a signing wallet, not a watch-only
 wallet` and the converse.
 
-## What is not implemented
+## Activity
 
-Not implemented: any activity log.
+The Activity view is the client's own record: one entry per command that changed a record,
+published something or moved money, newest first, capped at the last 500. It is sealed in the
+vault like every other value, so it survives a reload and travels in a backup, and it never
+leaves this browser.
+
+One entry is `at`, `command`, `swap`, `ok`, `summary` and `error`. What it does **not** hold
+is what makes it safe to keep: no argument map, no response blob, no event body, no
+signature, no passphrase, no secret, and no exported envelope. Four commands have replies
+that can carry a secret, so their entries say only what they did: `engine.extract-secret` is
+`secret extracted`, `identity.generate` is `identity generated`, `vault.export` is
+`vault exported`, and every coordination send or receive is `sent` or `received`. The
+passphrase-bearing commands (`vault.create`, `vault.unlock`, `vault.import`) are not in the
+table at all, so nothing about them is written.
+
+Reads are not in the table either: `wallets.status`, the engine's reads, the market's reads
+and the vault's own lifecycle are all absent, because a log of everything is a log nobody
+reads and one more place for a reply to leak something.
+
+**Clear** empties the log behind the usual confirmation; the swaps, the keys and the market
+records are untouched. A log that will not open is never overwritten: the append refuses with
+`the activity log is unreadable; clear it to continue`, and clearing is the one command that
+always works on it.
+
+## Limits that are decisions
+
+These are choices, not gaps:
+
+- The browser's ignored-match tombstones last until they are removed; the CLI keeps its
+  `BLAKE_SWAP_IGNORED_MATCH_TTL_SECONDS` override. There is no environment for the browser
+  to read a lifetime from, and inventing a setting for it would be a policy nobody chose.
+- A backup is a manual file. There is no cloud copy, no sync between browsers and no
+  schedule.
+- The reverse crash window is covered by a Go test rather than by the byte-parity walk,
+  because two processes cannot be compared at a moment that exists for neither.

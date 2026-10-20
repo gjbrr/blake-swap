@@ -24,7 +24,8 @@ import (
 // setView makes one section visible.
 func setView(state *app, view string) {
 	for _, name := range []string{
-		ViewSetup, ViewMarket, ViewSwaps, ViewSwap, ViewSettings, ViewCoordination, ViewDiagnostics,
+		ViewSetup, ViewMarket, ViewSwaps, ViewSwap, ViewActivity, ViewSettings,
+		ViewCoordination, ViewDiagnostics,
 	} {
 		toggle("view-"+name, name == view)
 	}
@@ -35,7 +36,8 @@ func setView(state *app, view string) {
 	setAttr("app", "data-active-view", view)
 
 	for _, name := range []string{
-		ViewSetup, ViewMarket, ViewSwaps, ViewSwap, ViewSettings, ViewCoordination, ViewDiagnostics,
+		ViewSetup, ViewMarket, ViewSwaps, ViewSwap, ViewActivity, ViewSettings,
+		ViewCoordination, ViewDiagnostics,
 	} {
 		setAttr("nav-"+name, "aria-current", boolText(name == view))
 	}
@@ -219,6 +221,83 @@ func renderHeightsText(heights proto.HeightView) {
 		" · Bitcoin height " + strconv.FormatInt(heights.BTC, 10)
 
 	setText(ElementDashboardHeights, text)
+}
+
+// ------------------------------------------------------------------- activity ---
+
+// renderActivity renders the Activity view.
+//
+// It is the sealed log of what this client did, newest first. Nothing here is a protocol
+// fact: the worker wrote the entries after the commands ran, and the page only places them.
+func renderActivity(state *app) {
+	clear(ElementActivityRows)
+
+	entries := state.activity.Entries
+
+	jsSetBodyAttr(ActivityCountAttr, strconv.Itoa(len(entries)))
+	jsSetBodyAttr(ActivityEmptyAttr, boolText(len(entries) == 0))
+
+	toggle(ElementActivityEmpty, len(entries) == 0)
+
+	for _, entry := range entries {
+		verdict := "ok"
+
+		if !entry.OK {
+			verdict = orDash(entry.Error)
+		} else {
+			verdict = orDash(entry.Summary)
+		}
+
+		row := elem("tr").
+			attr(ActivityEntryAttr, "true").
+			attr(ActivityCommandAttr, entry.Command).
+			attr(ActivityOKAttr, boolText(entry.OK))
+
+		row = row.
+			child(elem("td").class("mono").text(entry.At)).
+			child(elem("td").class("mono").text(entry.Command)).
+			child(elem("td").class("mono").text(short(entry.Swap))).
+			child(elem("td").class("mono").text(boolText(entry.OK)))
+
+		if entry.OK {
+			row = row.child(elem("td").text(verdict))
+		} else {
+			row = row.child(elem("td").class("warn").text(verdict))
+		}
+
+		appendTo(ElementActivityRows, row)
+	}
+}
+
+// applyActivity renders a page of the log.
+func applyActivity(state *app, result proto.Result) {
+	var view proto.ActivityView
+
+	if err := proto.DecodeData(result, &view); err != nil {
+		routeText(ElementActivityOut, result.Text, "ok")
+
+		return
+	}
+
+	state.activity = view
+
+	renderActivity(state)
+
+	text := strconv.Itoa(view.Total) + " entr(y/ies) in the log"
+
+	if view.Total == 0 {
+		text = "the activity log is empty"
+	}
+
+	routeText(ElementActivityOut, text, "ok")
+}
+
+// applyActivityCleared shows the empty log a clear leaves.
+func applyActivityCleared(state *app, result proto.Result) {
+	state.activity = proto.ActivityView{}
+
+	renderActivity(state)
+	routeText(ElementActivityOut, result.Text, "ok")
 }
 
 // ------------------------------------------------------------------ dashboard ---
@@ -1051,6 +1130,29 @@ func applyVaultImport(state *app, result proto.Result) {
 	// be looking at rather than the one behind it.
 	setView(state, ViewSetup)
 	routeVaultFile(state, detail, "ok")
+}
+
+// beginActivityClear opens the confirmation for emptying the log.
+//
+// It is the one destructive command here that loses a record rather than money, and it still
+// asks: the log is the only place that says what this client did last week.
+func beginActivityClear(state *app) {
+	spec := actionSpec{
+		command: "activity.clear",
+		label:   "Clear the activity log",
+		what: "Delete the sealed log of commands this client ran. The swaps, the keys and " +
+			"the market records are untouched; what is lost is the history of what was " +
+			"done and when.",
+		economic: false,
+	}
+
+	openConfirmation(state, spec, proto.Request{
+		Command: "activity.clear",
+		Args:    map[string]string{"confirm": "clear"},
+	}, "", [][2]string{
+		{"entries", strconv.Itoa(state.activity.Total)},
+		{"kept", "nothing from the log"},
+	})
 }
 
 // beginMarketPublish opens the confirmation for advertising an offer.

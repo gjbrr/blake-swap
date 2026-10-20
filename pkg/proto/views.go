@@ -59,6 +59,28 @@ type WalletView struct {
 	Slots []WalletSlotView `json:"slots,omitempty"`
 }
 
+// ActivityEntry is one recorded command.
+//
+// It holds what happened, not what was said: no argument map, no sealed value, no event
+// body, no key. A summary is one line and an error is a refusal, both already written for a
+// person to read.
+type ActivityEntry struct {
+	At      string `json:"at"`
+	Command string `json:"command"`
+	Swap    string `json:"swap,omitempty"`
+	OK      bool   `json:"ok"`
+	Summary string `json:"summary,omitempty"`
+	Error   string `json:"error,omitempty"`
+}
+
+// ActivityView is the log, newest first.
+type ActivityView struct {
+	// Entries is the page of the log that was asked for.
+	Entries []ActivityEntry `json:"entries,omitempty"`
+	// Total is how many entries the log holds, which may be more than Entries.
+	Total int `json:"total"`
+}
+
 // VaultExportView is one backup file, ready for the page to save.
 //
 // The envelope is in the view because the page is where a browser's filesystem is; the

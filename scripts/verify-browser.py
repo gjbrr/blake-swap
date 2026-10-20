@@ -491,6 +491,21 @@ class Ui:
 
         return clicked == "clicked"
 
+    async def view_visible(self, name: str) -> bool:
+        """Report whether one view's section is actually on screen.
+
+        `data-view` says which name the page selected, which is not the same fact: a name
+        that is missing from the page's own exhaustive list still sets the marker and leaves
+        every section hidden. The check has to look at the section.
+        """
+        return await self.js(
+            "(() => {"
+            f"  const section = document.getElementById('view-{name}');"
+            "  if (!section) { return 'missing'; }"
+            "  return section.hidden ? 'hidden' : 'visible';"
+            "})()"
+        ) == "visible"
+
     async def wait_command(self, name: str, budget: float = 0) -> bool:
         """Wait until the page has sent one named command.
 
@@ -1637,6 +1652,217 @@ async def wait_wallet_row(ui: Ui, slot: str, want: str, budget: float = 0) -> di
         await asyncio.sleep(0.2)
 
     return row
+
+
+async def activity_log_round_trip(ui: Ui, work: Path, budget: float) -> bool:
+    """The sealed log of what the client did: recorded, readable, surviving a reload, clearable.
+
+    The command that makes the entry is a wallet create, because it is one of the table's
+    commands with no money in it: a check that moved funds to prove a log entry would be a
+    check that costs a swap to run.
+    """
+    stamp = str(int(time.time()))
+    name = "activity-check-" + stamp
+
+    # 1. Something worth logging, from the page.
+    await ui.view("setup")
+
+    await ui.set("wallet-btc", name)
+
+    if not await ui.act("wallets-set", confirm=False):
+        return require(False, "the wallet name was not saved")
+
+    if not await ui.wait_command("wallets.set"):
+        return require(False, "saving the wallet name was never sent")
+
+    if not await ui.wait_idle(budget):
+        return require(False, "saving the wallet name never finished")
+
+    # 2. The view lists it, newest first, with the command and its verdict.
+    await ui.view("activity")
+
+    if not await ui.wait_idle(budget):
+        return require(False, "the activity view never settled")
+
+    if not require(await ui.view_visible("activity"), "the activity view is not visible"):
+        return False
+
+    listed = await poll(
+        ui.ws,
+        "(() => {"
+        "  const rows = [...document.querySelectorAll('#activity-rows tr')];"
+        "  return rows.some((r) =>"
+        "    r.dataset.activityCommand === 'wallets.set') ? 'true' : '';"
+        "})()",
+        budget,
+    )
+
+    if not require(listed == "true",
+                   f"the log has no wallets.set entry:\n{await ui.panel('activity-rows')}"):
+        return False
+
+    count = await ui.attr("activityCount")
+
+    if not require(str(count).isdigit() and int(count) >= 1,
+                   f"the activity count is {count!r}"):
+        return False
+
+    ok_marker = await ui.js(
+        "(() => {"
+        "  const rows = [...document.querySelectorAll('#activity-rows tr')];"
+        "  const row = rows.find((r) => r.dataset.activityCommand === 'wallets.set');"
+        "  return row ? row.dataset.activityOk : '';"
+        "})()"
+    )
+
+    if not require(ok_marker == "true", f"the wallets.set entry says ok={ok_marker!r}"):
+        return False
+
+    print(f"PASS: activity: {count} entr(y/ies), newest first, with the command and its verdict")
+
+    # 3. It is sealed. The export is the store's bytes, so a command name in the envelope
+    # would mean the log was stored in the clear.
+    before = await ui.js(
+        "(() => {"
+        "  const rows = [...document.querySelectorAll('#activity-rows tr')];"
+        "  return rows.length;"
+        "})()"
+    )
+
+    downloads = work / "activity-downloads"
+    downloads.mkdir(exist_ok=True)
+
+    await cdp(ui.ws, "Browser.setDownloadBehavior",
+              {"behavior": "allow", "downloadPath": str(downloads), "eventsEnabled": True},
+              ui.counter)
+
+    await ui.view("settings")
+
+    if not await ui.wait_idle(budget):
+        return require(False, "the settings view never settled")
+
+    if not await ui.click_in("settings", "vault-export"):
+        return require(False, "the export control is not on the Settings view")
+
+    if not await ui.confirm():
+        return require(False, "the export was not confirmed")
+
+    if not await ui.wait_command("vault.export"):
+        return require(False, "the export was never sent")
+
+    if not await ui.wait_idle(budget):
+        return require(False, "the export never finished")
+
+    sealed = None
+
+    for _ in range(50):
+        candidates = sorted(downloads.glob("blake-swap-vault-*.json"))
+
+        if candidates:
+            sealed = candidates[-1]
+
+            break
+
+        await asyncio.sleep(0.2)
+
+    if sealed is None:
+        return require(False, "the export produced no file")
+
+    envelope = sealed.read_text()
+
+    if not require("wallets.set" not in envelope,
+                   "the backup holds an activity command name in the clear"):
+        return False
+
+    if not require("activity.log" in envelope,
+                   "the backup does not carry the activity log at all"):
+        return False
+
+    print("PASS: activity: the log travels in the backup as one sealed value")
+
+    await ui.view("activity")
+
+    if not await ui.wait_idle(budget):
+        return require(False, "the activity view never settled")
+
+    # 4. A reload keeps it.
+    await ui.js("location.reload(); 'reloading'")
+    await asyncio.sleep(1)
+
+    if not await ui.wait_boot(budget):
+        return require(False, "the page did not come back after a reload")
+
+    await ui.view("setup")
+    await ui.set("passphrase", "browser-check-passphrase")
+
+    if not await ui.act("vault-unlock", confirm=False):
+        return require(False, "the vault did not unlock after a reload")
+
+    if not await wait_bootstrap(ui):
+        return require(False, "the page did not finish starting after a reload")
+
+    await ui.view("activity")
+
+    if not await ui.wait_idle(budget):
+        return require(False, "the activity view never settled after a reload")
+
+    still = await poll(
+        ui.ws,
+        "(() => {"
+        "  const rows = [...document.querySelectorAll('#activity-rows tr')];"
+        "  return rows.some((r) =>"
+        "    r.dataset.activityCommand === 'wallets.set') ? 'true' : '';"
+        "})()",
+        budget,
+    )
+
+    if not require(still == "true", "the activity log did not survive a reload"):
+        return False
+
+    after = await ui.js(
+        "(() => {"
+        "  const rows = [...document.querySelectorAll('#activity-rows tr')];"
+        "  return rows.length;"
+        "})()"
+    )
+
+    if not require(int(after) >= int(before), "the log lost entries across a reload"):
+        return False
+
+    print("PASS: activity: the log survived a reload")
+
+    # 5. Clearing asks first, then leaves the empty state.
+    if not await ui.act("activity-clear"):
+        return require(False, "the clear was not confirmed")
+
+    if not await ui.wait_command("activity.clear"):
+        return require(False, "the clear was never sent")
+
+    if not await ui.wait_idle(budget):
+        return require(False, "the clear never finished")
+
+    error = await ui.last_error()
+
+    if not require(error == "", f"clearing the log was refused: {error}"):
+        return False
+
+    emptied = await poll(
+        ui.ws,
+        "(() => {"
+        "  const rows = [...document.querySelectorAll('#activity-rows tr')];"
+        "  const empty = document.getElementById('activity-empty');"
+        "  return rows.length === 0 && empty && !empty.hidden ? 'true' : '';"
+        "})()",
+        budget,
+    )
+
+    if not require(emptied == "true",
+                   f"the log is not empty after clearing:\n{await ui.panel('activity-rows')}"):
+        return False
+
+    print("PASS: activity: clear emptied the log and showed its empty state")
+
+    return True
 
 
 async def wallet_create_round_trip(ui: Ui, work: Path, relay_url: str) -> bool:
@@ -3198,6 +3424,9 @@ async def drive(url: str, budget: float, work: Path, relay_url: str = "") -> int
             return 1
 
         if not await wallet_create_round_trip(ui, work, relay_url):
+            return 1
+
+        if not await activity_log_round_trip(ui, work, budget):
             return 1
 
         if not await refusal_paths(ui, budget):

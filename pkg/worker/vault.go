@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"time"
 
 	"github.com/gjbrr/blake-swap/pkg/client"
 	"github.com/gjbrr/blake-swap/pkg/model"
@@ -125,6 +126,12 @@ func (d *vaultDomain) handle(ctx context.Context, request proto.Request) proto.R
 		d.unlocked = false
 
 		return proto.Result{Command: request.Command, OK: true, Text: "vault locked"}
+
+	case "activity.list":
+		return d.listActivity(ctx, request)
+
+	case "activity.clear":
+		return d.clearActivity(ctx, request)
 
 	case "state.put":
 		if d.store == nil {
@@ -670,10 +677,29 @@ func handleCommand(
 		return proto.Result{Command: "", Error: err.Error()}
 	}
 
+	result := dispatchToDomain(ctx, vault, engine, market, settlement, request)
+
+	// The one place an activity entry is written: after the domain answered, before the
+	// result is encoded, so no domain has to know the log exists.
+	recordActivity(ctx, vault, request, result, time.Now())
+
+	return result
+}
+
+// dispatchToDomain routes one request to the domain that answers it.
+func dispatchToDomain(
+	ctx context.Context,
+	vault *vaultDomain,
+	engine *engineDomain,
+	market *marketDomain,
+	settlement *coordDomain,
+	request proto.Request,
+) proto.Result {
 	switch {
 	case request.Command == "wallets.status", request.Command == "wallets.create":
 		return engine.Handle(ctx, request)
 	case strings.HasPrefix(request.Command, "vault."),
+		strings.HasPrefix(request.Command, "activity."),
 		strings.HasPrefix(request.Command, "state."),
 		strings.HasPrefix(request.Command, "identity."),
 		strings.HasPrefix(request.Command, "proxy."),

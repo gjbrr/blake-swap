@@ -245,6 +245,7 @@ without a browser, and the browser's socket is the only platform edge:
 | `vault.` | `vaultDomain` | create/unlock/lock the encrypted state, `state.get`/`state.put`, the encrypted self-test, and the backup pair `vault.export`/`vault.import` (one checked envelope, written atomically through `platform.KV.ReplaceAll`) |
 | `identity.`, `proxy.` | `vaultDomain` | the Nostr key and the app server's proxy address, both sealed |
 | `engine.` | `engineDomain` | the read-only engine over the proxy, with `engine.Transport` wired to the relay transport |
+| `activity.` | `vaultDomain` | `activity.list` (newest first, capped) and `activity.clear` (behind `confirm=clear`); the entries are written at one boundary in `handleCommand`, never by a domain |
 | `wallets.` | `engineDomain` | `wallets.status` (the four slots, with the node's answer about each) and `wallets.create` (load or create one slot's wallet with `descriptors=true` and the slot's own `disable_private_keys`) |
 | `market.` | `marketDomain` | relays, read, publish, take — the CLI's market builders over the browser's socket |
 | `coord.` | `coordDomain` | the settlement transport: the seven message types, send and receive |

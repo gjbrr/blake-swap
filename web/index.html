@@ -56,6 +56,7 @@
         <button type="button" id="nav-market" data-uicmd="view-market">Market</button>
         <button type="button" id="nav-swaps" data-uicmd="view-swaps">Swaps</button>
         <button type="button" id="nav-swap" data-uicmd="view-swap">Swap</button>
+        <button type="button" id="nav-activity" data-uicmd="view-activity">Activity</button>
         <button type="button" id="nav-settings" data-uicmd="view-settings">Settings</button>
         <button type="button" id="nav-coordination" data-uicmd="view-coordination">Coordination</button>
         <button type="button" id="nav-diagnostics" data-uicmd="view-diagnostics">Diagnostics</button>
@@ -430,6 +431,32 @@
           <button type="button" data-uicmd="coord-mode">Read encryption</button>
         </div>
         <pre id="coord-mode-out" class="out" aria-live="polite">not read</pre>
+      </section>
+    </section>
+
+    <!-- -------------------------------------------------------------- activity -->
+    <section class="view" id="view-activity" data-view="activity" hidden>
+      <h2>Activity</h2>
+      <p class="hint">
+        What this client did: the commands that changed a record, published something or
+        moved money, newest first. The log is sealed in the vault like every other record,
+        it never leaves this browser, and it holds no argument, no message body and no
+        secret. It is bounded, so the oldest entries fall off.
+      </p>
+
+      <section class="card">
+        <div class="row">
+          <button type="button" data-uicmd="activity-refresh">Refresh</button>
+          <button type="button" data-uicmd="activity-clear">Clear</button>
+        </div>
+        <table class="table" id="activity-table">
+          <thead><tr><th>when</th><th>command</th><th>swap</th><th>ok</th><th>what</th></tr></thead>
+          <tbody id="activity-rows"></tbody>
+        </table>
+        <p class="hint" id="activity-empty">
+          Nothing yet. The log starts at the first command that changes something.
+        </p>
+        <pre id="activity-out" class="out" aria-live="polite">not read</pre>
       </section>
     </section>
 

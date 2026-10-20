@@ -37,6 +37,7 @@ const (
 	ViewMarket       = "market"
 	ViewSwaps        = "swaps"
 	ViewSwap         = "swap"
+	ViewActivity     = "activity"
 	ViewSettings     = "settings"
 	ViewCoordination = "coordination"
 	ViewDiagnostics  = "diagnostics"
@@ -92,6 +93,8 @@ const (
 	UICmdSwapClose       UICmd = "swap-close"
 	UICmdSwapRecovery    UICmd = "swap-recovery-plan"
 	UICmdSettingsRefresh UICmd = "settings-refresh"
+	UICmdActivityRefresh UICmd = "activity-refresh"
+	UICmdActivityClear   UICmd = "activity-clear"
 
 	UICmdConfirmOK     UICmd = "confirm-ok"
 	UICmdConfirmCancel UICmd = "confirm-cancel"
@@ -135,6 +138,9 @@ const (
 	ElementWalletSlots     = "wallet-slots"
 	ElementWalletSlotEmpty = "wallet-slots-empty"
 	ElementWalletAction    = "wallets-action-out"
+	ElementActivityRows    = "activity-rows"
+	ElementActivityEmpty   = "activity-empty"
+	ElementActivityOut     = "activity-out"
 	ElementEngineStatus    = "engine-status-out"
 	ElementMarketRelays    = "market-relays-out"
 	ElementAlert           = "alert"
@@ -230,7 +236,12 @@ const (
 	MarketVerifiedAttribute   = "data-market-verified"
 
 	// The client's own markers.
-	BusyAttribute   = "data-busy"
+	BusyAttribute        = "data-busy"
+	ActivityCountAttr    = "data-activity-count"
+	ActivityEmptyAttr    = "data-activity-empty"
+	ActivityEntryAttr    = "data-activity-entry"
+	ActivityCommandAttr  = "data-activity-command"
+	ActivityOKAttr       = "data-activity-ok"
 	ViewAttribute   = "data-view"
 	SwapStateAttr   = "data-swap-state"
 	NextActionAttr  = "data-next-action"
@@ -356,6 +367,8 @@ type app struct {
 	// walletSlots is the four rows the Settings view shows, with the node's answer about
 	// each. It comes from wallets.status, so the page never guesses which wallet exists.
 	walletSlots []proto.WalletSlotView
+	// activity is the last page of the sealed log.
+	activity proto.ActivityView
 }
 
 // pendingAction is one act waiting for its second gesture.
@@ -606,6 +619,12 @@ func handleUI(state *app, link tinyspawn.Duplex[proto.Envelope], seq *uint32, cm
 		return
 	}
 
+	if cmd == UICmdActivityClear {
+		beginActivityClear(state)
+
+		return
+	}
+
 	if cmd == UICmdVaultExport {
 		beginVaultExport(state)
 
@@ -662,6 +681,9 @@ func afterView(state *app, link tinyspawn.Duplex[proto.Envelope], seq *uint32, r
 
 	case ViewSettings:
 		queueCommand(refresh, state, link, seq, proto.Request{Command: "wallets.status"})
+
+	case ViewActivity:
+		queueCommand(refresh, state, link, seq, proto.Request{Command: "activity.list"})
 	}
 }
 
@@ -819,6 +841,15 @@ func uiRequest(state *app, cmd UICmd) (proto.Request, bool) {
 				"sats":          inputValue(InputCoordSats),
 				"nostr_bob_pub": inputValue(InputCoordPeer),
 			},
+		}, true
+
+	case UICmdActivityRefresh:
+		return proto.Request{Command: "activity.list"}, true
+
+	case UICmdActivityClear:
+		return proto.Request{
+			Command: "activity.clear",
+			Args:    map[string]string{"confirm": "clear"},
 		}, true
 
 	case UICmdSwapRefresh, UICmdSettingsRefresh:
@@ -1062,7 +1093,7 @@ func isAutomaticRead(command string) bool {
 	switch command {
 	case "engine.status", "engine.list", "engine.show", "engine.reconcile",
 		"engine.next", "engine.dashboard", "wallets.status", "identity.status",
-		"proxy.status", "market.list", "market.relays", "ui.get":
+		"proxy.status", "market.list", "market.relays", "ui.get", "activity.list":
 		return true
 	}
 
@@ -1076,7 +1107,8 @@ func isAction(command string) bool {
 	case "engine.status", "engine.list", "engine.show", "engine.reconcile",
 		"engine.next", "engine.dashboard", "engine.recovery-plan", "wallets.status",
 		"vault.status", "vault.selftest", "identity.status", "proxy.status",
-		"market.list", "market.relays", "market.set-relays", "coord.mode", "ui.get", "ui.set":
+		"market.list", "market.relays", "market.set-relays", "coord.mode", "ui.get", "ui.set",
+		"activity.list":
 		return false
 	}
 
@@ -1250,6 +1282,12 @@ func applyResult(state *app, result proto.Result) {
 
 	case "market.matches":
 		applyMatches(state, result)
+
+	case "activity.list":
+		applyActivity(state, result)
+
+	case "activity.clear":
+		applyActivityCleared(state, result)
 
 	case "coord.mode":
 		routeText(ElementCoordModeOut, result.Text, "ok")

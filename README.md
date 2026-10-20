@@ -329,6 +329,7 @@ silently omitting them.
 | `docs/GO_PARITY_MANIFEST.md` | generated ledger: every Python module, function group, command and suite, what replaces it in Go, and what is still pending |
 | `docs/GO_VERIFICATION.md` | what has actually been run in the port — the Go suite, the WASM tests, the browser check, the byte-parity and cross-implementation results — and what is not done |
 | `docs/WEB_CLIENT.md` | running the browser client: `make serve`, the wallet and proxy settings, the swap flow in each role, recovery, and what is not implemented |
+| `docs/NEXT_PHASE.md` | the planned phase after the v2.1 client: its shape, its boundaries, and what it deliberately does not do |
 | `tests/README.md` | test suite inventory, prerequisites, and node configuration |
 | `CONTRIBUTOR_ORIENTATION.md` | orientation for new contributors |
 

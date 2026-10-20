@@ -168,8 +168,14 @@ func renderMarketMatches(me string, matches []marketflow.MatchEntry) string {
 	return out.String()
 }
 
-// fetchMatches reads the matches addressed to one identity, resolving the offer and take
-// each one names. It is shared by every command whose subject is a match.
+// fetchMatches reads the matches addressed to one identity as the taker, resolving the offer
+// and take each one names. It is shared by every command whose subject is a match.
+//
+// The taker filter is the reference's, and it is not a detail: its listing is headed "FOR
+// TAKER", and its validator refuses a match whose taker is not the participant. A match this
+// participant *made* is their own receipt rather than a decision waiting for them — and in the
+// reverse direction the maker is Bob, whose next step is discovered from the local selection
+// record, not from this inbox.
 func fetchMatches(
 	ctx context.Context, key *nostr.Key, limit int,
 ) ([]marketflow.MatchEntry, error) {
@@ -216,5 +222,20 @@ func fetchMatches(
 		evidence = append(evidence, dependencies...)
 	}
 
-	return marketflow.MatchesFor(me, evidence, time.Now()), nil
+	return addressedToTaker(me, marketflow.MatchesFor(me, evidence, time.Now())), nil
+}
+
+// addressedToTaker keeps the matches this participant is the taker of.
+func addressedToTaker(me string, matches []marketflow.MatchEntry) []marketflow.MatchEntry {
+	kept := make([]marketflow.MatchEntry, 0, len(matches))
+
+	for _, entry := range matches {
+		if entry.Match.Taker != me {
+			continue
+		}
+
+		kept = append(kept, entry)
+	}
+
+	return kept
 }

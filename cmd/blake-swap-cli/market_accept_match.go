@@ -10,11 +10,8 @@ import (
 	"time"
 
 	"github.com/gjbrr/blake-swap/pkg/event"
-	"github.com/gjbrr/blake-swap/pkg/marketflow"
 	"github.com/gjbrr/blake-swap/pkg/marketops"
-	"github.com/gjbrr/blake-swap/pkg/model"
 	"github.com/gjbrr/blake-swap/pkg/nostr"
-	"github.com/gjbrr/blake-swap/pkg/store"
 	"github.com/gjbrr/blake-swap/pkg/swap"
 )
 
@@ -81,71 +78,6 @@ func runAcceptMarketMatch(ctx context.Context, engine *swap.Engine, args []strin
 	})
 
 	return err
-}
-
-// pinBob records Bob's authenticated identity on his own swap.
-func pinBob(ctx context.Context, records store.Store, record *model.Swap, bob string) error {
-	if record.NostrBobPub != nil && *record.NostrBobPub == bob {
-		return nil
-	}
-
-	record.NostrBobPub = &bob
-
-	return records.Save(ctx, store.Bob, record)
-}
-
-// validateMarketMatchFor validates one match against the events it references.
-//
-// The two references are immutable, so they are satisfied from the verified cache when
-// possible and only fetched when this machine has never seen them.
-func validateMarketMatchFor(
-	ctx context.Context, client *nostr.Client, candidate event.Event, taker string,
-) (*marketflow.ParsedMatch, error) {
-	if err := event.Verify(candidate, time.Now()); err != nil {
-		return nil, err
-	}
-
-	var message map[string]any
-
-	if err := json.Unmarshal([]byte(candidate.Content), &message); err != nil {
-		return nil, fmt.Errorf("Market match contains invalid JSON")
-	}
-
-	offerID, _ := message["offer_id"].(string)
-
-	if len(offerID) != 64 {
-		return nil, fmt.Errorf("Invalid market offer ID")
-	}
-
-	takeID, _ := message["take_id"].(string)
-
-	if len(takeID) != 64 {
-		return nil, fmt.Errorf("Invalid market take ID")
-	}
-
-	offer, err := referencedEvent(ctx, client, offerID)
-
-	if err != nil {
-		return nil, err
-	}
-
-	take, err := referencedEvent(ctx, client, takeID)
-
-	if err != nil {
-		return nil, err
-	}
-
-	parsed, err := marketflow.ParseMatch(candidate, *offer, *take, time.Now())
-
-	if err != nil {
-		return nil, err
-	}
-
-	if parsed.Taker != taker {
-		return nil, fmt.Errorf("Market match is for another taker")
-	}
-
-	return parsed, nil
 }
 
 // referencedEvent reads one immutable referenced event, cache first.

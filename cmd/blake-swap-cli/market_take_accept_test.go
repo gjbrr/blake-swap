@@ -2,16 +2,11 @@ package main
 
 import (
 	"context"
-	"encoding/json"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/gjbrr/blake-swap/pkg/event"
-	"github.com/gjbrr/blake-swap/pkg/model"
 	"github.com/gjbrr/blake-swap/pkg/nostr"
-	"github.com/gjbrr/blake-swap/pkg/store"
 )
 
 // TestRenderMarketTakeAcceptedMatchesTheReference pins the block an operator reads after
@@ -255,144 +250,6 @@ func TestResolveCachedPrefixIsPerMessageType(t *testing.T) {
 
 	if err != nil || full != strings.Repeat("9f", 32) {
 		t.Fatalf("full id resolve = %q, %v", full, err)
-	}
-}
-
-// TestRepeatAcceptRefusesDisagreeingRecords: two durable records that name different
-// swaps are a fact that must not be repaired away.
-func TestRepeatAcceptRefusesDisagreeingRecords(t *testing.T) {
-	t.Setenv("BLAKE_SWAP_STATE_DIR", t.TempDir())
-
-	alice, bob := strings.Repeat("11", 32), strings.Repeat("22", 32)
-
-	err := repeatAcceptMarketTake(context.Background(), repeatAccept{
-		OfferID:          strings.Repeat("ab", 32),
-		TakeID:           strings.Repeat("cd", 32),
-		Alice:            alice,
-		Bob:              bob,
-		OfferSelection:   map[string]any{"swap_id": "aaaa00000001"},
-		TakeSelection:    map[string]any{"swap_id": "aaaa00000002"},
-		OfferSelectionOn: true,
-		TakeSelectionOn:  true,
-	})
-
-	if err == nil || !strings.Contains(err.Error(), "disagree about swap_id") {
-		t.Fatalf("disagreeing records were not refused: %v", err)
-	}
-}
-
-// TestRepeatAcceptRefusesAForeignIdentity: a record written by another participant must
-// not be adopted by repairing it.
-func TestRepeatAcceptRefusesAForeignIdentity(t *testing.T) {
-	t.Setenv("BLAKE_SWAP_STATE_DIR", t.TempDir())
-
-	err := repeatAcceptMarketTake(context.Background(), repeatAccept{
-		OfferID: strings.Repeat("ab", 32),
-		TakeID:  strings.Repeat("cd", 32),
-		Alice:   strings.Repeat("11", 32),
-		Bob:     strings.Repeat("22", 32),
-		TakeSelection: map[string]any{
-			"swap_id":         "aaaa00000001",
-			"nostr_alice_pub": strings.Repeat("33", 32),
-			"nostr_bob_pub":   strings.Repeat("22", 32),
-		},
-		TakeSelectionOn: true,
-	})
-
-	if err == nil || !strings.Contains(err.Error(), "Alice identity mismatch") {
-		t.Fatalf("a foreign Alice identity was not refused: %v", err)
-	}
-}
-
-// TestRepeatAcceptRepairsTheMissingHalf: an interrupted pair of writes is finished rather
-// than left as a negotiation with no usable record.
-func TestRepeatAcceptRepairsTheMissingHalf(t *testing.T) {
-	dir := t.TempDir()
-
-	t.Setenv("BLAKE_SWAP_STATE_DIR", dir)
-
-	alice, bob := strings.Repeat("11", 32), strings.Repeat("22", 32)
-	offerID, takeID := strings.Repeat("ab", 32), strings.Repeat("cd", 32)
-
-	record := &model.Swap{
-		SwapID:               "aaaa00000001",
-		State:                "OFFERED",
-		SecretHash:           strings.Repeat("00", 32),
-		BlakeAmountBaseUnits: 100,
-		BTCSats:              1000,
-		NostrAlicePub:        &alice,
-		NostrBobPub:          &bob,
-	}
-
-	if err := store.NewFile(dir).Save(context.Background(), store.Alice, record); err != nil {
-		t.Fatal(err)
-	}
-
-	canonical := map[string]any{
-		"version":         1,
-		"offer_id":        offerID,
-		"take_id":         takeID,
-		"swap_id":         "aaaa00000001",
-		"nostr_alice_pub": alice,
-		"nostr_bob_pub":   bob,
-	}
-
-	takePath := filepath.Join(dir, selectionsDirectory, takeID+".json")
-	offerPath := filepath.Join(dir, selectionsDirectory, "offer-"+offerID+".json")
-
-	if err := writeSelection(takePath, canonical); err != nil {
-		t.Fatal(err)
-	}
-
-	if err := repeatAcceptMarketTake(context.Background(), repeatAccept{
-		OfferID:          offerID,
-		TakeID:           takeID,
-		Alice:            alice,
-		Bob:              bob,
-		OfferSelection:   nil,
-		TakeSelection:    canonical,
-		TakePath:         takePath,
-		OfferPath:        offerPath,
-		OfferSelectionOn: false,
-		TakeSelectionOn:  true,
-	}); err != nil {
-		t.Fatalf("repair failed: %v", err)
-	}
-
-	raw, err := os.ReadFile(offerPath)
-
-	if err != nil {
-		t.Fatalf("the missing record was not repaired: %v", err)
-	}
-
-	var repaired map[string]any
-
-	if err := json.Unmarshal(raw, &repaired); err != nil {
-		t.Fatal(err)
-	}
-
-	if repaired["swap_id"] != "aaaa00000001" || repaired["take_id"] != takeID {
-		t.Fatalf("repaired record disagrees with the canonical one: %v", repaired)
-	}
-}
-
-// TestSameSelectionComparesEveryField: record equality is what decides whether two
-// selection files describe one negotiation.
-func TestSameSelectionComparesEveryField(t *testing.T) {
-	base := map[string]any{"offer_id": "aa", "take_id": "bb", "swap_id": "cc"}
-
-	if !sameSelection(base, map[string]any{"offer_id": "aa", "take_id": "bb", "swap_id": "cc"}) {
-		t.Fatal("identical records compared unequal")
-	}
-
-	for name, other := range map[string]map[string]any{
-		"missing field":  {"offer_id": "aa", "take_id": "bb"},
-		"extra field":    {"offer_id": "aa", "take_id": "bb", "swap_id": "cc", "x": "d"},
-		"different swap": {"offer_id": "aa", "take_id": "bb", "swap_id": "dd"},
-	} {
-		if sameSelection(base, other) {
-			t.Errorf("%s compared equal", name)
-		}
 	}
 }
 

@@ -14,7 +14,6 @@ import (
 	"github.com/gjbrr/blake-swap/pkg/marketflow"
 	"github.com/gjbrr/blake-swap/pkg/marketops"
 	"github.com/gjbrr/blake-swap/pkg/nostr"
-	"github.com/gjbrr/blake-swap/pkg/store"
 	"github.com/gjbrr/blake-swap/pkg/swap"
 )
 
@@ -40,9 +39,7 @@ func runAcceptMarketTake(ctx context.Context, engine *swap.Engine, args []string
 		return fmt.Errorf("accept-market-take takes one take id")
 	}
 
-	key, err := engineKey(engine)
-
-	if err != nil {
+	if _, err := engineKey(engine); err != nil {
 		return err
 	}
 
@@ -73,6 +70,12 @@ func runAcceptMarketTake(ctx context.Context, engine *swap.Engine, args []string
 
 	_, err = marketops.AcceptTake(ctx, env, takeID, takeEvent, marketops.TakeHooks{
 		Accepted: func(acceptance marketops.TakeAcceptance) {
+			if acceptance.Reverse {
+				printReverseTakeAccepted(acceptance)
+
+				return
+			}
+
 			if acceptance.Repeated {
 				fmt.Print(renderMarketTakeAlreadyAccepted(
 					acceptance.OfferID, acceptance.TakeID, acceptance.SwapID,
@@ -96,12 +99,23 @@ func runAcceptMarketTake(ctx context.Context, engine *swap.Engine, args []string
 				selectionSwapID(ctx, env, takeID), messageLocation(location),
 			))
 		},
-		BeforeMatchPublish: func() {
+		BeforeMatchPublish: func(acceptance marketops.TakeAcceptance) {
+			// The reverse direction announces only the match, so it has nothing to say
+			// between the durable selections and the publication.
+			if acceptance.Reverse {
+				return
+			}
+
 			fmt.Print("\nPublishing signed market match...\n")
 		},
-		AfterMatchPublish: func(publication marketops.MatchPublication) {
+		AfterMatchPublish: func(acceptance marketops.TakeAcceptance, publication marketops.MatchPublication) {
 			fmt.Print(renderOutboundCached(publication.Published.ID, cacheDirectory()))
 			fmt.Print(renderRelayResults(publication.Report))
+
+			if acceptance.Reverse {
+				return
+			}
+
 			fmt.Print(renderMatchPublished(
 				publication.OfferID, publication.TakeID, publication.MatchID, publication.SwapID,
 			))
@@ -111,18 +125,27 @@ func runAcceptMarketTake(ctx context.Context, engine *swap.Engine, args []string
 		},
 	})
 
-	if reverse, ok := marketops.IsReverse(err); ok {
-		return acceptReverseMarketTake(ctx, engine, key, client, takeAcceptInput{
-			Offer:      reverse.Offer,
-			OfferTerms: reverse.Terms,
-			OfferID:    reverse.OfferID,
-			TakeEvent:  reverse.Take,
-			TakeID:     reverse.TakeID,
-			Directory:  filepath.Join(stateDirectory(), selectionsDirectory),
-		})
+	return err
+}
+
+// printReverseTakeAccepted is the reference's block for a btc-for-blake acceptance.
+//
+// Bob reserved the swap id and published the match; he holds no secret, because the maker of
+// a btc-for-blake offer pays the BTC leg and choosing the hashlock would let him claim
+// without the other side's cooperation.
+func printReverseTakeAccepted(acceptance marketops.TakeAcceptance) {
+	if acceptance.Repeated {
+		fmt.Print(renderReverseTakeAlreadyAccepted(
+			acceptance.OfferID, acceptance.TakeID, acceptance.SwapID,
+		))
+
+		return
 	}
 
-	return err
+	fmt.Print(renderReverseTakeAccepted(
+		acceptance.OfferID, acceptance.TakeID, acceptance.MatchID, acceptance.SwapID,
+		string(acceptance.Direction), acceptance.MakerRole, acceptance.TakerRole,
+	))
 }
 
 // selectionSwapID reads back the swap id the acceptance recorded.
@@ -145,93 +168,6 @@ func selectionSwapID(ctx context.Context, env *marketops.Env, takeID string) str
 	swapID, _ := selection["swap_id"].(string)
 
 	return swapID
-}
-
-// takeAcceptInput is everything the reverse path needs from the forward one.
-type takeAcceptInput struct {
-	Offer      *event.Event
-	OfferTerms *marketflow.ListedOffer
-	OfferID    string
-	TakeEvent  *event.Event
-	TakeID     string
-	Directory  string
-}
-
-// repeatAccept describes a selection that already exists.
-type repeatAccept struct {
-	OfferID          string
-	TakeID           string
-	Alice            string
-	Bob              string
-	OfferSelection   map[string]any
-	TakeSelection    map[string]any
-	TakePath         string
-	OfferPath        string
-	OfferSelectionOn bool
-	TakeSelectionOn  bool
-}
-
-// repeatAcceptMarketTake finishes a negotiation that was already recorded.
-//
-// Two records describe one accepted take. If an earlier run stopped between the two
-// writes, one of them is missing, and this repairs it rather than refusing to work —
-// but only after both records and the swap agree on every identity and on the swap id,
-// because repairing a disagreement would be inventing a fact.
-func repeatAcceptMarketTake(ctx context.Context, req repeatAccept) error {
-	canonical := req.TakeSelection
-
-	if canonical == nil {
-		canonical = req.OfferSelection
-	}
-
-	swapID, _ := canonical["swap_id"].(string)
-
-	if req.OfferSelectionOn && req.TakeSelectionOn {
-		offerSwap, _ := req.OfferSelection["swap_id"].(string)
-		takeSwap, _ := req.TakeSelection["swap_id"].(string)
-
-		if offerSwap != takeSwap {
-			return fmt.Errorf("SECURITY FAILURE: market selection records disagree about swap_id")
-		}
-	}
-
-	if v, _ := canonical["nostr_alice_pub"].(string); v != req.Alice {
-		return fmt.Errorf("SECURITY FAILURE: existing market selection Alice identity mismatch")
-	}
-
-	if v, _ := canonical["nostr_bob_pub"].(string); v != req.Bob {
-		return fmt.Errorf("SECURITY FAILURE: existing market selection Bob identity mismatch")
-	}
-
-	record, err := store.NewFile(stateDirectory()).Load(ctx, swapID)
-
-	if err != nil {
-		return err
-	}
-
-	if record.NostrAlicePub == nil || *record.NostrAlicePub != req.Alice {
-		return fmt.Errorf("SECURITY FAILURE: existing swap Alice identity mismatch")
-	}
-
-	if record.NostrBobPub == nil || *record.NostrBobPub != req.Bob {
-		return fmt.Errorf("SECURITY FAILURE: existing swap Bob identity mismatch")
-	}
-
-	if !req.TakeSelectionOn {
-		if err := writeSelection(req.TakePath, canonical); err != nil {
-			return err
-		}
-	}
-
-	if !req.OfferSelectionOn {
-		if err := writeSelection(req.OfferPath, canonical); err != nil {
-			return err
-		}
-	}
-
-	fmt.Print(renderMarketTakeAlreadyAccepted(req.OfferID, req.TakeID, swapID))
-
-	return nil
 }
 
 // marketTakeSet is one offer together with the valid takes of it.
@@ -469,6 +405,50 @@ func renderMarketBridge(offerID, takeID, matchID, swapID string) string {
 	out.WriteString("\n")
 	out.WriteString("PASS: settlement engine was not modified\n")
 	out.WriteString("PASS: HTLC funding remains a separate explicit action\n")
+
+	return out.String()
+}
+
+// renderReverseTakeAccepted is the reference's confirmation block for the reverse path.
+func renderReverseTakeAccepted(
+	offerID, takeID, matchID, swapID, direction, makerRole, takerRole string,
+) string {
+	var out strings.Builder
+
+	out.WriteString("\n")
+	out.WriteString("REVERSE MARKET TAKE ACCEPTED\n")
+	out.WriteString("============================\n")
+	fmt.Fprintf(&out, "offer id: %s\n", offerID)
+	fmt.Fprintf(&out, "take id:  %s\n", takeID)
+	fmt.Fprintf(&out, "match id: %s\n", matchID)
+	fmt.Fprintf(&out, "swap id:  %s\n", swapID)
+	out.WriteString("\n")
+	fmt.Fprintf(&out, "direction: %s\n", direction)
+	fmt.Fprintf(&out, "maker is protocol: %s\n", makerRole)
+	fmt.Fprintf(&out, "taker is protocol: %s\n", takerRole)
+	out.WriteString("\n")
+	out.WriteString("PASS: maker selected exact signed take\n")
+	out.WriteString("PASS: public swap_id reserved\n")
+	out.WriteString("PASS: Bob did NOT create secret S\n")
+	out.WriteString("PASS: no atomic-swap state exists yet\n")
+	out.WriteString("PASS: no funds moved\n")
+
+	return out.String()
+}
+
+// renderReverseTakeAlreadyAccepted is the duplicate-reverse block.
+func renderReverseTakeAlreadyAccepted(offerID, takeID, swapID string) string {
+	var out strings.Builder
+
+	out.WriteString("\n")
+	out.WriteString("REVERSE MARKET TAKE ALREADY ACCEPTED\n")
+	out.WriteString("====================================\n")
+	fmt.Fprintf(&out, "offer id: %s\n", offerID)
+	fmt.Fprintf(&out, "take id:  %s\n", takeID)
+	fmt.Fprintf(&out, "swap id:  %s\n", swapID)
+	out.WriteString("\n")
+	out.WriteString("PASS: no second swap ID was created\n")
+	out.WriteString("PASS: no secret was created by Bob\n")
 
 	return out.String()
 }

@@ -152,7 +152,7 @@ func renderReverseMatchImported(matchID string, record *model.Swap, alice, bob s
 	out.WriteString("REVERSE MARKET MATCH IMPORTED\n")
 	out.WriteString("=============================\n")
 	fmt.Fprintf(&out, "match id: %s\n", matchID)
-	fmt.Fprintf(&out, "swap id: %s\n", record.SwapID)
+	fmt.Fprintf(&out, "swap id:  %s\n", record.SwapID)
 	out.WriteString("\n")
 	out.WriteString("direction: btc-for-blake\n")
 	out.WriteString("maker is protocol: bob\n")

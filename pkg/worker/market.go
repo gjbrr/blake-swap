@@ -106,6 +106,8 @@ func (d *marketDomain) Handle(ctx context.Context, request proto.Request) proto.
 
 	case "market.accept-reverse-match":
 		return d.acceptReverseMatch(ctx, request)
+	case "market.accept-reverse-offer":
+		return d.acceptReverseOffer(ctx, request)
 
 	case "market.cancel":
 		return d.cancel(ctx, request)
@@ -687,14 +689,6 @@ func (d *marketDomain) acceptTake(ctx context.Context, request proto.Request) pr
 
 	acceptance, err := marketops.AcceptTake(ctx, env, takeID, nil, marketops.TakeHooks{})
 
-	if reverse, ok := marketops.IsReverse(err); ok {
-		return proto.Result{
-			Command: request.Command,
-			Error: "the reverse market direction is not implemented in this client yet " +
-				"(take " + reverse.TakeID + "); the CLI can accept it",
-		}
-	}
-
 	if err != nil {
 		return failed(request.Command, err)
 	}
@@ -702,11 +696,29 @@ func (d *marketDomain) acceptTake(ctx context.Context, request proto.Request) pr
 	action := view.Action(request.Command, acceptance.SwapID, "accept-market-take")
 	action.Message = acceptance.MatchID
 	action.Details = []proto.ActionFact{
+		{Label: "direction", Value: string(acceptance.Direction)},
+		{Label: "maker is protocol", Value: acceptance.MakerRole},
+		{Label: "taker is protocol", Value: acceptance.TakerRole},
 		{Label: "offer id", Value: acceptance.OfferID},
 		{Label: "take id", Value: acceptance.TakeID},
 		{Label: "match id", Value: acceptance.MatchID},
 		{Label: "BLAKE", Value: acceptance.Blake.Format()},
 		{Label: "BTC sats", Value: strconv.FormatInt(acceptance.BTCSats, 10)},
+	}
+
+	if acceptance.Reverse {
+		// Not a swap yet: the id is reserved and the other side creates the record. Saying
+		// so is the difference between "you have a swap" and "you have a negotiation".
+		action.Details = append(action.Details,
+			proto.ActionFact{
+				Label: "swap id",
+				Value: acceptance.SwapID + " (reserved; the record is created by the taker)",
+			},
+			proto.ActionFact{
+				Label: "secret",
+				Value: "not created: the maker of a btc-for-blake offer never chooses the hashlock",
+			},
+		)
 	}
 
 	if acceptance.Repeated {
@@ -715,12 +727,15 @@ func (d *marketDomain) acceptTake(ctx context.Context, request proto.Request) pr
 		})
 	}
 
-	return withView(proto.Result{
-		Command: request.Command,
-		OK:      true,
-		Text: "accepted take " + acceptance.TakeID + " as swap " + acceptance.SwapID +
-			" (match " + acceptance.MatchID + ")",
-	}, action)
+	text := "accepted take " + acceptance.TakeID + " as swap " + acceptance.SwapID +
+		" (match " + acceptance.MatchID + ")"
+
+	if acceptance.Reverse {
+		text = "accepted reverse take " + acceptance.TakeID + "; reserved swap " +
+			acceptance.SwapID + " and published match " + acceptance.MatchID
+	}
+
+	return withView(proto.Result{Command: request.Command, OK: true, Text: text}, action)
 }
 
 // acceptMatch imports the swap a market match binds, as the taker.
@@ -819,6 +834,73 @@ func (d *marketDomain) acceptReverseMatch(ctx context.Context, request proto.Req
 		OK:      true,
 		Text:    "imported reverse match " + imported.MatchID + " as swap " + imported.SwapID,
 	}, action)
+}
+
+// acceptReverseOffer imports the taker's protocol offer, as the reverse maker.
+//
+// This is the reverse direction's second step. The maker published the match and reserved the
+// swap id; what is missing is the taker's signed offer, which is what he needs before he can
+// fund. The state machine is shared with the CLI, including the crash window where his keys
+// are durable and his accept message never left.
+func (d *marketDomain) acceptReverseOffer(ctx context.Context, request proto.Request) proto.Result {
+	matchID := strings.ToLower(strings.TrimSpace(request.Args["match_id"]))
+
+	if len(matchID) != 64 {
+		return proto.Result{
+			Command: request.Command,
+			Error:   "match_id must be the full 64-character Nostr event ID",
+		}
+	}
+
+	env, _, err := d.acceptEnv(ctx)
+
+	if err != nil {
+		return failed(request.Command, err)
+	}
+
+	imported, err := marketops.AcceptReverseOffer(ctx, env, matchID, nil, marketops.MatchHooks{})
+
+	if err != nil {
+		return failed(request.Command, err)
+	}
+
+	action := view.Action(request.Command, imported.SwapID, "accept-reverse-swap-offer")
+	action.Message = imported.MatchID
+	action.Details = []proto.ActionFact{
+		{Label: "match id", Value: imported.MatchID},
+		{Label: "swap id", Value: imported.SwapID},
+		{Label: "direction", Value: string(imported.Direction)},
+		{Label: "maker is protocol", Value: "bob"},
+		{Label: "taker is protocol", Value: "alice"},
+		{Label: "Alice Nostr", Value: imported.Alice},
+		{Label: "Bob Nostr", Value: imported.Bob},
+		{Label: "BLAKE", Value: imported.Blake.Format()},
+		{Label: "BTC sats", Value: strconv.FormatInt(imported.BTCSats, 10)},
+	}
+
+	switch {
+	case imported.Recovered:
+		action.Details = append(action.Details, proto.ActionFact{
+			Label: "note",
+			Value: "the handshake was recovered with the settlement keys already on disk; " +
+				"the accept message has now been sent",
+		})
+	case imported.Repeated:
+		action.Details = append(action.Details, proto.ActionFact{
+			Label: "note",
+			Value: "this offer had already been imported; the existing swap was reused",
+		})
+	default:
+		if imported.Location != "" {
+			action.Details = append(action.Details, proto.ActionFact{
+				Label: "accept message", Value: imported.Location,
+			})
+		}
+	}
+
+	text := "imported reverse offer for match " + imported.MatchID + " as swap " + imported.SwapID
+
+	return withView(proto.Result{Command: request.Command, OK: true, Text: text}, action)
 }
 
 // cancel publishes this participant's cancellation of an offer they made.

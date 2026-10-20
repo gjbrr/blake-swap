@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/gjbrr/blake-swap/pkg/coord"
 	"github.com/gjbrr/blake-swap/pkg/marketops"
 	"github.com/gjbrr/blake-swap/pkg/nostr"
 	"github.com/gjbrr/blake-swap/pkg/store"
@@ -91,6 +92,11 @@ func (m marketEngine) AcceptOffer(ctx context.Context, req swap.AcceptRequest) (
 // PublishOffer implements marketops.Engine.
 func (m marketEngine) PublishOffer(ctx context.Context, swapID string) (*swap.MessageResult, error) {
 	return m.engine.PublishOffer(ctx, swapID)
+}
+
+// Coordination implements marketops.Engine.
+func (m marketEngine) Coordination() (coord.Transport, nostr.Mode) {
+	return m.engine.Coordination()
 }
 
 // marketEnv builds the environment the market operations run in.

@@ -83,6 +83,15 @@ type Engine struct {
 	Now func() time.Time
 }
 
+// Coordination reports the transport and confidentiality mode this engine was built with.
+//
+// It exists for the market's crash-resume path, which has to send the accept message a
+// previous attempt never sent. That message must travel over the engine's own configured
+// transport; a caller that built its own would be answering "where do I coordinate?" twice.
+func (e *Engine) Coordination() (coord.Transport, nostr.Mode) {
+	return e.Transport, e.Mode
+}
+
 // SettlementSettings is how a settlement command prices its transaction.
 type SettlementSettings struct {
 	// FeeRate is an explicit feerate in sat/vB, outranking every other knob.

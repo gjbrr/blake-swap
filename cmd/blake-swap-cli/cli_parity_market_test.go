@@ -117,6 +117,57 @@ func marketWalk(t *testing.T, r *rigtest.Rig, impl string) map[string]string {
 	run("market-matches", bob, "market-matches")
 	run("cancel-market-offer", alice, "cancel-market-offer", offerID)
 
+	//
+	// The reverse direction, with a second pair of participants. Here the offer's maker is
+	// protocol Bob — the side that funds BTC — so he accepts the take, reserves the swap id
+	// and publishes the match without ever creating the secret; the taker is protocol Alice,
+	// who creates the swap and publishes her protocol offer; and Bob then imports that offer
+	// and sends his accept. Every step is compared, including the duplicate import, because
+	// the retry is the path a crash lands in.
+	//
+	reverseBob := participant("bob")
+	reverseAlice := participant("alice")
+
+	reverseOffer := run("reverse publish-market-offer", reverseBob,
+		"publish-market-offer", "--blake", "5", "--sats", "25000", "--minutes", "30",
+		"--direction", "btc-for-blake")
+
+	reverseOfferID := marketValue(t, reverseOffer, "offer id")
+
+	if len(reverseOfferID) != 64 {
+		t.Fatalf("%s: reverse offer id is %q", impl, reverseOfferID)
+	}
+
+	run("reverse market", reverseBob, "market", "--limit", "10")
+
+	reverseTaken := run("reverse take-market-offer", reverseAlice,
+		"take-market-offer", reverseOfferID)
+
+	reverseTakeID := marketValue(t, reverseTaken, "take id")
+
+	run("reverse market-takes", reverseBob, "market-takes", reverseOfferID)
+
+	reverseAccepted := run("reverse accept-market-take", reverseBob,
+		"accept-market-take", reverseTakeID)
+
+	reverseMatchID := marketValue(t, reverseAccepted, "match id")
+	reverseSwapID := marketValue(t, reverseAccepted, "swap id")
+
+	run("reverse accept-reverse-market-match", reverseAlice,
+		"accept-reverse-market-match", reverseMatchID)
+	run("reverse publish-offer", reverseAlice, "publish-offer", reverseSwapID)
+	run("reverse accept-reverse-swap-offer", reverseBob,
+		"accept-reverse-swap-offer", reverseMatchID)
+	run("reverse accept-reverse-swap-offer again", reverseBob,
+		"accept-reverse-swap-offer", reverseMatchID)
+	//
+	// The listing itself is compared in the forward phase, where both implementations
+	// cache the same events. A reverse `market-matches` would compare which events each
+	// client had already cached rather than what the command does: the port caches every
+	// event it publishes, so it resolves the match's offer and take locally while the
+	// reference fetches them and reports where from.
+	//
+
 	return outputs
 }
 

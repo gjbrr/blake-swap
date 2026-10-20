@@ -21,7 +21,9 @@ import (
 	"time"
 
 	"github.com/gjbrr/blake-swap/pkg/amount"
+	"github.com/gjbrr/blake-swap/pkg/coord"
 	"github.com/gjbrr/blake-swap/pkg/event"
+	"github.com/gjbrr/blake-swap/pkg/market"
 	"github.com/gjbrr/blake-swap/pkg/marketflow"
 	"github.com/gjbrr/blake-swap/pkg/nostr"
 	"github.com/gjbrr/blake-swap/pkg/store"
@@ -47,6 +49,12 @@ type Engine interface {
 	New(ctx context.Context, req swap.NewRequest) (*swap.NewResult, error)
 	AcceptOffer(ctx context.Context, req swap.AcceptRequest) (*swap.AcceptResult, error)
 	PublishOffer(ctx context.Context, swapID string) (*swap.MessageResult, error)
+	// Coordination is the transport and confidentiality mode coordination messages use.
+	//
+	// The crash-resume path has to send the accept message a previous attempt never sent,
+	// and it must go through the engine's own configured transport: building a second one
+	// here would be a second answer to where this participant coordinates.
+	Coordination() (coord.Transport, nostr.Mode)
 }
 
 // Env is everything an operation needs from its caller.
@@ -124,18 +132,33 @@ type TakeAcceptance struct {
 	OfferID string
 	TakeID  string
 	SwapID  string
-	Alice   string
-	Bob     string
+	// Alice and Bob are the protocol roles, not the market ones: which of them is the
+	// maker depends on the direction, and both facts are reported.
+	Alice string
+	Bob   string
 
 	Blake   amount.Blake
 	BTCSats int64
 
+	// BTCTimeout and BlakeTimeout are the swap's deadlines. They are zero in the reverse
+	// direction, where no swap record exists yet to carry them.
 	BTCTimeout   int64
 	BlakeTimeout int64
+
+	// Direction is the market direction both signed events name.
+	Direction market.Direction
+	// MakerRole and TakerRole are the protocol roles the direction implies, which is what
+	// makes the reverse direction's asymmetry legible: its maker is Bob.
+	MakerRole string
+	TakerRole string
 
 	// Repeated reports that the selection records already existed and this call finished or
 	// repaired them rather than creating a second swap.
 	Repeated bool
+	// Reverse reports that this was a btc-for-blake acceptance: the swap id is reserved and
+	// no swap record, secret or hashlock exists on this side, because the maker of a
+	// btc-for-blake offer is the payer of the BTC leg and must not choose the hashlock.
+	Reverse bool
 	// MatchID is the published match, empty on the repeated path.
 	MatchID string
 	// OfferLocation is where the protocol offer was written or published.
@@ -178,15 +201,20 @@ type MatchImport struct {
 // A nil hook is not called. The order is the reference's: the acceptance is reported once the
 // selections are durable and before anything is announced, because the selections are what
 // stop a second take creating a second swap.
+//
+// The reverse direction announces only the match and reports the acceptance after it, so the
+// hooks that bracket a publication are handed the acceptance: a caller that renders has to
+// know which direction it is rendering, and the acceptance is the fact that says so.
 type TakeHooks struct {
 	// Accepted reports the acceptance, repeated or fresh.
 	Accepted func(TakeAcceptance)
-	// BeforeOfferPublish and AfterOfferPublish bracket the protocol offer publication.
+	// BeforeOfferPublish and AfterOfferPublish bracket the protocol offer publication. The
+	// reverse direction publishes no protocol offer here.
 	BeforeOfferPublish func()
 	AfterOfferPublish  func(location string)
 	// BeforeMatchPublish and AfterMatchPublish bracket the match publication.
-	BeforeMatchPublish func()
-	AfterMatchPublish  func(MatchPublication)
+	BeforeMatchPublish func(TakeAcceptance)
+	AfterMatchPublish  func(TakeAcceptance, MatchPublication)
 }
 
 // MatchHooks are the caller's rendering points for an import.
@@ -194,35 +222,10 @@ type MatchHooks struct {
 	BeforeAccept func()
 	AfterAccept  func(*swap.AcceptResult)
 	AfterImport  func(MatchImport)
-}
-
-// ReverseTakeError reports a take in the reverse direction, which is a different market flow
-// with its own accept path.
-//
-// It carries the parsed evidence so a caller that does implement the reverse direction can
-// proceed without reading the relay again, which is what keeps the CLI's output unchanged.
-type ReverseTakeError struct {
-	Offer   *event.Event
-	Terms   *marketflow.ListedOffer
-	Take    *event.Event
-	OfferID string
-	TakeID  string
-}
-
-// Error implements error.
-func (e *ReverseTakeError) Error() string {
-	return "the reverse market direction has its own accept path"
-}
-
-// IsReverse reports whether an error is a reverse-direction take.
-func IsReverse(err error) (*ReverseTakeError, bool) {
-	var reverse *ReverseTakeError
-
-	if errors.As(err, &reverse) {
-		return reverse, true
-	}
-
-	return nil, false
+	// AfterReverseOffer receives the facts of the maker's import of the taker's protocol
+	// offer. It is separate from AfterImport because the two imports produce different
+	// facts: the taker imports a swap, while the maker completes a handshake.
+	AfterReverseOffer func(ReverseOfferImport)
 }
 
 // selectionPath names one selection record.

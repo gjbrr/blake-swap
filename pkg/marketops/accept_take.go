@@ -125,12 +125,14 @@ func AcceptTake(
 	}
 
 	// In the reverse direction the offer's maker is protocol Bob and must never create
-	// Alice's secret, so that path is a different operation rather than a branch here.
+	// Alice's secret. That is a different chain of work — reserve the swap id, publish the
+	// match, create nothing — but not a different read: the evidence has just been judged,
+	// so it is handed over rather than fetched a second time.
 	if selected.Take.Direction == market.BTCForBlake {
-		return nil, &ReverseTakeError{
-			Offer: set.Offer, Terms: set.Listed, Take: takeEvent,
+		return acceptReverseTake(ctx, env, reverseTakeEvidence{
+			Offer: set.Offer, Terms: set.Listed, Take: takeEvent, Selected: selected,
 			OfferID: offerID, TakeID: takeID,
-		}
+		}, hooks)
 	}
 
 	alice := env.Identity.Public
@@ -188,6 +190,7 @@ func AcceptTake(
 			OfferName:        offerSelectionName,
 			OfferSelectionOn: offerSelection != nil,
 			TakeSelectionOn:  takeSelection != nil,
+			Direction:        set.Listed.Direction,
 		}, hooks)
 	}
 
@@ -225,11 +228,18 @@ func AcceptTake(
 		return nil, err
 	}
 
+	makerRole, takerRole, err := set.Listed.Direction.ProtocolRoles()
+
+	if err != nil {
+		return nil, err
+	}
+
 	acceptance := TakeAcceptance{
 		OfferID: offerID, TakeID: takeID, SwapID: record.SwapID,
 		Alice: alice, Bob: bob,
 		Blake: set.Listed.BlakeAmount, BTCSats: set.Listed.BTCSats,
 		BTCTimeout: record.BTCTimeout, BlakeTimeout: record.BlakeTimeout,
+		Direction: set.Listed.Direction, MakerRole: makerRole, TakerRole: takerRole,
 	}
 
 	if hooks.Accepted != nil {
@@ -255,7 +265,7 @@ func AcceptTake(
 	}
 
 	if hooks.BeforeMatchPublish != nil {
-		hooks.BeforeMatchPublish()
+		hooks.BeforeMatchPublish(acceptance)
 	}
 
 	match, err := PublishMatch(ctx, env, takeID)
@@ -267,7 +277,7 @@ func AcceptTake(
 	acceptance.MatchID = match.MatchID
 
 	if hooks.AfterMatchPublish != nil {
-		hooks.AfterMatchPublish(match)
+		hooks.AfterMatchPublish(acceptance, match)
 	}
 
 	return &acceptance, nil
@@ -285,6 +295,8 @@ type repeatRequest struct {
 	OfferName        string
 	OfferSelectionOn bool
 	TakeSelectionOn  bool
+	// Direction is the market direction both events name, for the reported roles.
+	Direction market.Direction
 }
 
 // repeatAccept finishes a negotiation that was already recorded.
@@ -347,11 +359,18 @@ func repeatAccept(
 		}
 	}
 
+	makerRole, takerRole, roleErr := req.Direction.ProtocolRoles()
+
+	if roleErr != nil {
+		return nil, roleErr
+	}
+
 	acceptance := TakeAcceptance{
 		OfferID: req.OfferID, TakeID: req.TakeID, SwapID: swapID,
 		Alice: req.Alice, Bob: req.Bob,
 		Blake: amount.Blake(record.BlakeAmountBaseUnits), BTCSats: record.BTCSats,
 		BTCTimeout: record.BTCTimeout, BlakeTimeout: record.BlakeTimeout,
+		Direction: req.Direction, MakerRole: makerRole, TakerRole: takerRole,
 		Repeated: true,
 	}
 

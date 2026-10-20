@@ -101,7 +101,7 @@ func TestRenderReverseMatchImportedMatchesTheReference(t *testing.T) {
 	want := "\nREVERSE MARKET MATCH IMPORTED\n" +
 		"=============================\n" +
 		"match id: " + matchID + "\n" +
-		"swap id: aaaa00000001\n" +
+		"swap id:  aaaa00000001\n" +
 		"\n" +
 		"direction: btc-for-blake\n" +
 		"maker is protocol: bob\n" +
@@ -336,12 +336,14 @@ func TestRenderReverseSwapOfferBlocksMatchTheReference(t *testing.T) {
 	matchID := strings.Repeat("ab", 32)
 	record := reverseSwap()
 
-	fresh := renderReverseSwapOfferImported(matchID, record)
+	fresh := renderReverseSwapOfferImported(
+		matchID, record.SwapID, *record.NostrAlicePub, *record.NostrBobPub,
+	)
 
 	wantFresh := "\nREVERSE SWAP OFFER IMPORTED\n" +
 		"===========================\n" +
 		"match id: " + matchID + "\n" +
-		"swap id: aaaa00000001\n" +
+		"swap id:  aaaa00000001\n" +
 		"\n" +
 		"Alice Nostr: " + strings.Repeat("44", 32) + "\n" +
 		"Bob Nostr:   " + strings.Repeat("33", 32) + "\n" +
@@ -389,57 +391,5 @@ func TestRenderReverseBobRecoveredMatchesTheReference(t *testing.T) {
 
 	if got != want {
 		t.Fatalf("renderReverseBobRecovered mismatch:\n--- got ---\n%q\n--- want ---\n%q", got, want)
-	}
-}
-
-// TestReverseBobResumableRefusesEveryUnsafeResume: a partial handshake may only be
-// finished while nothing has moved, and only with keys Bob already created.
-func TestReverseBobResumableRefusesEveryUnsafeResume(t *testing.T) {
-	bobKey := strings.Repeat("77", 32)
-	txid := strings.Repeat("88", 32)
-
-	fixture := func() *model.Swap {
-		record := reverseSwap()
-		record.BlakeBobPub = &bobKey
-		record.BTCBobPub = &bobKey
-		record.NostrBobPub = nil
-
-		return record
-	}
-
-	// The resumable shape is accepted, so the test is not asserting refusal only.
-	if err := reverseBobResumable(fixture()); err != nil {
-		t.Fatalf("a resumable record was refused: %v", err)
-	}
-
-	cases := map[string]struct {
-		mutate func(*model.Swap)
-		want   string
-	}{
-		"not offered": {func(s *model.Swap) { s.State = "BLAKE_FUNDED" }, "not OFFERED"},
-		"has secret": {func(s *model.Swap) {
-			secret := strings.Repeat("66", 32)
-			s.SecretHex = &secret
-		}, "unexpectedly possesses secret S"},
-		"funded":  {func(s *model.Swap) { s.BTCFundingTxID = &txid }, "after settlement activity"},
-		"claimed": {func(s *model.Swap) { s.BlakeClaimTxID = &txid }, "after settlement activity"},
-		"no keys": {func(s *model.Swap) { s.BlakeBobPub = nil }, "does not contain Bob settlement keys"},
-	}
-
-	for name, test := range cases {
-		record := fixture()
-		test.mutate(record)
-
-		err := reverseBobResumable(record)
-
-		if err == nil {
-			t.Errorf("%s: was resumable", name)
-
-			continue
-		}
-
-		if !strings.Contains(err.Error(), test.want) {
-			t.Errorf("%s: refusal = %v, want it to mention %q", name, err, test.want)
-		}
 	}
 }

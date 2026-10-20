@@ -72,22 +72,49 @@ func IsAmbiguous(err error) (*AmbiguousMatchError, bool) {
 
 // ReadMatches reads the valid matches addressed to this participant as the taker.
 //
+// It is the CLI's inbox: the reference's listing is the taker's, and its validator refuses a
+// match "for another taker".
+func ReadMatches(ctx context.Context, env *Env, limit int) ([]marketflow.MatchEntry, error) {
+	matches, err := MatchesNaming(ctx, env, limit)
+
+	if err != nil {
+		return nil, err
+	}
+
+	return addressedToTaker(env.Identity.Public, matches), nil
+}
+
+// MatchesNaming reads the verified matches that name this participant, as maker or taker.
+//
 // The two references are immutable, so they are satisfied from the verified cache when
 // possible and only fetched when this machine has never seen them: a relay may hold a match and
-// not its offer, and a match is not evidence until both are present.
-func ReadMatches(ctx context.Context, env *Env, limit int) ([]marketflow.MatchEntry, error) {
+// not its offer, and a match is not evidence until both are present. That is why the read is
+// not one query — the match subscription carries the matches, and the takes of an offer are
+// only reachable by the offer's id.
+func MatchesNaming(ctx context.Context, env *Env, limit int) ([]marketflow.MatchEntry, error) {
 	if err := env.checkMarket(); err != nil {
 		return nil, err
 	}
 
 	me := env.Identity.Public
 
-	report, err := env.Client.FetchReport(ctx, nostr.Filter{
-		Kinds:  []int{1},
-		Topics: []string{marketflow.MatchTag},
-		PTags:  []string{me},
-		Limit:  limit,
-	})
+	// Two filters, because a match is addressed to its taker and signed by its maker: the
+	// inbox query only carries one of those roles, and in the reverse direction the maker is
+	// the side that has work left.
+	report, err := env.Client.FetchReport(ctx,
+		nostr.Filter{
+			Kinds:  []int{1},
+			Topics: []string{marketflow.MatchTag},
+			PTags:  []string{me},
+			Limit:  limit,
+		},
+		nostr.Filter{
+			Kinds:   []int{1},
+			Topics:  []string{marketflow.MatchTag},
+			Authors: []string{me},
+			Limit:   limit,
+		},
+	)
 
 	if err != nil {
 		return nil, err
@@ -120,7 +147,7 @@ func ReadMatches(ctx context.Context, env *Env, limit int) ([]marketflow.MatchEn
 		evidence = append(evidence, dependencies...)
 	}
 
-	return addressedToTaker(me, marketflow.MatchesFor(me, evidence, env.now())), nil
+	return marketflow.MatchesFor(me, evidence, env.now()), nil
 }
 
 // addressedToTaker keeps the matches this participant is the taker of.

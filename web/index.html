@@ -175,6 +175,7 @@
 
       <div class="row">
         <button type="button" data-uicmd="market-list">Refresh market</button>
+        <button type="button" data-uicmd="market-matches">Refresh matches</button>
         <span id="market-read" class="mono muted"></span>
       </div>
 
@@ -199,14 +200,14 @@
 
         <h4>Takes</h4>
         <table class="table" id="market-takes">
-          <thead><tr><th>take</th><th>taker</th><th>BLAKE</th><th>sats</th><th>age</th><th></th></tr></thead>
+          <thead><tr><th>take</th><th>taker</th><th>direction</th><th>BLAKE</th><th>sats</th><th>age</th><th></th></tr></thead>
           <tbody id="market-takes-rows"></tbody>
         </table>
         <p class="hint" id="market-takes-empty">No valid takes on your offers.</p>
 
         <h4>Matches</h4>
         <table class="table" id="market-matches">
-          <thead><tr><th>match</th><th>swap</th><th>trace</th><th>age</th><th></th></tr></thead>
+          <thead><tr><th>match</th><th>swap</th><th>trace</th><th>direction</th><th>age</th><th></th></tr></thead>
           <tbody id="market-matches-rows"></tbody>
         </table>
         <p class="hint" id="market-matches-empty">No matches yet.</p>

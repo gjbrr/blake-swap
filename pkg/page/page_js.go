@@ -76,6 +76,7 @@ const (
 	UICmdMarketRelays    UICmd = "market-relays"
 	UICmdMarketSetRelays UICmd = "market-set-relays"
 	UICmdMarketList      UICmd = "market-list"
+	UICmdMarketMatches   UICmd = "market-matches"
 	UICmdMarketPublish   UICmd = "market-publish"
 
 	UICmdCoordOpen    UICmd = "coord-open"
@@ -103,6 +104,8 @@ const (
 	cmdMarketCancel      = "market-cancel:"
 	cmdMarketAcceptTake  = "market-accept-take:"
 	cmdMarketAcceptMatch = "market-accept-match:"
+	cmdMarketAcceptOffer = "market-accept-reverse-offer:"
+	cmdMarketIgnoreMatch = "market-ignore-match:"
 	cmdMarketTakes       = "market-takes:"
 	cmdOpenSwap          = "open-swap:"
 	cmdCoordSend         = "coord-send:"
@@ -563,6 +566,18 @@ func handleUI(state *app, link tinyspawn.Duplex[proto.Envelope], seq *uint32, cm
 		return
 	}
 
+	if matchID, found := strings.CutPrefix(cmd, cmdMarketAcceptOffer); found {
+		beginMarketAcceptReverseOffer(state, matchID)
+
+		return
+	}
+
+	if matchID, found := strings.CutPrefix(cmd, cmdMarketIgnoreMatch); found {
+		beginMarketIgnoreMatch(state, matchID)
+
+		return
+	}
+
 	if cmd == UICmdEngineAccept {
 		beginAcceptOffer(state)
 
@@ -740,6 +755,12 @@ func uiRequest(state *app, cmd UICmd) (proto.Request, bool) {
 
 	case UICmdMarketList:
 		return proto.Request{Command: "market.list"}, true
+
+	case UICmdMarketMatches:
+		// The matches of a negotiation are published by the maker, so the other side has to
+		// ask for them; the page refreshes automatically after its own actions, and this is
+		// the button for everything a peer did.
+		return proto.Request{Command: "market.matches"}, true
 
 	case UICmdCoordMode:
 		return proto.Request{Command: "coord.mode"}, true
@@ -926,8 +947,17 @@ func finishCommand(
 	case "market.publish", "market.take", "market.cancel":
 		queueCommand(refresh, state, link, seq, proto.Request{Command: "market.list"})
 
-	case "market.accept-take", "market.accept-match":
+	case "market.accept-take", "market.accept-match", "market.accept-reverse-match",
+		"market.accept-reverse-offer", "market.ignore-match":
+		// The matches list changes on every one of these, and an ignore only changes the
+		// matches: the book and this participant's own offers are untouched, so re-reading
+		// them would be two reads for a fact that did not change.
 		queueCommand(refresh, state, link, seq, proto.Request{Command: "market.matches"})
+
+		if result.Command == "market.ignore-match" {
+			break
+		}
+
 		queueCommand(refresh, state, link, seq, proto.Request{Command: "market.list"})
 	}
 
@@ -1150,7 +1180,8 @@ func applyResult(state *app, result proto.Result) {
 		renderSettings(state)
 
 	case "market.publish", "market.take", "market.cancel", "market.accept-take",
-		"market.accept-match":
+		"market.accept-match", "market.accept-reverse-match", "market.accept-reverse-offer",
+		"market.ignore-match":
 		applyAction(state, result, ElementMarket)
 
 	case "market.list":

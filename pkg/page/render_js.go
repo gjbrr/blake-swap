@@ -404,14 +404,18 @@ func renderTakes(market proto.MarketView) {
 	toggle(ElementMarketTakesEmpty, false)
 
 	for _, take := range market.Takes {
+		// The direction is printed rather than inferred from the numbers: a btc-for-blake
+		// take is not a blake-for-btc take, and the side each one makes Bob or Alice is the
+		// difference between creating a secret and reserving an id.
 		appendTo(ElementMarketTakes, elem("tr").
 			child(elem("td").text(short(take.EventID))).
 			child(elem("td").text(short(take.Taker))).
+			child(elem("td").text(take.Direction)).
 			child(elem("td").class("num").text(take.BlakeAmount)).
 			child(elem("td").class("num").text(take.BTCSats)).
 			child(elem("td").text(ageText(take.CreatedAt))).
 			child(elem("td").child(elem("button").attr("type", "button").
-				onCmd(cmdMarketAcceptTake+take.EventID).text("Accept take"))))
+				onCmd(cmdMarketAcceptTake+take.EventID).text(acceptTakeLabel(take)))))
 	}
 }
 
@@ -432,15 +436,36 @@ func renderMatches(market proto.MarketView) {
 
 		action := elem("td")
 
-		if !match.Imported {
+		switch {
+		case match.AwaitsOffer:
+			// The maker's second step: the taker's protocol offer is what it still needs
+			// before it can fund.
+			action = action.child(elem("button").attr("type", "button").
+				onCmd(cmdMarketAcceptOffer + match.EventID).text("Import offer"))
+		case match.Mine:
+			// The maker's own receipt, with nothing left to do.
+		case !match.Imported && match.Reverse:
+			// In this direction the taker is the protocol Alice, and importing the match is
+			// where the secret is created.
 			action = action.child(elem("button").attr("type", "button").
 				onCmd(cmdMarketAcceptMatch + match.EventID).text("Import match"))
+		case !match.Imported:
+			action = action.child(elem("button").attr("type", "button").
+				onCmd(cmdMarketAcceptMatch + match.EventID).text("Import match"))
+		}
+
+		// Ignoring is for the taker's pending decisions and never for a match this
+		// participant made or has already imported: both already mean something here.
+		if !match.Mine && !match.Imported {
+			action = action.child(elem("button").attr("type", "button").
+				onCmd(cmdMarketIgnoreMatch + match.EventID).text("Ignore"))
 		}
 
 		appendTo(ElementMarketMatches, elem("tr").
 			child(elem("td").text(short(match.EventID))).
 			child(elem("td").text(match.SwapID)).
 			child(elem("td").text(trace)).
+			child(elem("td").text(match.Direction)).
 			child(elem("td").text(ageText(match.CreatedAt))).
 			child(action))
 	}
@@ -1187,7 +1212,15 @@ func beginMarketCancel(state *app, offerID string) {
 }
 
 // beginMarketAcceptTake opens the confirmation for turning a take into a swap.
+//
+// The confirmation is direction-aware because the two directions do different things with
+// the same click, and an operator who read one and got the other would be right to be
+// alarmed: the forward direction creates the secret and the swap, and the reverse direction
+// creates neither — it reserves the id and publishes the match, because its maker is the
+// side that funds BTC and must not choose the hashlock.
 func beginMarketAcceptTake(state *app, takeID string) {
+	take := findTake(state.market.Takes, takeID)
+
 	spec := actionSpec{
 		command: "market.accept-take",
 		label:   "Accept take",
@@ -1196,9 +1229,25 @@ func beginMarketAcceptTake(state *app, takeID string) {
 			" moves no funds — funding stays a separate explicit action.",
 	}
 
+	if take.Reverse {
+		spec.label = "Reserve swap and publish match"
+		spec.what = "Accept this btc-for-blake take: reserve the public swap id, pin both" +
+			" identities, and publish the market match that binds them. This creates no" +
+			" swap and no secret — the taker creates the swap from the match — and it moves" +
+			" no funds."
+	}
+
 	facts := [][2]string{
 		{"take", takeID},
-		{"offer", orDash(state.marketOfferID)},
+		{"offer", orDash(take.OfferID)},
+	}
+
+	if take.Direction != "" {
+		facts = append(facts,
+			[2]string{"direction", take.Direction},
+			[2]string{"maker is protocol", take.MakerRole},
+			[2]string{"taker is protocol", take.TakerRole},
+		)
 	}
 
 	request := proto.Request{
@@ -1209,8 +1258,24 @@ func beginMarketAcceptTake(state *app, takeID string) {
 	openConfirmation(state, spec, request, "", facts)
 }
 
+// acceptTakeLabel is what the take row's button says, which is what accepting it does.
+func acceptTakeLabel(take proto.MarketTake) string {
+	if take.Reverse {
+		return "Reserve & match"
+	}
+
+	return "Accept take"
+}
+
 // beginMarketAcceptMatch opens the confirmation for importing a match as the taker.
+//
+// Which command it sends depends on the direction the match names, and on nothing else: in
+// a btc-for-blake match the taker is the protocol Alice, so importing it is where the
+// secret is created, and that is a different operation rather than a flag. The worker
+// re-validates whatever is sent, so the page is choosing a command, not deciding validity.
 func beginMarketAcceptMatch(state *app, matchID string) {
+	match := findMatch(state.market.Matches, matchID)
+
 	spec := actionSpec{
 		command: "market.accept-match",
 		label:   "Import match",
@@ -1218,12 +1283,96 @@ func beginMarketAcceptMatch(state *app, matchID string) {
 			" side of the swap and bind the negotiation to it. No funds move.",
 	}
 
+	if match.Reverse {
+		spec.command = "market.accept-reverse-match"
+		spec.label = "Import reverse match"
+		spec.what = "Validate this btc-for-blake match against the offer and take it names," +
+			" adopt the swap id it reserved, and create your side of the swap with a fresh" +
+			" secret of your own. No funds move."
+	}
+
 	request := proto.Request{
-		Command: "market.accept-match",
+		Command: spec.command,
 		Args:    map[string]string{"match_id": matchID},
 	}
 
-	openConfirmation(state, spec, request, "", [][2]string{{"match", matchID}})
+	facts := [][2]string{{"match", matchID}, {"swap", orDash(match.SwapID)}}
+
+	if match.Direction != "" {
+		facts = append(facts,
+			[2]string{"direction", match.Direction},
+			[2]string{"maker is protocol", match.MakerRole},
+			[2]string{"taker is protocol", match.TakerRole},
+		)
+	}
+
+	openConfirmation(state, spec, request, "", facts)
+}
+
+// beginMarketAcceptReverseOffer opens the confirmation for the reverse maker's second step.
+func beginMarketAcceptReverseOffer(state *app, matchID string) {
+	match := findMatch(state.market.Matches, matchID)
+
+	spec := actionSpec{
+		command: "market.accept-reverse-offer",
+		label:   "Import the taker's offer",
+		what: "Validate this btc-for-blake match against the offer and take it names, then" +
+			" import the taker's signed protocol offer as its maker. The accept message is" +
+			" what lets the BTC side fund. No funds move here.",
+	}
+
+	facts := [][2]string{{"match", matchID}, {"reserved swap", orDash(match.SwapID)}}
+
+	request := proto.Request{
+		Command: "market.accept-reverse-offer",
+		Args:    map[string]string{"match_id": matchID},
+	}
+
+	openConfirmation(state, spec, request, "", facts)
+}
+
+// beginMarketIgnoreMatch opens the confirmation for dismissing a match locally.
+func beginMarketIgnoreMatch(state *app, matchID string) {
+	match := findMatch(state.market.Matches, matchID)
+
+	spec := actionSpec{
+		command: "market.ignore-match",
+		label:   "Ignore match",
+		what: "Record a local, durable tombstone for this match so it stops being offered" +
+			" here. Nothing is deleted, no event is published and no swap is created. It is" +
+			" reversible only by the tombstone's lifetime or by removing it.",
+	}
+
+	facts := [][2]string{{"match", matchID}, {"swap", orDash(match.SwapID)}}
+
+	request := proto.Request{
+		Command: "market.ignore-match",
+		Args:    map[string]string{"match_id": matchID},
+	}
+
+	openConfirmation(state, spec, request, "", facts)
+}
+
+// findTake reads one take out of a list, zero when it is not there.
+func findTake(takes []proto.MarketTake, eventID string) proto.MarketTake {
+	for _, take := range takes {
+		if take.EventID == eventID {
+			return take
+		}
+	}
+
+	return proto.MarketTake{}
+}
+
+// findMatch reads one match out of a list, zero when it is not there.
+func findMatch(matches []proto.MarketMatch, matchID string) proto.MarketMatch {
+	for _, match := range matches {
+		if match.EventID == matchID {
+			return match
+		}
+	}
+
+	return proto.MarketMatch{}
 }
 
 // findOffer reads one offer out of a list, zero when it is not there.

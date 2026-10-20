@@ -707,13 +707,13 @@ func (d *marketDomain) matches(ctx context.Context, request proto.Request) proto
 		return failed(request.Command, err)
 	}
 
-	evidence, err := marketops.MarketEvidence(ctx, env, 200)
+	// The wider read, not the CLI's taker inbox: in the reverse direction the maker has to
+	// see the match it published in order to import the taker's offer against it.
+	found, err := marketops.MatchesNaming(ctx, env, 200)
 
 	if err != nil {
 		return failed(request.Command, err)
 	}
-
-	found := marketflow.MatchesFor(env.Identity.Public, evidence, d.now())
 
 	// A tombstone is this machine's opinion, not a fact about the evidence, so it filters the
 	// listing and nothing else. Losing it would make an ignored match resurface on the next
@@ -748,8 +748,28 @@ func (d *marketDomain) matches(ctx context.Context, request proto.Request) proto
 		text += "\n" + strings.Join(lines, "\n")
 	}
 
-	return withView(proto.Result{Command: request.Command, OK: true, Text: text},
-		view.Market("", nil, nil, nil, nil, found, nil, env.Identity.Public))
+	market := view.Market("", nil, nil, nil, nil, found, nil, env.Identity.Public)
+
+	// A match is not the same fact on both sides, and the page must not have to infer it
+	// from a record: the taker imports a swap, while the reverse maker imports the taker's
+	// protocol offer and only then has a swap at all.
+	for index := range market.Matches {
+		item := &market.Matches[index]
+
+		record, err := env.Records.Load(ctx, item.SwapID)
+
+		if err != nil {
+			item.AwaitsOffer = item.Reverse && item.Mine
+
+			continue
+		}
+
+		item.Imported = true
+		item.AwaitsOffer = item.Reverse && item.Mine &&
+			(record.NostrBobPub == nil || record.BlakeBobPub == nil || record.BTCBobPub == nil)
+	}
+
+	return withView(proto.Result{Command: request.Command, OK: true, Text: text}, market)
 }
 
 // acceptTake turns a signed take into a swap, as the offer's maker.
@@ -775,7 +795,16 @@ func (d *marketDomain) acceptTake(ctx context.Context, request proto.Request) pr
 		return failed(request.Command, err)
 	}
 
-	action := view.Action(request.Command, acceptance.SwapID, "accept-market-take")
+	// The reserved id is reported as a fact, not as a selected swap: there is no record
+	// behind it yet, and a page that opened it would be opening nothing. In the reverse
+	// direction the taker creates the record from the match.
+	swapID := acceptance.SwapID
+
+	if acceptance.Reverse {
+		swapID = ""
+	}
+
+	action := view.Action(request.Command, swapID, "accept-market-take")
 	action.Message = acceptance.MatchID
 	action.Details = []proto.ActionFact{
 		{Label: "direction", Value: string(acceptance.Direction)},

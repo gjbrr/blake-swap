@@ -244,9 +244,15 @@ type MarketTake struct {
 	EventID     string `json:"event_id"`
 	OfferID     string `json:"offer_id"`
 	Taker       string `json:"taker"`
+	Direction   string `json:"direction"`
+	MakerRole   string `json:"maker_role"`
+	TakerRole   string `json:"taker_role"`
 	BlakeAmount string `json:"blake_amount"`
 	BTCSats     string `json:"btc_sats"`
 	CreatedAt   int64  `json:"created_at"`
+	// Reverse reports that accepting this take reserves the swap id and creates no secret,
+	// because the offer's maker is the side that funds BTC.
+	Reverse bool `json:"reverse"`
 	// Accepted reports whether a swap already exists for this take.
 	Accepted bool `json:"accepted"`
 }
@@ -259,11 +265,22 @@ type MarketMatch struct {
 	SwapID      string `json:"swap_id"`
 	Maker       string `json:"maker"`
 	Taker       string `json:"taker"`
+	Direction   string `json:"direction"`
+	MakerRole   string `json:"maker_role"`
+	TakerRole   string `json:"taker_role"`
 	BlakeAmount string `json:"blake_amount"`
 	BTCSats     string `json:"btc_sats"`
 	CreatedAt   int64  `json:"created_at"`
+	// Reverse reports that this is a btc-for-blake match: its maker is protocol Bob, so its
+	// taker is the side that has to create the swap.
+	Reverse bool `json:"reverse"`
+	// Mine reports whether this participant made the match.
+	Mine bool `json:"mine"`
 	// Imported reports whether this participant holds the swap it names.
 	Imported bool `json:"imported"`
+	// AwaitsOffer reports that this participant made a reverse match and its own handshake
+	// is not complete, so the taker's protocol offer is what it still needs.
+	AwaitsOffer bool `json:"awaits_offer"`
 }
 
 // MarketSelection is one durable market-to-swap binding.

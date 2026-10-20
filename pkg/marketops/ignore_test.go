@@ -236,8 +236,9 @@ func TestIgnoredMatchIDsOnlyCountTombstones(t *testing.T) {
 	}
 }
 
-// TestReadMatchesIsTheTakersInbox: the listing is the taker's, because a match the participant
-// made is their own receipt.
+// TestReadMatchesIsTheTakersInbox: the CLI's listing is the taker's, because a match the
+// participant made is their own receipt — and MatchesNaming is the wider read the browser
+// needs for the reverse maker.
 func TestReadMatchesIsTheTakersInbox(t *testing.T) {
 	fixture := newReverseOfferFixture(t)
 	ctx := context.Background()
@@ -252,6 +253,17 @@ func TestReadMatchesIsTheTakersInbox(t *testing.T) {
 
 	if len(mine) != 0 {
 		t.Fatalf("the maker's own match appeared in its inbox: %+v", mine)
+	}
+
+	// The wider read sees it: the maker has to see the match it published.
+	named, err := MatchesNaming(ctx, fixture.env, 100)
+
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(named) != 1 || named[0].Event.ID != fixture.matchID {
+		t.Fatalf("matches naming the maker = %+v", named)
 	}
 
 	// As the taker, the same evidence is the inbox.

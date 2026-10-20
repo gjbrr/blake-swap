@@ -170,6 +170,8 @@ loopback relay and the app server in front of the live rig, then:
 | reload in the middle | the vault locks, unlocking restores the dashboard **and the selected swap** from the sealed store, and the next action is still the right one |
 | refusals | an action the engine refuses is shown in its own words; an unknown swap is refused; a dead relay is an error rather than an empty market; a triple click sends one command |
 | market handshake | the browser publishes an offer, a CLI taker takes it, the browser lists the take and accepts it (creating the swap and publishing the match), and the CLI taker imports that match into its own record |
+| reverse market handshake | the browser advertises a `btc-for-blake` offer, a CLI taker takes it, the browser **reserves the swap id and publishes the match** (the take row shows the direction and its button says so), the CLI taker imports the reverse match — creating the secret — and publishes her protocol offer, the browser imports that offer, and then the swap funds, claims and completes with the browser on the BTC side |
+| ignore-match | the browser takes a CLI offer, the CLI maker publishes the match, the browser ignores it: the match disappears from the list, a second client holding the **same identity** still sees it (so nothing was deleted), and the tombstone survives a reload because it is sealed in the vault |
 | reverse match import | `market.accept-reverse-match` in the worker and `accept-reverse-market-match` in the CLI call the same `marketops.ImportReverseMatch`; the CLI's output is unchanged, and the shared state machine refuses a wrong direction, a wrong taker, and a redefinition of an existing swap |
 
 The worker's write surface is the engine's, not a second protocol: create, publish, accept,
@@ -310,7 +312,7 @@ port work:
 | `make wasm` | pass, both modules |
 | `go test ./internal/fuzz/` (seeds) | pass: model, wire, proto, market, keys and NIP-44 parsers, including the empty-key and one-byte-key cases |
 | `go test -fuzz=Fuzz... -fuzztime 15s` (six targets) | ~2.3M executions, no panic |
-| `python3 scripts/verify-browser.py` | exit 0, 50 PASS: hello, boot gate, encrypted self-test, vault, identity, relays/proxy/wallets, market read and publish, coordination a–f, settlement transport round trip, engine heights, **browser-Alice full swap, browser-Bob full swap, reload mid-swap, four refusal paths, market handshake** |
+| `python3 scripts/verify-browser.py` | exit 0, 68 PASS: hello, boot gate, encrypted self-test, vault, identity, relays/proxy/wallets, market read and publish, coordination a–f, settlement transport round trip, engine heights, **browser-Alice full swap, browser-Bob full swap, reload mid-swap, the reverse market handshake with the browser as the maker, ignore-match and its reload, four refusal paths, market handshake** |
 | `python3 scripts/go_parity.py --check` | `parity manifest: current` |
 | `.venv/bin/python tests/docs_alignment_tests.py` | 11 checks, 0 failures |
 | `.venv/bin/python tests/cli_wiring_tests.py` | 58 subcommands, 0 failures |

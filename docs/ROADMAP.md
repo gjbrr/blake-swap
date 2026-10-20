@@ -234,11 +234,16 @@ offer, accepts one, imports a match, and withdraws an offer. `scripts/verify-bro
 proves the handshake against a CLI taker: publish, take, list, accept, publish the match, and
 import it on the taker's side.
 
-In the **reverse direction** (`btc-for-blake`, where the maker is protocol Bob) the taker's
-side is now in the browser: `market.accept-reverse-match` imports a reverse match, creating
-the secret as protocol Alice — the operation `marketops.ImportReverseMatch`, shared with the
-CLI. What is still CLI-only is the maker's two steps: accepting a reverse take (which
-publishes the reverse match and reserves the swap id) and importing Alice's protocol offer
-afterwards (`accept-reverse-swap-offer`). A browser participant can therefore be the reverse
-*taker* end to end, and the reverse *maker* still needs the CLI for those two commands.
-`market.ignore-match` is also CLI-only.
+In the **reverse direction** (`btc-for-blake`, where the maker is protocol Bob) both sides
+are in the browser. `AcceptTake` dispatches to the reverse branch after the same canonical
+validation, so `market.accept-take` reserves the swap id and publishes the match without
+creating a swap or a secret; `market.accept-reverse-match` is the taker's import, where the
+secret is created; and `market.accept-reverse-offer` is the maker's second step, importing
+the taker's protocol offer and sending the accept, including the crash window where the keys
+are durable and the message never left. `market.ignore-match` tombstones a match locally in
+the sealed vault, and the browser's match list honours it.
+
+All of those are `pkg/marketops` operations shared with the CLI, whose output stays
+byte-identical: `TestCLIParityMarketWalk` covers the reverse negotiation and the tombstone,
+and `scripts/verify-browser.py` runs the reverse direction end to end with the browser as the
+maker.

@@ -14,6 +14,7 @@ import (
 	"strconv"
 
 	"github.com/gjbrr/blake-swap/pkg/amount"
+	"github.com/gjbrr/blake-swap/pkg/market"
 	"github.com/gjbrr/blake-swap/pkg/marketflow"
 	"github.com/gjbrr/blake-swap/pkg/model"
 	"github.com/gjbrr/blake-swap/pkg/proto"
@@ -539,7 +540,7 @@ func Market(
 		Open:       offers(open, me),
 		Mine:       offers(mine, me),
 		Takes:      takeViews(takes),
-		Matches:    matchViews(matches),
+		Matches:    matchViews(matches, me),
 		Selections: selections,
 	}
 
@@ -584,9 +585,13 @@ func takeViews(takes []marketflow.TakeEntry) []proto.MarketTake {
 			EventID:     take.EventID,
 			OfferID:     take.Take.OfferID,
 			Taker:       take.Taker,
+			Direction:   string(take.Take.Direction),
+			MakerRole:   take.Take.MakerRole,
+			TakerRole:   take.Take.TakerRole,
 			BlakeAmount: take.Take.BlakeAmount.Format(),
 			BTCSats:     sats(take.Take.BTCSats),
 			CreatedAt:   take.Take.CreatedAt,
+			Reverse:     take.Take.Direction == market.BTCForBlake,
 		})
 	}
 
@@ -594,7 +599,12 @@ func takeViews(takes []marketflow.TakeEntry) []proto.MarketTake {
 }
 
 // matchViews renders matches.
-func matchViews(matches []marketflow.MatchEntry) []proto.MarketMatch {
+//
+// It is handed the participant's identity because a match is not the same fact on both
+// sides: the taker imports a swap, and in the reverse direction the maker still has to
+// import the taker's protocol offer. Which side this participant is on is what decides
+// which of those the page offers.
+func matchViews(matches []marketflow.MatchEntry, me string) []proto.MarketMatch {
 	if len(matches) == 0 {
 		return nil
 	}
@@ -602,6 +612,9 @@ func matchViews(matches []marketflow.MatchEntry) []proto.MarketMatch {
 	out := make([]proto.MarketMatch, 0, len(matches))
 
 	for _, match := range matches {
+		mine := me != "" && match.Match.MakerPubkey == me
+		reverse := match.Match.Direction == market.BTCForBlake
+
 		out = append(out, proto.MarketMatch{
 			EventID:     match.Match.EventID,
 			OfferID:     match.Match.OfferID,
@@ -609,9 +622,15 @@ func matchViews(matches []marketflow.MatchEntry) []proto.MarketMatch {
 			SwapID:      match.Match.SwapID,
 			Maker:       match.Match.MakerPubkey,
 			Taker:       match.Match.Taker,
+			Direction:   string(match.Match.Direction),
+			MakerRole:   match.Match.MakerRole,
+			TakerRole:   match.Match.TakerRole,
 			BlakeAmount: match.Match.BlakeAmount.Format(),
 			BTCSats:     sats(match.Match.BTCSats),
 			CreatedAt:   match.Match.CreatedAt,
+			Reverse:     reverse,
+			Mine:        mine,
+			AwaitsOffer: reverse && mine,
 		})
 	}
 

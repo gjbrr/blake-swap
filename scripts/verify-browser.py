@@ -847,6 +847,416 @@ async def market_handshake(ui: Ui, work: Path, relay_url: str, offer_id: str) ->
     return True
 
 
+async def ensure_settlement_wallets() -> None:
+    """The wallets a settleable swap needs, on both sides."""
+    ensure_wallet("blake", WALLET, False)
+    ensure_wallet("blake", WALLET + "-watch", True)
+    ensure_wallet("btc", WALLET, False)
+    ensure_wallet("btc", WALLET + "-watch", True)
+    ensure_wallet("blake", "bob", False)
+    ensure_wallet("blake", "bob-watch", True)
+    ensure_wallet("btc", "bob", False)
+    ensure_wallet("btc", "bob-watch", True)
+
+    ensure_funds("blake", WALLET, 1_000_000)
+    ensure_funds("blake", "bob", 1_000_000)
+    ensure_funds("btc", WALLET, BTC_SATS * 2)
+    ensure_funds("btc", "bob", BTC_SATS * 2)
+
+
+async def reverse_market_handshake(ui: Ui, work: Path, relay_url: str):
+    """The reverse direction: the browser is the market maker, which is protocol Bob.
+
+    It advertises a btc-for-blake offer, a CLI taker takes it, the browser accepts that take
+    — reserving the swap id and publishing the match, and creating no secret — the taker
+    imports the match and publishes her protocol offer, and the browser imports that offer
+    and sends its accept. Then the money moves exactly as the protocol says, with the
+    browser funding BTC and claiming BLAKE.
+    """
+    await ensure_settlement_wallets()
+
+    taker_key = write_key(work, "reverse-taker.nostr-key", "33" * 32)
+
+    await ui.view("market")
+
+    if not await ui.act("market-list", confirm=False):
+        return require(False, "the market list was not requested")
+
+    if not await ui.wait_idle(ui.budget):
+        return require(False, "the market read never finished")
+
+    await ui.set("market-blake", BLAKE_AMOUNT)
+    await ui.set("market-sats", str(BTC_SATS))
+    await ui.set("market-minutes", "30")
+    await ui.set("market-direction", "btc-for-blake")
+
+    if not await ui.act("market-publish"):
+        return require(False, "the reverse offer was not confirmed")
+
+    if not await ui.wait_idle(ui.budget):
+        return require(False, "publishing the reverse offer never finished")
+
+    offer_id = await ui.attr("lastEventId")
+
+    if not require(len(str(offer_id)) == 64, f"the reverse offer printed no id ({offer_id!r})"):
+        return False
+
+    print(f"PASS: reverse: browser Bob advertised a btc-for-blake offer {str(offer_id)[:12]}…")
+
+    # The taker is the CLI, and in this direction it is the one that creates the secret.
+    code, output = peer_swap(work, taker_key, relay_url, "take-market-offer", offer_id)
+
+    if not require(code == 0, f"the CLI taker could not take the reverse offer:\n{output}"):
+        return False
+
+    take_id = field(output, "take id:")
+
+    if not require(len(take_id) == 64, f"the take printed no id:\n{output}"):
+        return False
+
+    print("PASS: reverse: a CLI taker took the browser's offer")
+
+    if not await ui.act("market-list", confirm=False):
+        return require(False, "the market list was not requested")
+
+    if not await ui.wait_idle(ui.budget):
+        return require(False, "the market read never finished")
+
+    if not await ui.click("market-takes:" + str(offer_id)):
+        return require(False, "the takes control was not found on the offer row")
+
+    # The take row must say which direction it is and offer the reverse action: a
+    # btc-for-blake take reserves the swap id instead of creating one.
+    reserved = await poll(
+        ui.ws,
+        "(() => {"
+        "  const row = document.querySelector('#market-takes-rows tr');"
+        "  if (!row) { return ''; }"
+        "  const cells = [...row.querySelectorAll('td')].map((cell) => cell.textContent.trim());"
+        "  const button = row.querySelector('button');"
+        "  const command = button ? button.getAttribute('data-uicmd') : '';"
+        "  if (!command.startsWith('market-accept-take:')) { return ''; }"
+        "  return cells.includes('btc-for-blake') ? command : '';"
+        "})()",
+        ui.budget,
+    )
+
+    if not reserved:
+        print(f"FAIL: the reverse take was not listed with its direction;"
+              f" panel:\n{await ui.panel('market')}", file=sys.stderr)
+
+        return False
+
+    print("PASS: reverse: the browser listed the take with its direction")
+
+    # Whatever was open stays open: reserving an id must not select a record that does not
+    # exist yet.
+    open_before = await ui.selected_swap()
+
+    if not await ui.act("market-accept-take:" + take_id):
+        return require(False, "reserving the swap for the reverse take was not confirmed")
+
+    if not await ui.wait_idle(ui.budget):
+        return require(False, "reserving the swap never finished")
+
+    error = await ui.last_error()
+
+    if not require(error == "", f"accepting the reverse take was refused: {error}"):
+        return False
+
+    match_id = await ui.attr("lastEventId")
+
+    if not require(len(str(match_id)) == 64, f"no match id was reported ({match_id!r})"):
+        return False
+
+    # The refresh after the action ends with a dashboard read, so the command log rather
+    # than the last-command marker is what proves the accept itself ran.
+    command_log = str(await ui.attr("commandLog"))
+
+    if not require("market.accept-take" in command_log,
+                   f"the accept never ran; commands: {command_log}"):
+        return False
+
+    # No swap record exists yet: this side reserved the id, the taker creates the record.
+    # That the reserve step creates nothing is proven where it can be observed directly —
+    # the marketops tests fail if the engine is touched at all on this path — and what the
+    # page must not do is open a record that does not exist.
+    if not require(await ui.selected_swap() == open_before,
+                   f"reserving a swap selected {await ui.selected_swap()!r},"
+                   f" want {open_before!r} unchanged"):
+        return False
+
+    print(f"PASS: reverse: the browser reserved the swap and published match "
+          f"{str(match_id)[:12]}…")
+
+    # The taker imports the match — creating the swap and the secret — and publishes the
+    # protocol offer the maker needs.
+    code, output = peer_swap(work, taker_key, relay_url,
+                             "accept-reverse-market-match", match_id)
+
+    if not require(code == 0, f"the CLI taker could not import the reverse match:\n{output}"):
+        return False
+
+    swap_id = field(output, "swap id:")
+
+    if not require(len(swap_id) == 12, f"the taker printed no swap id:\n{output}"):
+        return False
+
+    code, output = peer_swap(work, taker_key, relay_url, "publish-offer", swap_id)
+
+    if not require(code == 0, f"the CLI taker could not publish her offer:\n{output}"):
+        return False
+
+    print(f"PASS: reverse: the CLI taker imported the match as {swap_id} and published her offer")
+
+    # The browser made that match, so its own step is importing the taker's offer.
+    if not await ui.act("market-matches", confirm=False):
+        return require(False, "the matches were not re-read")
+
+    if not await ui.wait_idle(ui.budget):
+        return require(False, "the matches read never finished")
+
+    offer_action = await poll(
+        ui.ws,
+        "(() => {"
+        "  const row = document.querySelector('#market-matches-rows tr');"
+        "  if (!row) { return ''; }"
+        "  const button = row.querySelector('button');"
+        "  const command = button ? button.getAttribute('data-uicmd') : '';"
+        f"  return command.startsWith('market-accept-reverse-offer:') ? command : '';"
+        "})()",
+        ui.budget,
+    )
+
+    if not offer_action:
+        print(f"FAIL: the reverse offer action was not offered; matches:\n"
+              f"{await ui.panel('market')}", file=sys.stderr)
+
+        return False
+
+    if not await ui.act(str(offer_action)):
+        return require(False, "importing the taker's offer was not confirmed")
+
+    if not await ui.wait_idle(ui.budget):
+        return require(False, "importing the offer never finished")
+
+    error = await ui.last_error()
+
+    if not require(error == "", f"importing the taker's offer was refused: {error}"):
+        return False
+
+    selected = await ui.selected_swap()
+
+    if not require(selected == swap_id,
+                   f"importing the offer selected {selected!r}, want {swap_id}"):
+        return False
+
+    if not await browser_swap_state(ui, "OFFERED"):
+        return False
+
+    print(f"PASS: reverse: the browser imported the taker's offer as {swap_id}")
+
+    return await browser_bob_settlement(ui, taker_key, work, relay_url, swap_id, "Bob")
+
+
+async def ignore_match_round_trip(ui: Ui, work: Path, relay_url: str) -> bool:
+    """Dismiss a match locally: it disappears, it survives a reload, and it stays on the relay.
+
+    The match is made by the CLI, so the browser has a valid match addressed to it as the
+    taker and no local swap state — which is exactly when ignoring is allowed. What proves
+    the tombstone is local is that the CLI still sees the match afterwards.
+    """
+    maker_key = write_key(work, "ignore-maker.nostr-key", "55" * 32)
+
+    code, output = peer_swap(work, maker_key, relay_url,
+                             "publish-market-offer", "--blake", "4", "--sats", "40000",
+                             "--minutes", "30")
+
+    if not require(code == 0, f"the CLI maker could not advertise:\n{output}"):
+        return False
+
+    offer_id = field(output, "offer id:")
+
+    if not require(len(offer_id) == 64, f"the maker printed no offer id:\n{output}"):
+        return False
+
+    print(f"PASS: ignore: a CLI maker advertised offer {offer_id[:12]}…")
+
+    if not await ui.act("market-list", confirm=False):
+        return require(False, "the market list was not requested")
+
+    if not await ui.wait_idle(ui.budget):
+        return require(False, "the market read never finished")
+
+    # The browser takes the offer, which is the act that makes it a taker.
+    taken = await poll(
+        ui.ws,
+        "(() => {"
+        "  const rows = [...document.querySelectorAll('#market-open-rows tr')];"
+        f"  const row = rows.find((r) => r.textContent.includes({offer_id[:12]!r}));"
+        "  if (!row) { return ''; }"
+        "  const button = row.querySelector('button');"
+        "  return button && !button.disabled ? button.getAttribute('data-uicmd') : '';"
+        "})()",
+        ui.budget,
+    )
+
+    if not taken:
+        print(f"FAIL: the offer is not in the book; panel:\n{await ui.panel('market')}",
+              file=sys.stderr)
+
+        return False
+
+    if not await ui.act(str(taken)):
+        return require(False, "taking the offer was not confirmed")
+
+    if not await ui.wait_idle(ui.budget):
+        return require(False, "taking the offer never finished")
+
+    take_id = await ui.attr("lastEventId")
+
+    if not require(len(str(take_id)) == 64, f"the browser printed no take id ({take_id!r})"):
+        return False
+
+    print("PASS: ignore: the browser took the offer")
+
+    # The maker accepts that take, which publishes the match addressed to the browser.
+    code, output = peer_swap(work, maker_key, relay_url, "accept-market-take", str(take_id))
+
+    if not require(code == 0, f"the CLI maker could not accept the take:\n{output}"):
+        return False
+
+    match_id = field(output, "market match:")
+
+    if not require(len(match_id) == 64, f"the maker printed no match id:\n{output}"):
+        return False
+
+    print(f"PASS: ignore: the CLI maker published match {match_id[:12]}…")
+
+    if not await ui.act("market-matches", confirm=False):
+        return require(False, "the matches were not re-read")
+
+    if not await ui.wait_idle(ui.budget):
+        return require(False, "the matches read never finished")
+
+    ignore_command = await poll(
+        ui.ws,
+        "(() => {"
+        "  const rows = [...document.querySelectorAll('#market-matches-rows tr')];"
+        f"  const row = rows.find((r) => r.textContent.includes({match_id[:12]!r}));"
+        "  if (!row) { return ''; }"
+        "  const button = [...row.querySelectorAll('button')].find((b) =>"
+        "    (b.getAttribute('data-uicmd') || '').startsWith('market-ignore-match:'));"
+        "  return button ? button.getAttribute('data-uicmd') : '';"
+        "})()",
+        ui.budget,
+    )
+
+    if not ignore_command:
+        print(f"FAIL: the match was not listed with an Ignore control;\n"
+              f"{await ui.panel('market')}", file=sys.stderr)
+
+        return False
+
+    open_before = await ui.selected_swap()
+
+    if not await ui.act(str(ignore_command)):
+        return require(False, "ignoring the match was not confirmed")
+
+    if not await ui.wait_idle(ui.budget):
+        return require(False, "ignoring the match never finished")
+
+    error = await ui.last_error()
+
+    if not require(error == "", f"ignoring the match was refused: {error}"):
+        return False
+
+    gone = await poll(
+        ui.ws,
+        "(() => {"
+        "  const rows = [...document.querySelectorAll('#market-matches-rows tr')];"
+        f"  return rows.some((r) => r.textContent.includes({match_id[:12]!r})) ? '' : 'true';"
+        "})()",
+        ui.budget,
+    )
+
+    if not require(gone == "true", "the ignored match is still listed"):
+        return False
+
+    print("PASS: ignore: the match disappeared from the list")
+
+    # It is local. A second client holding the same identity — the CLI with the browser's
+    # own key — still sees the match, because the tombstone lives in this browser's sealed
+    # vault and not in the evidence.
+    same_identity = write_key(work, "browser.key", "11" * 32)
+
+    code, output = peer_swap(work, same_identity, relay_url, "market-matches")
+
+    if not require(code == 0, f"the same identity could not list matches:\n{output}"):
+        return False
+
+    if not require(match_id in output,
+                   f"the match was deleted from the evidence, not just hidden:\n{output}"):
+        return False
+
+    print("PASS: ignore: the match is still there for a client with the same identity")
+
+    # No swap state was created by dismissing it: whatever was open stays open, and the
+    # engine's own answer — that this match has no local swap — is what permitted the ignore
+    # at all (the shared operation refuses a match with one).
+    if not require(await ui.selected_swap() == open_before,
+                   f"ignoring selected {await ui.selected_swap()!r},"
+                   f" want {open_before!r} unchanged"):
+        return False
+
+    # And the tombstone outlives the process: a reload must not bring the match back.
+    await ui.js("location.reload(); 'reloading'")
+    await asyncio.sleep(1)
+
+    if not await ui.wait_boot(ui.budget):
+        return require(False, "the page did not come back after a reload")
+
+    # A reload starts locked: the vault's guarantee, and the reason the tombstone is sealed
+    # in it rather than kept in a document the page could have cached.
+    locked = await poll(ui.ws, "document.body.dataset.vaultOpen === 'true' ? '' : 'true'", 5)
+
+    if not require(locked == "true", "the vault stayed open across a reload"):
+        return False
+
+    await ui.view("setup")
+    await ui.set("passphrase", "browser-check-passphrase")
+
+    if not await ui.act("vault-unlock", confirm=False):
+        return require(False, "the vault could not be unlocked after the reload")
+
+    if not await wait_bootstrap(ui):
+        return False
+
+    await ui.view("market")
+
+    if not await ui.act("market-matches", confirm=False):
+        return require(False, "the matches were not re-read after the reload")
+
+    if not await ui.wait_idle(ui.budget):
+        return require(False, "the matches read never finished after the reload")
+
+    still_gone = await poll(
+        ui.ws,
+        "(() => {"
+        "  const rows = [...document.querySelectorAll('#market-matches-rows tr')];"
+        f"  return rows.some((r) => r.textContent.includes({match_id[:12]!r})) ? '' : 'true';"
+        "})()",
+        ui.budget,
+    )
+
+    if not require(still_gone == "true", "the ignored match came back after a reload"):
+        return False
+
+    print("PASS: ignore: the tombstone survived a reload")
+
+    return True
+
+
 async def coordination_round_trip(ui: Ui, work: Path, relay_url: str):
     """The settlement transport, hand-driven from the coordination view."""
     bob = write_key(work, "bob.nostr-key", "22" * 32)
@@ -1226,6 +1636,121 @@ async def browser_swap_state(ui: Ui, want: str, budget: float = 0) -> bool:
     return True
 
 
+async def browser_bob_settlement(
+    ui: Ui, peer_key: Path, work: Path, relay_url: str, swap_id: str, who: str
+) -> bool:
+    """The settlement half of a swap in which the browser is protocol Bob.
+
+    Bob receives Alice's BLAKE funding, funds BTC, then reads the secret out of Alice's
+    Bitcoin claim and claims BLAKE. Both market directions end here: the direction decides
+    who makes the market, not what the protocol does with the money.
+    """
+    code, output = peer_swap(work, peer_key, relay_url, "receive-accept", swap_id)
+
+    if not require(code == 0, f"CLI Alice could not receive the acceptance:\n{output}"):
+        return False
+
+    code, output = peer_swap(work, peer_key, relay_url, "fund-blake", swap_id)
+
+    if not require(code == 0, f"CLI Alice could not fund BLAKE:\n{output}"):
+        return False
+
+    code, output = peer_swap(work, peer_key, relay_url, "publish-blake-funded", swap_id)
+
+    if not require(code == 0, f"CLI Alice could not announce the BLAKE funding:\n{output}"):
+        return False
+
+    print("PASS: CLI Alice funded BLAKE")
+
+    if not await ui.swap_action("receive-blake-funded"):
+        return False
+
+    if not await ui.swap_action("fund-btc"):
+        return False
+
+    mine("btc")
+
+    if not await ui.swap_action("sync-funding"):
+        return False
+
+    if not await browser_swap_state(ui, "BTC_FUNDED"):
+        return False
+
+    print("PASS: browser Bob received the BLAKE funding and funded BTC")
+
+    if not await ui.swap_action("publish-btc-funded"):
+        return False
+
+    code, output = peer_swap(work, peer_key, relay_url, "receive-btc-funded", swap_id)
+
+    if not require(code == 0, f"CLI Alice could not receive the BTC funding:\n{output}"):
+        return False
+
+    code, output = peer_swap(work, peer_key, relay_url, "claim-btc", swap_id)
+
+    if not require(code == 0, f"CLI Alice could not claim BTC:\n{output}"):
+        return False
+
+    code, output = peer_swap(work, peer_key, relay_url, "publish-btc-claimed", swap_id)
+
+    if not require(code == 0, f"CLI Alice could not announce the BTC claim:\n{output}"):
+        return False
+
+    print("PASS: CLI Alice received the BTC funding and claimed BTC")
+
+    if not await ui.swap_action("receive-btc-claimed"):
+        return False
+
+    if not await browser_swap_state(ui, "BTC_CLAIMED"):
+        return False
+
+    # Bob holds no secret until he reads it out of Alice's Bitcoin claim.
+    if not await ui.swap_action("extract-secret"):
+        return False
+
+    if not await ui.swap_action("claim-blake"):
+        return False
+
+    mine("blake")
+
+    if not await ui.swap_action("sync-settlement"):
+        return False
+
+    if not await browser_swap_state(ui, "BLAKE_CLAIMED"):
+        return False
+
+    print("PASS: browser Bob extracted the secret and claimed BLAKE")
+
+    if not await ui.swap_action("publish-blake-claimed"):
+        return False
+
+    code, output = peer_swap(work, peer_key, relay_url, "receive-blake-claimed", swap_id)
+
+    if not require(code == 0, f"CLI Alice could not receive the BLAKE claim:\n{output}"):
+        return False
+
+    code, output = peer_swap(work, peer_key, relay_url, "complete", swap_id)
+
+    if not require(code == 0, f"CLI Alice could not complete:\n{output}"):
+        return False
+
+    if not await ui.swap_action("complete"):
+        return False
+
+    if not await browser_swap_state(ui, "COMPLETE"):
+        return False
+
+    print(f"PASS: browser {who} completed the swap")
+
+    terms = await ui.panel("swap-txs")
+
+    for label in ("BTC claim", "BLAKE claim"):
+        if label not in terms:
+            return require(False, f"the transaction list has no {label} row:\n{terms}")
+
+    return True
+
+
 async def browser_swap(ui: Ui, peer_key: Path, work: Path, relay_url: str, browser_role: str) -> bool:
     """Run one whole swap with the browser on one side and the CLI on the other.
 
@@ -1448,110 +1973,7 @@ async def browser_swap(ui: Ui, peer_key: Path, work: Path, relay_url: str, brows
 
         print("PASS: browser Bob accepted Alice's offer")
 
-        code, output = peer_swap(work, peer_key, relay_url, "receive-accept", swap_id)
-
-        if not require(code == 0, f"CLI Alice could not receive the acceptance:\n{output}"):
-            return False
-
-        code, output = peer_swap(work, peer_key, relay_url, "fund-blake", swap_id)
-
-        if not require(code == 0, f"CLI Alice could not fund BLAKE:\n{output}"):
-            return False
-
-        code, output = peer_swap(work, peer_key, relay_url, "publish-blake-funded", swap_id)
-
-        if not require(code == 0, f"CLI Alice could not announce the BLAKE funding:\n{output}"):
-            return False
-
-        print("PASS: CLI Alice funded BLAKE")
-
-        if not await ui.swap_action("receive-blake-funded"):
-            return False
-
-        if not await ui.swap_action("fund-btc"):
-            return False
-
-        mine("btc")
-
-        if not await ui.swap_action("sync-funding"):
-            return False
-
-        if not await browser_swap_state(ui, "BTC_FUNDED"):
-            return False
-
-        print("PASS: browser Bob received the BLAKE funding and funded BTC")
-
-        if not await ui.swap_action("publish-btc-funded"):
-            return False
-
-        code, output = peer_swap(work, peer_key, relay_url, "receive-btc-funded", swap_id)
-
-        if not require(code == 0, f"CLI Alice could not receive the BTC funding:\n{output}"):
-            return False
-
-        code, output = peer_swap(work, peer_key, relay_url, "claim-btc", swap_id)
-
-        if not require(code == 0, f"CLI Alice could not claim BTC:\n{output}"):
-            return False
-
-        code, output = peer_swap(work, peer_key, relay_url, "publish-btc-claimed", swap_id)
-
-        if not require(code == 0, f"CLI Alice could not announce the BTC claim:\n{output}"):
-            return False
-
-        print("PASS: CLI Alice received the BTC funding and claimed BTC")
-
-        if not await ui.swap_action("receive-btc-claimed"):
-            return False
-
-        if not await browser_swap_state(ui, "BTC_CLAIMED"):
-            return False
-
-        # Bob holds no secret until he reads it out of Alice's Bitcoin claim.
-        if not await ui.swap_action("extract-secret"):
-            return False
-
-        if not await ui.swap_action("claim-blake"):
-            return False
-
-        mine("blake")
-
-        if not await ui.swap_action("sync-settlement"):
-            return False
-
-        if not await browser_swap_state(ui, "BLAKE_CLAIMED"):
-            return False
-
-        print("PASS: browser Bob extracted the secret and claimed BLAKE")
-
-        if not await ui.swap_action("publish-blake-claimed"):
-            return False
-
-        code, output = peer_swap(work, peer_key, relay_url, "receive-blake-claimed", swap_id)
-
-        if not require(code == 0, f"CLI Alice could not receive the BLAKE claim:\n{output}"):
-            return False
-
-    # The last two steps are the same from both sides: import the BLAKE claim and complete.
-    # Completion re-proves the claim on the active chain, so whoever runs it is checking the
-    # same fact from their own record.
-    if browser_role == "alice":
-        if not await ui.swap_action("receive-blake-claimed"):
-            return False
-    else:
-        code, output = peer_swap(work, peer_key, relay_url, "complete", swap_id)
-
-        if not require(code == 0, f"CLI Alice could not complete:\n{output}"):
-            return False
-
-    if not await browser_swap_state(ui, "BLAKE_CLAIMED"):
-        return False
-
-    if not await ui.swap_action("complete"):
-        return False
-
-    if not await browser_swap_state(ui, "COMPLETE"):
-        return False
+        return await browser_bob_settlement(ui, peer_key, work, relay_url, swap_id, "Bob")
 
     print(f"PASS: browser {'Alice' if browser_role == 'alice' else 'Bob'} completed the swap")
 
@@ -1845,6 +2267,16 @@ async def drive(url: str, budget: float, work: Path, relay_url: str = "") -> int
             return 1
 
         print("PASS: scenario: browser Bob, CLI Alice, full swap")
+
+        # Scenario 3: the reverse market direction, end to end. The browser is the market
+        # maker, which in this direction is protocol Bob: it never creates the secret.
+        if not await reverse_market_handshake(ui, work, relay_url):
+            return 1
+
+        print("PASS: scenario: browser Bob the reverse maker, CLI Alice the taker, full swap")
+
+        if not await ignore_match_round_trip(ui, work, relay_url):
+            return 1
 
         if not await refusal_paths(ui, budget):
             return 1

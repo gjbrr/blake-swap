@@ -132,18 +132,43 @@ above every other row: *HTLCs NOT SOLVABLE BY A LOADED WALLET*. `Watch HTLC` imp
 descriptor into the watch-only wallet, and the CLI's `recovery-plan` prints the same facts
 for a host-side operator.
 
+## The market
+
+The Market screen has one button per read — **Refresh market** and **Refresh matches** — and
+one row per offer, take and match. Every row prints the direction it was signed with, because
+a `btc-for-blake` trade and a `blake-for-btc` one are not the same trade with the labels
+swapped: the side that funds BTC is the offer's maker in the first and the taker in the
+second.
+
+The matches table holds a match this participant *made* as well as the ones addressed to it,
+and its buttons are per row: **Import match** on a match addressed to this participant, and
+**Import offer** on a reverse match it made and has not yet finished the handshake for. The
+maker's own match is a receipt, so once the handshake is complete the row has no action left.
+
+## Both market directions
+
+The browser completes a market trade in either direction, and the confirmations say which
+one it is, because they do different things with the same click.
+
+In `blake-for-btc` the offer's maker is protocol Alice: **Accept take** creates the swap, the
+secret, the protocol offer and the match; **Import match** is the taker's side of the same
+handshake.
+
+In `btc-for-blake` the offer's maker is protocol Bob, the side that funds BTC, and it must
+never choose the hashlock. So the words change with the roles: **Reserve & match** reserves
+the public swap id and publishes the match but creates no swap and no secret, and
+**Import offer** is the maker's second step, importing the taker's signed protocol offer and
+sending the accept. Importing a reverse match as the taker is where *that* side creates the
+secret. A maker whose keys are already on disk but whose accept never left is recovered by
+the same command, which reuses those keys and sends one message.
+
+**Ignore match** records a local tombstone in the sealed vault: the match stops being
+offered here, no event is published, nothing is deleted, and it comes back only if the
+tombstone is removed. The browser has no process environment to read a lifetime from, so its
+tombstones last until they are removed; the CLI keeps its
+`BLAKE_SWAP_IGNORED_MATCH_TTL_SECONDS` override, and the expiry rule is the same code.
+
 ## What is not implemented
 
-**The reverse market direction.** The browser completes a market trade in the
-`blake-for-btc` direction: take an offer, accept the take as the maker, import a match as the
-taker, and withdraw an offer. In the reverse direction (`btc-for-blake`, where the maker is
-protocol Bob) the taker's half is available too: importing a reverse match creates the secret
-as protocol Alice. The maker's two steps — accepting a reverse take, which publishes the
-reverse match and reserves the swap id, and importing Alice's protocol offer afterwards —
-are still CLI-only, so a browser participant is a complete reverse *taker* and needs the CLI
-to be the reverse *maker*.
-
-`market.ignore-match` is also CLI-only.
-
-Also not implemented: exporting the sealed vault (a stretch goal — only the sealed blob would
+Not implemented: exporting the sealed vault (a stretch goal — only the sealed blob would
 leave the browser), wallet creation from the page, and any activity log.

@@ -1059,6 +1059,141 @@ async def reverse_market_handshake(ui: Ui, work: Path, relay_url: str):
     return await browser_bob_settlement(ui, taker_key, work, relay_url, swap_id, "Bob")
 
 
+async def reverse_taker_handshake(ui: Ui, work: Path, relay_url: str) -> bool:
+    """The reverse direction from the other side: the browser is the taker.
+
+    A CLI maker advertises `btc-for-blake`, the browser takes it, the CLI accepts that take —
+    reserving the swap id and publishing the match, creating no secret — and the browser
+    imports the match. In this direction the taker is protocol Alice, so importing is where
+    *this* side creates the secret and the swap. No funds move here.
+    """
+    maker_key = write_key(work, "reverse-maker.nostr-key", "66" * 32)
+
+    code, output = peer_swap(work, maker_key, relay_url,
+                             "publish-market-offer", "--blake", "3", "--sats", "30000",
+                             "--minutes", "30", "--direction", "btc-for-blake")
+
+    if not require(code == 0, f"the CLI reverse maker could not advertise:\n{output}"):
+        return False
+
+    offer_id = field(output, "offer id:")
+
+    if not require(len(offer_id) == 64, f"the maker printed no offer id:\n{output}"):
+        return False
+
+    print(f"PASS: reverse taker: a CLI maker advertised {offer_id[:12]}…")
+
+    if not await ui.act("market-list", confirm=False):
+        return require(False, "the market list was not requested")
+
+    if not await ui.wait_idle(ui.budget):
+        return require(False, "the market read never finished")
+
+    taken = await poll(
+        ui.ws,
+        "(() => {"
+        "  const rows = [...document.querySelectorAll('#market-open-rows tr')];"
+        f"  const row = rows.find((r) => r.textContent.includes({offer_id[:12]!r}));"
+        "  if (!row) { return ''; }"
+        "  const button = row.querySelector('button');"
+        "  return button && !button.disabled ? button.getAttribute('data-uicmd') : '';"
+        "})()",
+        ui.budget,
+    )
+
+    if not taken:
+        print(f"FAIL: the reverse offer is not in the book; panel:\n"
+              f"{await ui.panel('market')}", file=sys.stderr)
+
+        return False
+
+    if not await ui.act(str(taken)):
+        return require(False, "taking the reverse offer was not confirmed")
+
+    if not await ui.wait_idle(ui.budget):
+        return require(False, "taking the reverse offer never finished")
+
+    take_id = await ui.attr("lastEventId")
+
+    if not require(len(str(take_id)) == 64, f"the browser printed no take id ({take_id!r})"):
+        return False
+
+    code, output = peer_swap(work, maker_key, relay_url, "accept-market-take", str(take_id))
+
+    if not require(code == 0, f"the CLI maker could not accept the reverse take:\n{output}"):
+        return False
+
+    match_id = field(output, "match id:")
+
+    if not require(len(match_id) == 64, f"the maker printed no match id:\n{output}"):
+        return False
+
+    reserved = field(output, "swap id:")
+
+    if not require(len(reserved) == 12, f"the maker reserved no swap id:\n{output}"):
+        return False
+
+    print(f"PASS: reverse taker: the CLI maker reserved {reserved} and published match "
+          f"{match_id[:12]}…")
+
+    if not await ui.act("market-matches", confirm=False):
+        return require(False, "the matches were not re-read")
+
+    if not await ui.wait_idle(ui.budget):
+        return require(False, "the matches read never finished")
+
+    import_command = await poll(
+        ui.ws,
+        "(() => {"
+        "  const rows = [...document.querySelectorAll('#market-matches-rows tr')];"
+        f"  const row = rows.find((r) => r.textContent.includes({match_id[:12]!r}));"
+        "  if (!row) { return ''; }"
+        "  const button = row.querySelector('button');"
+        "  return button ? button.getAttribute('data-uicmd') : '';"
+        "})()",
+        ui.budget,
+    )
+
+    if not import_command:
+        print(f"FAIL: the reverse match was not listed with an action;\n"
+              f"{await ui.panel('market')}", file=sys.stderr)
+
+        return False
+
+    if not await ui.act(str(import_command)):
+        return require(False, "importing the reverse match was not confirmed")
+
+    if not await ui.wait_idle(ui.budget):
+        return require(False, "importing the reverse match never finished")
+
+    error = await ui.last_error()
+
+    if not require(error == "", f"importing the reverse match was refused: {error}"):
+        return False
+
+    # The page chose the reverse import from the direction the match names; the worker
+    # re-validated it and created the secret on this side.
+    command_log = str(await ui.attr("commandLog"))
+
+    if not require("market.accept-reverse-match" in command_log,
+                   f"the reverse import never ran; commands: {command_log}"):
+        return False
+
+    selected = await ui.selected_swap()
+
+    if not require(selected == reserved,
+                   f"the import selected {selected!r}, want the reserved {reserved}"):
+        return False
+
+    if not await browser_swap_state(ui, "OFFERED"):
+        return False
+
+    print(f"PASS: reverse taker: the browser imported the match as {reserved} and holds the "
+          f"secret")
+
+    return True
+
+
 async def ignore_match_round_trip(ui: Ui, work: Path, relay_url: str) -> bool:
     """Dismiss a match locally: it disappears, it survives a reload, and it stays on the relay.
 
@@ -2277,6 +2412,12 @@ async def drive(url: str, budget: float, work: Path, relay_url: str = "") -> int
 
         if not await ignore_match_round_trip(ui, work, relay_url):
             return 1
+
+        # The other side of the same direction: the browser as the reverse taker.
+        if not await reverse_taker_handshake(ui, work, relay_url):
+            return 1
+
+        print("PASS: scenario: browser Alice the reverse taker, CLI Bob the maker")
 
         if not await refusal_paths(ui, budget):
             return 1

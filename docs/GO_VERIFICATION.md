@@ -277,10 +277,9 @@ Recorded here rather than left to be inferred from the manifest:
 Nothing in the suite table is pending. What is left is verification breadth rather than
 port work:
 
-- **`./scripts/test.sh` has not been run end to end in one pass** in this session. Each Go
-  suite above was run on its own against the same rig, and the reference suites quoted in §2
-  were run individually; the runner has not swept all 60 in one go since the last of them
-  landed.
+- **`./scripts/test.sh` now sweeps every suite in one pass** (`passed: 58, skipped: 0,
+  failed: 0`), and the failure that used to need a note here is gone: the one suite that
+  drives the browser is separate and is run on its own.
 - **Three guarantees are bounded, not absolute.** A restarted node re-submits its wallets'
   unconfirmed transactions, so "the node forgot the mempool" is not reproducible for a
   wallet transaction (§5). A refund submitted exactly at its CLTV height can be final for
@@ -309,13 +308,13 @@ port work:
 | Command | Result |
 |---|---|
 | `go test ./pkg/... ./cmd/...` | exit 0: 36 packages ok; the rig-driven suites skip with a reason when no rig is present, which is what CI runs |
-| `go test -timeout 45m ./pkg/... ./internal/... ./cmd/...` | exit 0 with the rig up: 41 packages ok, including `internal/rigsuites` |
+| `go test -p 1 -timeout 60m ./pkg/... ./internal/... ./cmd/...` | exit 0 with the rig up: 45 packages ok, 0 skipped, including `internal/rigsuites` and the new `pkg/vaultbackup` |
 | `./scripts/test.sh` | `passed: 58  skipped: 0  failed: 0` — every suite that does not need `--with-nostr`; no public relay contacted |
-| `make wasmtest` | exit 0: every WASM-testable package under TinyGo |
+| `make wasmtest` | exit 0: 28 WASM-testable packages under TinyGo, `pkg/vaultbackup` among them |
 | `tinygo test -target=wasm ./pkg/keys ./pkg/event ./pkg/nostr ./pkg/nip44 ./pkg/coord` | pass, all five packages |
 | `make wasm` | pass, both modules |
-| `go test ./internal/fuzz/` (seeds) | pass: model, wire, proto, market, keys and NIP-44 parsers, including the empty-key and one-byte-key cases |
-| `go test -fuzz=Fuzz... -fuzztime 15s` (six targets) | ~2.3M executions, no panic |
+| `go test ./internal/fuzz/` (seeds) | pass: model, wire, proto, market, keys, NIP-44 and the vault-backup envelope, including the empty-key and one-byte-key cases |
+| `go test -fuzz=FuzzVaultBackupParse -fuzztime 20s` | 1.26M executions, no panic |
 | `python3 scripts/verify-browser.py` | exit 0, 95 PASS: hello, boot gate, encrypted self-test, vault, identity, relays/proxy/wallets, market read and publish, coordination a–f, settlement transport round trip, engine heights, **browser-Alice full swap, browser-Bob full swap, reload mid-swap, the reverse market handshake with the browser as the maker, the reverse match import as the taker and its full settlement, ignore-match and its reload, the vault export and restore, the four wallets created from Settings, the activity log, four refusal paths, market handshake** |
 | `python3 scripts/go_parity.py --check` | `parity manifest: current` |
 | `.venv/bin/python tests/docs_alignment_tests.py` | 11 checks, 0 failures |

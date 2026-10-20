@@ -3193,11 +3193,26 @@ async def refusal_paths(ui: Ui, budget: float) -> bool:
     print(f"PASS: refusal: extract-secret was refused in the engine's words ({error[:48]}…)")
 
     # 2. An unknown swap is refused by id.
+    #
+    # The open is one read and the error marker still holds the previous refusal until the
+    # new answer arrives, so the check waits for the read to be sent before reading it.
     await ui.view("swaps")
     await ui.set("swap-id", "ffffffffffff")
-    await ui.act("swap-open", confirm=False)
 
-    reached = await poll(ui.ws, "document.body.dataset.lastError || ''", budget)
+    if not await ui.act("swap-open", confirm=False):
+        return require(False, "the open control was not found")
+
+    if not await ui.wait_command("engine.reconcile"):
+        return require(False, "opening an unknown swap was never sent")
+
+    reached = await poll(
+        ui.ws,
+        "(() => {"
+        "  const error = document.body.dataset.lastError || '';"
+        "  return error.includes('not found') ? error : '';"
+        "})()",
+        budget,
+    )
 
     if not require(bool(reached), "a refused open showed no error"):
         return False

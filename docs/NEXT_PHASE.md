@@ -162,6 +162,11 @@ the swap record:
   no preimage before the claim reveals it on-chain. no KYC and no external query.
 - the record is what lets either end resume after a restart and what the web app shows as
   history. it is the coordination history, not a chain index.
+- the record is deliberately not replicated or pooled across gateways. aggregating the
+  orderbook is safe because offers are public by design; pooling swap records would join
+  each participant's separate interactions into one linkable graph. a gateway holds only
+  the swaps coordinated through it, and the client's own vault is the only place a
+  cross-relay history can exist.
 - retention is a setting: keep, or prune after a stated period. clarity here matters more
   than the default.
 
@@ -224,6 +229,8 @@ protocol failure. multiple relays and multiple gateways remove the single point.
   not forge.
 - only the funding transaction reveals the exact UTXOs, on-chain, at funding time.
 - the client signs every spend. the gateway can refuse to broadcast, but it cannot spend.
+- there is no cross-gateway swap record query and no replication of the record. one
+  gateway cannot learn what another gateway hosted.
 
 ## phase D: the web app
 

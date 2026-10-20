@@ -113,6 +113,10 @@ func (d *engineDomain) createWallet(ctx context.Context, request proto.Request) 
 		}
 	}
 
+	if err := nodeWalletRefusal("createwallet"); err != nil {
+		return proto.Result{Command: request.Command, Error: err.Error()}
+	}
+
 	if err := d.connect(ctx); err != nil {
 		return failed(request.Command, err)
 	}

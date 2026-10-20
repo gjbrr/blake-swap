@@ -156,6 +156,38 @@ async def evaluate(ws, expression: str, counter: list[int]) -> str:
         return result.get("value")
 
 
+async def cdp(ws, method: str, params: dict, counter: list[int]) -> dict:
+    """Send one CDP command and return its response.
+
+    Two things in this check are not expressions: a download is a browser behavior, and a
+    file input is a DOM node the driver has to set a real file on. Both are core protocol,
+    not a workaround.
+    """
+    counter[0] += 1
+    message_id = counter[0]
+
+    await ws.send(json.dumps({"id": message_id, "method": method, "params": params}))
+
+    while True:
+        raw = await asyncio.wait_for(ws.recv(), timeout=30)
+        response = json.loads(raw)
+
+        if response.get("method") == "Runtime.consoleAPICalled":
+            args = response.get("params", {}).get("args", [])
+            text = " ".join(str(arg.get("value", arg.get("description", ""))) for arg in args)
+            CONSOLE.append(text)
+
+            if len(CONSOLE) > 400:
+                del CONSOLE[: len(CONSOLE) - 400]
+
+            continue
+
+        if response.get("id") != message_id:
+            continue
+
+        return response
+
+
 async def poll(ws, expression: str, budget: float) -> object:
     counter = [0]
     deadline = time.time() + budget
@@ -441,6 +473,43 @@ class Ui:
         clicked = await self.js(
             "(() => {"
             f"  const el = document.querySelector(\"[data-uicmd='{uicmd}']\");"
+            "  if (!el) { return 'missing'; }"
+            "  el.click();"
+            "  return 'clicked';"
+            "})()"
+        )
+
+        return clicked == "clicked"
+
+    async def wait_command(self, name: str, budget: float = 0) -> bool:
+        """Wait until the page has sent one named command.
+
+        It is not the same fact as "not busy": between a click on the dialog's OK and the
+        page sending the command there is a moment where nothing is in flight, and a check
+        that read the result there would read the *previous* command's answer.
+        """
+        reached = await poll(
+            self.ws,
+            f"document.body.dataset.lastCommand === {name!r} ? 'true' : ''",
+            budget or self.budget,
+        )
+
+        return reached == "true"
+
+    async def click_in(self, view: str, uicmd: str) -> bool:
+        """Click a control inside one named view, not wherever it first appears.
+
+        Several controls exist on more than one view (the vault export and restore are on
+        Setup and on Settings). Clicking the first match in the document would exercise the
+        hidden one, which is not what a person can reach.
+        """
+        await self.wait_idle()
+
+        clicked = await self.js(
+            "(() => {"
+            f"  const root = document.getElementById('view-{view}');"
+            "  if (!root) { return 'missing-view'; }"
+            f"  const el = root.querySelector(\"[data-uicmd='{uicmd}']\");"
             "  if (!el) { return 'missing'; }"
             "  el.click();"
             "  return 'clicked';"
@@ -1468,6 +1537,341 @@ async def ignore_match_round_trip(ui: Ui, work: Path, relay_url: str) -> bool:
 
     print("PASS: ignore: the tombstone survived a reload")
 
+    return match_id
+
+
+async def set_file_input(ui: Ui, selector: str, path: Path) -> bool:
+    """Point a real file input at a file on disk.
+
+    The page reads the file with the browser's own FileReader, so a driver that typed text
+    into a field would prove nothing about the code that ships. This is the only way to
+    hand a wasm page a file.
+    """
+    await cdp(ui.ws, "DOM.enable", {}, ui.counter)
+
+    document = await cdp(ui.ws, "DOM.getDocument", {"depth": 1}, ui.counter)
+    root = document.get("result", {}).get("root", {}).get("nodeId")
+
+    if not root:
+        print("FAIL: the document has no root node", file=sys.stderr)
+
+        return False
+
+    found = await cdp(
+        ui.ws, "DOM.querySelector", {"nodeId": root, "selector": selector}, ui.counter,
+    )
+    node = found.get("result", {}).get("nodeId")
+
+    if not node:
+        print(f"FAIL: the file input {selector} is not in the document", file=sys.stderr)
+
+        return False
+
+    answer = await cdp(
+        ui.ws, "DOM.setFileInputFiles", {"files": [str(path)], "nodeId": node}, ui.counter,
+    )
+
+    if answer.get("error"):
+        print(f"FAIL: the file input could not be set: {answer['error']}", file=sys.stderr)
+
+        return False
+
+    return True
+
+
+async def vault_export_import_round_trip(
+    ui: Ui, work: Path, ignored_match_id: str
+) -> bool:
+    """Export the whole vault, refuse a wrong passphrase, restore it, and check it all.
+
+    The round trip is the point: the file is the only copy of this vault that survives the
+    browser, so what must be proved is that the file it writes is the file it reads, that a
+    wrong passphrase changes nothing, and that a restore brings back the records, the
+    sealed values, the market documents and the activity log.
+    """
+    downloads = work / "downloads"
+    downloads.mkdir(exist_ok=True)
+
+    behavior = await cdp(
+        ui.ws,
+        "Browser.setDownloadBehavior",
+        {"behavior": "allow", "downloadPath": str(downloads), "eventsEnabled": True},
+        ui.counter,
+    )
+
+    if behavior.get("error"):
+        print(
+            f"FAIL: Browser.setDownloadBehavior was refused: {behavior['error']}\n"
+            "  the download half of the vault check cannot run without it",
+            file=sys.stderr,
+        )
+
+        return False
+
+    await ui.view("settings")
+
+    if not await ui.wait_idle(ui.budget):
+        return require(False, "the settings view never settled")
+
+    if not await ui.click_in("settings", "vault-export"):
+        return require(False, "the export control is not on the Settings view")
+
+    if not await ui.confirm():
+        return require(False, "the export was not confirmed")
+
+    if not await ui.wait_command("vault.export"):
+        return require(False, "the export was never sent")
+
+    if not await ui.wait_idle(ui.budget):
+        return require(False, "the export never finished")
+
+    error = await ui.last_error()
+
+    if not require(error == "", f"the export was refused: {error}"):
+        return False
+
+    exported = None
+
+    for _ in range(50):
+        candidates = sorted(downloads.glob("blake-swap-vault-*.json"))
+
+        if candidates:
+            exported = candidates[0]
+
+            break
+
+        await asyncio.sleep(0.2)
+
+    if exported is None:
+        print(
+            f"FAIL: no backup file was downloaded; the directory holds {list(downloads)}\n"
+            f"  panel: {await ui.panel('vault-backup-out')}",
+            file=sys.stderr,
+        )
+
+        return False
+
+    text = exported.read_text()
+
+    try:
+        document = json.loads(text)
+    except json.JSONDecodeError as failure:
+        return require(False, f"the backup is not JSON: {failure}")
+
+    if not require(document.get("kind") == "blake-swap-vault",
+                   f"the backup kind is {document.get('kind')!r}"):
+        return False
+
+    entries = document.get("entries") or []
+
+    if not require(len(entries) > 0, "the backup has no entries"):
+        return False
+
+    if not require(document.get("version") == 1,
+                   f"the backup version is {document.get('version')!r}"):
+        return False
+
+    keys = [entry.get("key", "") for entry in entries]
+
+    for required in ("vault/header", "vault/verifier"):
+        if not require(required in keys, f"the backup has no {required}"):
+            return False
+
+    # The known plaintext: the identity secret this check typed in, and the passphrase.
+    for name, secret in (
+        ("the identity secret", "11" * 32),
+        ("the vault passphrase", "browser-check-passphrase"),
+    ):
+        if not require(secret not in text, f"the backup contains {name} in the clear"):
+            return False
+
+    # The tombstone from the ignore scenario is a vault key, so a backup that dropped the
+    # market documents would not carry it.
+    if ignored_match_id:
+        # A tombstone is a sealed market document, so its key is the store's own:
+        # secret/market/ignored-market-matches/<event id>.json.
+        wanted = "ignored-market-matches/" + ignored_match_id + ".json"
+
+        if not require(any(key.endswith(wanted) for key in keys),
+                       f"the backup has no tombstone ending in {wanted}"):
+            return False
+
+    record_keys = [key for key in keys if key.startswith("record/")]
+
+    if not require(len(record_keys) > 0, "the backup has no swap records"):
+        return False
+
+    print(f"PASS: vault export: {len(entries)} entries, {len(text)} bytes, "
+          f"{len(record_keys)} record(s)")
+
+    # 1. A wrong passphrase must change nothing.
+    await ui.view("settings")
+
+    if not await ui.wait_idle(ui.budget):
+        return require(False, "the settings view never settled")
+
+    if not await ui.click_in("settings", "vault-import"):
+        return require(False, "the restore control is not on the Settings view")
+
+    if not await ui.wait_dialog():
+        return require(False, "the restore dialog did not open")
+
+    if not await set_file_input(ui, "#import-vault-file", exported):
+        return False
+
+    await ui.set("confirm-passphrase", "not the passphrase of this backup")
+
+    if not await ui.click("confirm-ok"):
+        return require(False, "the wrong-passphrase restore was not confirmed")
+
+    if not await ui.wait_command("vault.import"):
+        return require(False, "the wrong-passphrase restore was never sent")
+
+    if not await ui.wait_idle(ui.budget):
+        return require(False, "the wrong-passphrase restore never finished")
+
+    refusal = await ui.last_error()
+
+    if not require(refusal != "", "a restore with the wrong passphrase was accepted"):
+        return False
+
+    if not require("did not open" in refusal or "passphrase" in refusal,
+                   f"the refusal is not the store's: {refusal!r}"):
+        return False
+
+    still_open = await ui.attr("vaultOpen")
+
+    if not require(still_open == "true", "a refused restore locked the vault"):
+        return False
+
+    print(f"PASS: vault import refused a wrong passphrase ({refusal[:64]}...)")
+
+    # The records are still in the vault: a refused restore reads the file and writes
+    # nothing, so every record the export held is still listable.
+    await ui.view("diagnostics")
+
+    if not await ui.act("engine-list", confirm=False):
+        return require(False, "the swap list could not be read")
+
+    if not await ui.wait_idle(ui.budget):
+        return require(False, "the swap list never finished")
+
+    listed = await ui.panel("engine")
+    lines = [
+        line for line in listed.splitlines()
+        if len(line.split("\t")[0].strip()) == 12
+    ]
+
+    if not require(len(lines) >= len(record_keys),
+                   f"the refused restore left {len(lines)} record(s), want at least "
+                   f"{len(record_keys)}:\n{listed}"):
+        return False
+
+    print(f"PASS: vault import refusal left all {len(lines)} record(s) in place")
+
+    await ui.view("settings")
+
+    # 2. The real restore. The dialog is opened first and filled second, exactly as a
+    # person does it: the file has to be chosen before the confirmation can mean anything.
+    if not await ui.click_in("settings", "vault-import"):
+        return require(False, "the restore control is not on the Settings view")
+
+    if not await ui.wait_dialog():
+        return require(False, "the restore dialog did not open")
+
+    if not await set_file_input(ui, "#import-vault-file", exported):
+        return False
+
+    await ui.set("confirm-passphrase", "browser-check-passphrase")
+
+    if not await ui.click("confirm-ok"):
+        return require(False, "the restore was not confirmed")
+
+    if not await ui.wait_command("vault.import"):
+        return require(False, "the restore was never sent")
+
+    if not await ui.wait_idle(ui.budget):
+        return require(False, "the restore never finished")
+
+    error = await ui.last_error()
+
+    if not require(error == "", f"the restore was refused: {error}"):
+        return False
+
+    # The page is back at the lock screen, and it says so.
+    locked = await poll(
+        ui.ws, "document.body.dataset.vaultOpen === 'true' ? '' : 'true'", 5,
+    )
+
+    if not require(locked == "true", "the vault stayed open across a restore"):
+        return False
+
+    view = await ui.attr("view")
+
+    if not require(view == "setup", f"the restore left the page on {view!r}"):
+        return False
+
+    passphrase = await ui.js("document.getElementById('passphrase').value || ''")
+
+    if not require(not passphrase, "the page kept a passphrase in a field after a restore"):
+        return False
+
+    print("PASS: vault import replaced the store and locked the vault")
+
+    # 3. Unlock the imported vault and check what came back.
+    await ui.set("passphrase", "browser-check-passphrase")
+
+    if not await ui.act("vault-unlock", confirm=False):
+        return require(False, "the imported vault did not unlock")
+
+    if not await wait_bootstrap(ui):
+        return require(False, "the page did not finish starting after the restore")
+
+    if not await ui.wait_idle(ui.budget):
+        return require(False, "the restore's bootstrap never finished")
+
+    # The identity came back, which means the imported key opened the imported secret.
+    if not await ui.wait_panel("identity", "identity: "):
+        print(f"FAIL: the identity was not restored; panel: {await ui.panel('identity')}",
+              file=sys.stderr)
+
+        return False
+
+    # And the seal still works on the restored store: the self-test seals and reopens a
+    # throwaway vault, so it proves the platform path, not the imported data. What proves
+    # the imported data is the record and tombstone checks below.
+    await ui.view("diagnostics")
+
+    if not await ui.act("vault-selftest", confirm=False):
+        return require(False, "the encrypted self-test could not be clicked after a restore")
+
+    if not await ui.wait_attr("vaultVerified"):
+        return require(False, "the encrypted self-test did not pass after a restore")
+
+    # The tombstone survived: the ignored match is still ignored, which is the one thing a
+    # dropped market document would bring back.
+    if ignored_match_id:
+        await ui.view("market")
+
+        if not await ui.act("market-matches", confirm=False):
+            return require(False, "the matches were not re-read after the restore")
+
+        if not await ui.wait_idle(ui.budget):
+            return require(False, "the matches read never finished")
+
+        listed = await ui.js(
+            "(() => {"
+            "  const rows = [...document.querySelectorAll('#market-matches-rows tr')];"
+            f"  return rows.some((r) => r.textContent.includes({ignored_match_id[:12]!r}))"
+            "    ? 'listed' : 'ignored';"
+            "})()"
+        )
+
+        if not require(listed == "ignored", "the restored vault offered the ignored match"):
+            return False
+
+    print("PASS: vault import: the records, the sealed values and the tombstone came back")
+
     return True
 
 
@@ -2489,7 +2893,9 @@ async def drive(url: str, budget: float, work: Path, relay_url: str = "") -> int
 
         print("PASS: scenario: browser Bob the reverse maker, CLI Alice the taker, full swap")
 
-        if not await ignore_match_round_trip(ui, work, relay_url):
+        ignored_match_id = await ignore_match_round_trip(ui, work, relay_url)
+
+        if not ignored_match_id:
             return 1
 
         # The other side of the same direction: the browser as the reverse taker.
@@ -2497,6 +2903,11 @@ async def drive(url: str, budget: float, work: Path, relay_url: str = "") -> int
             return 1
 
         print("PASS: scenario: browser Alice the reverse taker, CLI Bob the maker")
+
+        # The vault is at its fullest here: records from every scenario, the identity, the
+        # market documents and the tombstone. That is the vault a backup has to carry.
+        if not await vault_export_import_round_trip(ui, work, str(ignored_match_id)):
+            return 1
 
         if not await refusal_paths(ui, budget):
             return 1

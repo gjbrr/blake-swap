@@ -56,6 +56,30 @@ type WalletView struct {
 	Visible map[string]bool `json:"visible,omitempty"`
 }
 
+// VaultExportView is one backup file, ready for the page to save.
+//
+// The envelope is in the view because the page is where a browser's filesystem is; the
+// worker has none. It is sensitive: it is the sealed vault, so its contents are exactly as
+// safe as the passphrase, and the page must not log it or keep it after the download.
+type VaultExportView struct {
+	// Name is the file name a download is offered under, in UTC.
+	Name string `json:"name"`
+	// JSON is the envelope text.
+	JSON string `json:"json"`
+	// Entries and Bytes describe the file without quoting it.
+	Entries int `json:"entries"`
+	Bytes   int `json:"bytes"`
+}
+
+// VaultImportView is what a restore replaced the store with.
+type VaultImportView struct {
+	// Entries and Bytes are the imported store's size. No value, key or passphrase is in
+	// the view: a restore is an operation on the whole store, and nothing about its
+	// contents belongs in a page.
+	Entries int `json:"entries"`
+	Bytes   int `json:"bytes"`
+}
+
 // HeightView is the two chain tips.
 type HeightView struct {
 	Blake int64 `json:"blake"`

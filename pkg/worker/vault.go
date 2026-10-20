@@ -177,6 +177,12 @@ func (d *vaultDomain) handle(ctx context.Context, request proto.Request) proto.R
 			Text:    "loaded " + record.SwapID + " state " + string(record.State),
 		}
 
+	case "vault.export":
+		return d.exportVault(ctx, request)
+
+	case "vault.import":
+		return d.importVault(ctx, request)
+
 	case "vault.crypto":
 		buffer := make([]byte, 32)
 

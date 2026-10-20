@@ -52,6 +52,8 @@ const (
 	UICmdVaultCreate UICmd = "vault-create"
 	UICmdVaultUnlock UICmd = "vault-unlock"
 	UICmdVaultLock   UICmd = "vault-lock"
+	UICmdVaultExport UICmd = "vault-export"
+	UICmdVaultImport UICmd = "vault-import"
 
 	UICmdIdentityStatus   UICmd = "identity-status"
 	UICmdIdentitySet      UICmd = "identity-set"
@@ -120,6 +122,7 @@ const (
 	ElementHello        = "hello"
 	ElementRoundTrip    = "round-trip"
 	ElementVault        = "vault"
+	ElementVaultBackup  = "vault-backup-out"
 	ElementVaultTest    = "vaulttest"
 	ElementVaultChip    = "vault-chip"
 	ElementIdentity     = "identity"
@@ -178,14 +181,16 @@ const (
 
 // The inputs a command's arguments are read from.
 const (
-	InputIdentitySecret   = "identity-secret"
-	InputProxyURL         = "proxy-url"
-	InputSwapID           = "swap-id"
-	InputPassphrase       = "passphrase"
-	InputWalletBlake      = "wallet-blake"
-	InputWalletBTC        = "wallet-btc"
-	InputWalletBlakeWatch = "wallet-blake-watch"
-	InputWalletBTCWatch   = "wallet-btc-watch"
+	InputIdentitySecret    = "identity-secret"
+	InputConfirmPassphrase = "confirm-passphrase"
+	InputImportFile        = "import-vault-file"
+	InputProxyURL          = "proxy-url"
+	InputSwapID            = "swap-id"
+	InputPassphrase        = "passphrase"
+	InputWalletBlake       = "wallet-blake"
+	InputWalletBTC         = "wallet-btc"
+	InputWalletBlakeWatch  = "wallet-blake-watch"
+	InputWalletBTCWatch    = "wallet-btc-watch"
 
 	InputCoordBlake = "coord-blake"
 	InputCoordSats  = "coord-sats"
@@ -353,7 +358,17 @@ type pendingAction struct {
 	swapID  string
 	// detail is what the confirmation shows, beyond the spec's sentence.
 	detail [][2]string
+	// prompt names the extra controls the dialog shows. An empty prompt is the ordinary
+	// yes or no.
+	prompt string
 }
+
+// The prompts a confirmation can add to its body. They are strings rather than values
+// because the dialog is built by the renderer from this marker.
+const (
+	// promptImportFile asks for the backup's own passphrase and the file it belongs to.
+	promptImportFile = "import-file"
+)
 
 // Domain is the page's event loop. It runs until Stop is closed.
 func Domain(_ struct{}, ch Chans) {
@@ -574,6 +589,18 @@ func handleUI(state *app, link tinyspawn.Duplex[proto.Envelope], seq *uint32, cm
 
 	if matchID, found := strings.CutPrefix(cmd, cmdMarketIgnoreMatch); found {
 		beginMarketIgnoreMatch(state, matchID)
+
+		return
+	}
+
+	if cmd == UICmdVaultExport {
+		beginVaultExport(state)
+
+		return
+	}
+
+	if cmd == UICmdVaultImport {
+		beginVaultImport(state)
 
 		return
 	}
@@ -1067,6 +1094,12 @@ func applyResult(state *app, result proto.Result) {
 
 	case "vault.status", "vault.crypto":
 		routeText(ElementVault, result.Text, "ok")
+
+	case "vault.export":
+		applyVaultExport(state, result)
+
+	case "vault.import":
+		applyVaultImport(state, result)
 
 	case "vault.create", "vault.unlock":
 		setInputValue(InputPassphrase, "")

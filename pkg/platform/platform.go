@@ -43,6 +43,15 @@ type KV interface {
 	// Keys returns the keys with a prefix, sorted, so iteration is deterministic
 	// on both platforms.
 	Keys(ctx context.Context, prefix string) ([]string, error)
+	// ReplaceAll makes the store hold exactly these entries and nothing else.
+	//
+	// It is a batch form of Put rather than a second storage API, and it exists for one
+	// caller: restoring a vault backup. A restore done as a loop of Put and Delete calls
+	// has a state in the middle that is neither the old vault nor the new one, and a
+	// browser tab that dies there leaves records sealed with a key that is no longer in
+	// the store. An implementation either commits every entry or leaves the old contents
+	// untouched.
+	ReplaceAll(ctx context.Context, entries map[string][]byte) error
 }
 
 // Reader is an io.Reader over the platform's entropy source.
@@ -96,6 +105,29 @@ func (m *MemoryKV) Delete(_ context.Context, key string) error {
 	defer m.mu.Unlock()
 
 	delete(m.items, key)
+
+	return nil
+}
+
+// ReplaceAll implements KV.
+//
+// The new map is built first and swapped in under the lock, so a caller that fails while
+// building it (it cannot, here, but an implementation that can must) leaves the old one
+// untouched, and a reader never sees a half-replaced store.
+func (m *MemoryKV) ReplaceAll(_ context.Context, entries map[string][]byte) error {
+	replacement := make(map[string][]byte, len(entries))
+
+	for key, value := range entries {
+		copied := make([]byte, len(value))
+		copy(copied, value)
+
+		replacement[key] = copied
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.items = replacement
 
 	return nil
 }

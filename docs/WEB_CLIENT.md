@@ -168,7 +168,39 @@ tombstone is removed. The browser has no process environment to read a lifetime 
 tombstones last until they are removed; the CLI keeps its
 `BLAKE_SWAP_IGNORED_MATCH_TTL_SECONDS` override, and the expiry rule is the same code.
 
+## Backup and restore
+
+**Export vault** (on Setup and on Settings) writes one file: every key the sealed store
+holds, with the values as stored. For everything except the KDF header those bytes are
+ciphertext, so the file is exactly as private as the passphrase — and that is the whole
+warning. Store it offline. Anyone with the file and the passphrase has the vault; losing the
+passphrase loses both the vault and the file. Nothing about the export leaves the browser
+except through the download.
+
+The envelope is versioned JSON:
+
+    {
+      "kind": "blake-swap-vault",
+      "version": 1,
+      "created": "2026-10-20T12:00:00Z",
+      "entries": [{"key": "vault/header", "value": "<base64>"}],
+      "sha256": "<lowercase hex>"
+    }
+
+`entries` is sorted by key, and `sha256` covers `kind`, the version, `created`, then every
+`key` and `value` in that order, each followed by a newline. Reordering the entries does not
+change the digest; changing one byte does.
+
+**Restore from a backup** asks for the file's *own* passphrase, not the current one: a backup
+may come from another browser or another participant. The file is checked before anything is
+written — kind, version, checksum, base64, duplicate keys, control characters in a key, the
+presence of both `vault/header` and `vault/verifier`, and the size bounds (16 MiB decoded,
+10,000 entries, keys of 1 to 256 bytes, values up to 8 MiB) — and then opened with that
+passphrase. Only then is the store replaced, in one atomic write, and the vault locks. A
+wrong passphrase or a damaged file leaves the current vault exactly as it was, which is why
+restore also works when the current vault will not open: it is reachable from the lock
+screen.
+
 ## What is not implemented
 
-Not implemented: exporting the sealed vault (a stretch goal — only the sealed blob would
-leave the browser), wallet creation from the page, and any activity log.
+Not implemented: wallet creation from the page, and any activity log.

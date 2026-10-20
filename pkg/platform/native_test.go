@@ -172,3 +172,60 @@ func TestMemoryKV(t *testing.T) {
 		t.Fatalf("keys after delete = %v", keys)
 	}
 }
+
+// TestMemoryKVReplaceAll: the replace makes the store hold exactly the new entries.
+//
+// It is the primitive a vault restore needs, so what it must do is total: keys that were
+// there and are not in the replacement are gone, values are copied, and an empty
+// replacement is an empty store rather than a no-op.
+func TestMemoryKVReplaceAll(t *testing.T) {
+	ctx := context.Background()
+	kv := NewMemoryKV()
+
+	for _, key := range []string{"vault/header", "record/one", "secret/two"} {
+		if err := kv.Put(ctx, key, []byte("old")); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	buffer := []byte("new")
+	replacement := map[string][]byte{
+		"vault/header": buffer,
+		"secret/two":   []byte("kept"),
+	}
+
+	if err := kv.ReplaceAll(ctx, replacement); err != nil {
+		t.Fatal(err)
+	}
+
+	// The caller's buffer is copied, exactly as Put copies one.
+	buffer[0] = 'x'
+
+	value, found, err := kv.Get(ctx, "vault/header")
+
+	if err != nil || !found || string(value) != "new" {
+		t.Fatalf("header = %q, %v, %v", value, found, err)
+	}
+
+	if _, found, _ := kv.Get(ctx, "record/one"); found {
+		t.Fatal("a key that was not in the replacement survived it")
+	}
+
+	keys, err := kv.Keys(ctx, "")
+
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(keys) != 2 || keys[0] != "secret/two" || keys[1] != "vault/header" {
+		t.Fatalf("keys = %v", keys)
+	}
+
+	if err := kv.ReplaceAll(ctx, map[string][]byte{}); err != nil {
+		t.Fatal(err)
+	}
+
+	if keys, _ = kv.Keys(ctx, ""); len(keys) != 0 {
+		t.Fatalf("an empty replacement left %v", keys)
+	}
+}

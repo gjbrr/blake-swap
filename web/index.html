@@ -99,6 +99,16 @@
             <button type="button" data-uicmd="vault-unlock">Unlock vault</button>
             <button type="button" data-uicmd="vault-lock">Lock vault</button>
           </div>
+          <div class="row">
+            <button type="button" data-uicmd="vault-export">Export vault</button>
+            <button type="button" data-uicmd="vault-import">Restore from a backup</button>
+          </div>
+          <p class="hint">
+            A backup is the whole sealed vault in one file, and the passphrase is its only
+            protection. Store it offline: anyone who has the file and the passphrase has
+            the vault, and losing the passphrase loses both. Restoring replaces this
+            browser's vault, so it also works when the current one will not open.
+          </p>
           <pre id="vault" class="out" aria-live="polite">not run</pre>
         </section>
 
@@ -379,6 +389,21 @@
           <button type="button" data-uicmd="settings-refresh">Refresh</button>
         </div>
       </section>
+      <section class="card">
+        <h3>Vault backup</h3>
+        <p class="hint">
+          The export holds every sealed record, key and document, and nothing in it is
+          readable without the passphrase. It is the only copy of this vault that survives
+          losing the browser's storage, so keep it offline. Restoring one replaces
+          everything here and locks the vault.
+        </p>
+        <div class="row">
+          <button type="button" data-uicmd="vault-export">Export vault</button>
+          <button type="button" data-uicmd="vault-import">Restore from a backup</button>
+        </div>
+        <pre id="vault-backup-out" class="out" aria-live="polite">not run</pre>
+      </section>
+
       <section class="card">
         <h3>Coordination encryption</h3>
         <div class="row">

@@ -242,7 +242,7 @@ without a browser, and the browser's socket is the only platform edge:
 
 | Prefix | Domain | What it does |
 |---|---|---|
-| `vault.` | `vaultDomain` | create/unlock/lock the encrypted state, `state.get`/`state.put`, the encrypted self-test |
+| `vault.` | `vaultDomain` | create/unlock/lock the encrypted state, `state.get`/`state.put`, the encrypted self-test, and the backup pair `vault.export`/`vault.import` (one checked envelope, written atomically through `platform.KV.ReplaceAll`) |
 | `identity.`, `proxy.` | `vaultDomain` | the Nostr key and the app server's proxy address, both sealed |
 | `engine.` | `engineDomain` | the read-only engine over the proxy, with `engine.Transport` wired to the relay transport |
 | `market.` | `marketDomain` | relays, read, publish, take — the CLI's market builders over the browser's socket |

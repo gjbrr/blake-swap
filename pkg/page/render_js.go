@@ -11,6 +11,7 @@ import (
 	"git.smesh.lol/tiny-spawn"
 
 	"github.com/gjbrr/blake-swap/pkg/proto"
+	"github.com/gjbrr/blake-swap/pkg/vaultbackup"
 )
 
 //
@@ -799,6 +800,157 @@ func beginSwapAction(state *app, name string) {
 	openConfirmation(state, spec, request, state.selected, confirmationFacts(state))
 }
 
+// beginVaultExport opens the confirmation for saving the sealed vault.
+//
+// It asks first because the file it produces is the whole vault: a person should not learn
+// that a backup exists because a download appeared. There is no prompt beyond yes or no,
+// because there is nothing to choose.
+func beginVaultExport(state *app) {
+	spec := actionSpec{
+		command: "vault.export",
+		label:   "Export vault",
+		what: "Write every sealed record, key, message and document this vault holds " +
+			"into one file and download it. The file is only as private as the " +
+			"passphrase: store it offline, and know that losing the passphrase loses " +
+			"both the vault and the file.",
+	}
+
+	openConfirmation(state, spec, proto.Request{Command: "vault.export"}, "", [][2]string{
+		{"vault", orDash(state.identity)},
+		{"protection", "the passphrase, and nothing else"},
+	})
+}
+
+// beginVaultImport opens the confirmation for restoring a backup over this store.
+//
+// The dialog asks for the imported file's own passphrase rather than reusing the current
+// one: a backup may come from another browser, another participant or another vault
+// entirely, and the passphrase that opens it is a fact about the file.
+func beginVaultImport(state *app) {
+	spec := actionSpec{
+		command: "vault.import",
+		label:   "Restore from a backup",
+		what: "Replace everything this browser holds with the contents of a backup file. " +
+			"The file must open with its own passphrase before anything is written, and " +
+			"this vault locks when it succeeds. There is no undo except another backup.",
+	}
+
+	openPromptConfirmation(state, spec, proto.Request{Command: "vault.import"},
+		[][2]string{{"current store", "replaced, not merged"}}, promptImportFile)
+}
+
+// openPromptConfirmation is openConfirmation with the controls a prompt needs.
+func openPromptConfirmation(
+	state *app, spec actionSpec, request proto.Request, facts [][2]string, prompt string,
+) {
+	openConfirmation(state, spec, request, "", facts)
+
+	if state.pending == nil || prompt == "" {
+		return
+	}
+
+	state.pending.prompt = prompt
+
+	appendImportControls()
+}
+
+// appendImportControls adds the passphrase field and the file input to the dialog.
+//
+// The file input is a real one, so the browser's own picker and its own file reading are
+// what supply the bytes. The page does not accept a pasted envelope: the whole point of a
+// restore is the file a person saved.
+func appendImportControls() {
+	appendTo(DialogBody, elem("div").class("row").
+		child(elem("label").attr("for", InputConfirmPassphrase).
+			text("the backup's passphrase")).
+		child(elem("input").
+			attr("id", InputConfirmPassphrase).
+			attr("type", "password").
+			attr("autocomplete", "off").
+			attr("spellcheck", "false")))
+
+	appendTo(DialogBody, elem("div").class("row").
+		child(elem("label").attr("for", InputImportFile).text("the backup file")).
+		child(elem("input").
+			attr("id", InputImportFile).
+			attr("type", "file").
+			attr("accept", ".json,application/json")))
+}
+
+// routeVaultFile writes a backup command's text where the person is looking.
+//
+// The two views that offer a backup each have their own panel, and a result written to the
+// hidden one would look like a command that did nothing.
+func routeVaultFile(state *app, text, status string) {
+	if state.view == ViewSettings {
+		routeText(ElementVaultBackup, text, status)
+
+		return
+	}
+
+	routeText(ElementVault, text, status)
+}
+
+// applyVaultExport hands the envelope to the browser's download machinery.
+//
+// The view is decoded and the file saved; nothing of it is written to a panel, a log or an
+// attribute. The summary line the worker wrote is counts only, which is why it is safe to
+// display.
+func applyVaultExport(state *app, result proto.Result) {
+	var view proto.VaultExportView
+
+	if err := proto.DecodeData(result, &view); err != nil {
+		routeVaultFile(state, result.Text, "ok")
+
+		return
+	}
+
+	downloadText(view.Name, view.JSON)
+
+	routeVaultFile(state, result.Text+"\nsaved as "+view.Name, "ok")
+}
+
+// applyVaultImport puts the page back to the lock screen a restore leaves it at.
+//
+// The vault that was open is gone, so everything the page remembered about it is stale: the
+// identity, the wallet names, the selected swap and the snapshot. Clearing them is not
+// tidiness, it is the difference between a page that shows the imported vault and one that
+// shows the previous vault's facts over it.
+func applyVaultImport(state *app, result proto.Result) {
+	var view proto.VaultImportView
+
+	detail := result.Text
+
+	if err := proto.DecodeData(result, &view); err == nil {
+		detail += "\n" + strconv.Itoa(view.Entries) + " entries, " +
+			strconv.Itoa(view.Bytes) + " bytes"
+	}
+
+	state.unlocked = false
+	state.identity = ""
+	state.proxy = ""
+	state.selected = ""
+	state.haveSummary = false
+	state.relays = nil
+	state.walletNames = nil
+	state.dashboard = proto.DashboardView{}
+	state.market = proto.MarketView{}
+
+	markVaultOpen(false)
+	setVaultChip("locked", "wait")
+	setIdentitySecretOnce("")
+	setInputValue(InputPassphrase, "")
+	setInputValue(InputConfirmPassphrase, "")
+	clearFileInput(InputImportFile)
+
+	renderSettings(state)
+
+	// The view moves first, so the result is written into the panel the person is about to
+	// be looking at rather than the one behind it.
+	setView(state, ViewSetup)
+	routeVaultFile(state, detail, "ok")
+}
+
 // beginMarketPublish opens the confirmation for advertising an offer.
 //
 // Publishing is coordination rather than economics, but it is signed and public, so the
@@ -952,6 +1104,40 @@ func openConfirmation(state *app, spec actionSpec, request proto.Request, swapID
 	dialogOpen(logo, body)
 }
 
+// readImportFile fills the request's arguments from the dialog's fields.
+//
+// It happens here rather than when the button was pressed, because the file a person means
+// is the one chosen in the dialog that named the action. A read failure is the page's own
+// refusal, shown where every other refusal goes, and the command is not sent: a restore
+// with no file would be an import of nothing.
+func readImportFile(state *app, request *proto.Request) bool {
+	text, err := readFileText(InputImportFile, vaultbackup.MaxTextBytes)
+
+	if err != nil {
+		showError(state, "vault.import", err.Error())
+		routeVaultFile(state, "ERROR: "+err.Error(), "bad")
+
+		return false
+	}
+
+	passphrase := inputValue(InputConfirmPassphrase)
+
+	if passphrase == "" {
+		showError(state, "vault.import", "the imported vault needs its own passphrase")
+		routeVaultFile(state, "ERROR: the imported vault needs its own passphrase", "bad")
+
+		return false
+	}
+
+	request.Args = map[string]string{
+		"confirm":    "replace",
+		"passphrase": passphrase,
+		"json":       text,
+	}
+
+	return true
+}
+
 // cancelConfirmation closes the dialog and returns focus to the button that opened it.
 func cancelConfirmation(state *app) {
 	state.pending = nil
@@ -978,6 +1164,10 @@ func confirmPending(state *app, link tinyspawn.Duplex[proto.Envelope], seq *uint
 
 	if pending.spec.selected && pending.request.Args["swap_id"] == "" {
 		pending.request.Args = map[string]string{"swap_id": pending.swapID}
+	}
+
+	if pending.prompt == promptImportFile && !readImportFile(state, &pending.request) {
+		return
 	}
 
 	startCommand(state, link, seq, pending.request)

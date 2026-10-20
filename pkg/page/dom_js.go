@@ -2,7 +2,10 @@
 
 package page
 
-import "syscall/js"
+import (
+	"fmt"
+	"syscall/js"
+)
 
 //
 // This file is the page's only route to the document. Keeping DOM access in
@@ -371,4 +374,119 @@ func focusCommand(command string) {
 	}
 
 	el.Call("focus")
+}
+
+// ------------------------------------------------------------- files and data ---
+
+// downloadText saves one text file through a Blob and a temporary object URL.
+//
+// A browser has no filesystem for a wasm module to write to, so this is the only way a
+// backup leaves the client: the worker produces the envelope, this hands it to the
+// browser's own download mechanism, and nothing is written anywhere else. The object URL
+// is revoked immediately after the click, because a live URL is a second way to read the
+// sealed vault.
+func downloadText(name, text string) {
+	document := js.Global().Get("document")
+
+	blob := js.Global().Get("Blob").New(
+		js.Global().Get("Array").New(text),
+		map[string]any{"type": "application/json"},
+	)
+
+	url := js.Global().Get("URL").Call("createObjectURL", blob)
+
+	anchor := document.Call("createElement", "a")
+	anchor.Set("href", url)
+	anchor.Set("download", name)
+	anchor.Set("rel", "noopener")
+
+	document.Get("body").Call("appendChild", anchor)
+	anchor.Call("click")
+	document.Get("body").Call("removeChild", anchor)
+
+	js.Global().Get("URL").Call("revokeObjectURL", url)
+}
+
+// readFileText reads the first file of a file input as text.
+//
+// The read is asynchronous and this waits on it, which is the same thing the IndexedDB
+// store does: the goroutine parks, the JavaScript event loop delivers the callback, and the
+// command that needed the bytes continues. The size is checked before the read so a
+// hostile or accidental multi-gigabyte file is refused by the page as well as by the
+// worker.
+func readFileText(inputID string, maxBytes int) (string, error) {
+	el := element(inputID)
+
+	if el.IsUndefined() {
+		return "", fmt.Errorf("no file input on this page")
+	}
+
+	files := el.Get("files")
+
+	if files.IsUndefined() || files.IsNull() || files.Length() == 0 {
+		return "", fmt.Errorf("choose a backup file first")
+	}
+
+	file := files.Index(0)
+
+	if size := file.Get("size"); size.Type() == js.TypeNumber {
+		if size.Int() > maxBytes {
+			return "", fmt.Errorf(
+				"the file is %d bytes, more than the %d a backup holds",
+				size.Int(), maxBytes,
+			)
+		}
+	}
+
+	reader := js.Global().Get("FileReader").New()
+
+	done := make(chan struct{})
+	failed := make(chan struct{})
+
+	var (
+		content string
+		failure error
+	)
+
+	reader.Set("onload", js.FuncOf(func(this js.Value, args []js.Value) any {
+		result := reader.Get("result")
+
+		if result.Type() == js.TypeString {
+			content = result.String()
+		} else {
+			failure = fmt.Errorf("the file could not be read as text")
+		}
+
+		close(done)
+
+		return nil
+	}))
+
+	reader.Set("onerror", js.FuncOf(func(this js.Value, args []js.Value) any {
+		failure = fmt.Errorf("the browser refused to read the file")
+		close(failed)
+
+		return nil
+	}))
+
+	reader.Call("readAsText", file)
+
+	select {
+	case <-done:
+	case <-failed:
+	}
+
+	return content, failure
+}
+
+// clearFileInput empties a file input, so a passphrase or a file is not left in the
+// document after the command that used it.
+func clearFileInput(inputID string) {
+	el := element(inputID)
+
+	if el.IsUndefined() {
+		return
+	}
+
+	el.Set("value", "")
 }

@@ -24,6 +24,7 @@ import (
 	"github.com/gjbrr/blake-swap/pkg/nip44"
 	"github.com/gjbrr/blake-swap/pkg/nostr"
 	"github.com/gjbrr/blake-swap/pkg/proto"
+	"github.com/gjbrr/blake-swap/pkg/vaultbackup"
 	"github.com/gjbrr/blake-swap/pkg/wire"
 )
 
@@ -194,6 +195,60 @@ func FuzzNIP44(f *testing.F) {
 
 		_, _ = nip44.Decrypt([]byte(payload), payload)
 		_ = nip44.DescribePayload(payload)
+	})
+}
+
+// FuzzVaultBackupParse is the vault backup parser: the one file the client reads that it
+// did not write, and the one whose failure would be a dead worker at the moment a person
+// is trying to recover a vault.
+//
+// The bounds are what make this fuzzable at all: a parser that allocated the file's own
+// declared sizes would be a way to ask the browser for a gigabyte, so the seed corpus
+// includes a duplicate key, a missing header and a value that claims to be enormous.
+func FuzzVaultBackupParse(f *testing.F) {
+	seeds := []string{
+		`{}`,
+		`[]`,
+		`{"kind":"blake-swap-vault"}`,
+		`{"kind":"blake-swap-vault","version":1,"created":"2026-10-20T12:00:00Z","entries":[],"sha256":""}`,
+		`{"kind":"blake-swap-vault","version":1,"created":"x","entries":[{"key":"","value":""}],"sha256":"00"}`,
+		`{"kind":"blake-swap-vault","version":1,"created":"x","entries":[{"key":"vault/header","value":"!!"},{"key":"vault/header","value":"aGVsbG8="}],"sha256":"00"}`,
+		`{"kind":"blake-swap-vault","version":1,"created":"x","entries":[{"key":"vault/header","value":"aGVsbG8="},{"key":"vault/verifier","value":"d29ybGQ="}],"sha256":"0000000000000000000000000000000000000000000000000000000000000000"}`,
+		`{"kind":"blake-swap-vault","version":2,"created":"x","entries":`,
+	}
+
+	for _, seed := range seeds {
+		f.Add(seed)
+	}
+
+	f.Fuzz(func(t *testing.T, text string) {
+		defer survived(t)
+
+		_, entries, err := vaultbackup.Parse(text)
+
+		if err != nil {
+			if entries != nil {
+				t.Fatalf("a refused backup returned entries")
+			}
+
+			return
+		}
+
+		// A backup that parsed must be re-encodable, and its entries must be the ones the
+		// digest covered.
+		for key, value := range entries {
+			if key == "" {
+				t.Fatalf("an empty key parsed")
+			}
+
+			if len(key) > vaultbackup.MaxKeyBytes {
+				t.Fatalf("a %d-byte key parsed", len(key))
+			}
+
+			if len(value) > vaultbackup.MaxValueBytes {
+				t.Fatalf("a %d-byte value parsed", len(value))
+			}
+		}
 	})
 }
 

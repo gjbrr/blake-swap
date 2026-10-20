@@ -184,6 +184,70 @@ func (i *IndexedDB) Delete(ctx context.Context, key string) error {
 	return err
 }
 
+// ReplaceAll implements KV.
+//
+// One readwrite transaction: clear the store, put every entry, and wait for the
+// transaction itself to complete. Waiting on a per-request callback would be wrong here
+// even though every individual put succeeded: IndexedDB rolls a transaction back as a
+// whole, and only `oncomplete` says it committed. A partial restore would leave a store
+// whose header and verifier disagree with its records, which is unrecoverable from inside
+// the client.
+func (i *IndexedDB) ReplaceAll(ctx context.Context, entries map[string][]byte) error {
+	db, err := i.open(ctx)
+
+	if err != nil {
+		return err
+	}
+
+	transaction := db.Call("transaction", i.Store, "readwrite")
+	store := transaction.Call("objectStore", i.Store)
+
+	store.Call("clear")
+
+	for key, value := range entries {
+		buffer := js.Global().Get("Uint8Array").New(len(value))
+		js.CopyBytesToJS(buffer, value)
+
+		store.Call("put", buffer, key)
+	}
+
+	done := make(chan struct{})
+
+	var failed error
+
+	transaction.Set("oncomplete", js.FuncOf(func(this js.Value, args []js.Value) any {
+		close(done)
+
+		return nil
+	}))
+
+	failure := func(event js.Value) any {
+		target := event.Get("target")
+
+		if message := target.Get("error"); !message.IsUndefined() && !message.IsNull() {
+			failed = fmt.Errorf("indexeddb: %v", message.Get("message").String())
+		} else {
+			failed = fmt.Errorf("indexeddb: the replace transaction did not commit")
+		}
+
+		close(done)
+
+		return nil
+	}
+
+	transaction.Set("onerror", js.FuncOf(func(this js.Value, args []js.Value) any {
+		return failure(args[0])
+	}))
+
+	transaction.Set("onabort", js.FuncOf(func(this js.Value, args []js.Value) any {
+		return failure(args[0])
+	}))
+
+	<-done
+
+	return failed
+}
+
 // Keys implements KV.
 func (i *IndexedDB) Keys(ctx context.Context, prefix string) ([]string, error) {
 	result, err := i.store(ctx, "readonly", func(store js.Value) js.Value {

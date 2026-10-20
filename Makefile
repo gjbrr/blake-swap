@@ -29,7 +29,7 @@ NATIVE_PKGS := ./pkg/... ./internal/... ./cmd/server
 
 # Packages whose tests also run under TinyGo wasm. They are the ones the
 # browser client will link, so a host-only pass would not be enough.
-WASM_TEST_PKGS := ./pkg/decimal ./pkg/amount ./pkg/fees ./pkg/timeout ./pkg/state ./pkg/model ./pkg/wire ./pkg/reconcile ./pkg/htlc ./pkg/psbt ./pkg/market ./pkg/keys ./pkg/nip44 ./pkg/event ./pkg/vault ./pkg/rpc ./pkg/contract ./pkg/observe ./pkg/fund ./pkg/settle ./pkg/store ./pkg/nostr ./pkg/coord ./pkg/marketflow ./pkg/client ./pkg/platform ./pkg/worker ./pkg/swap
+WASM_TEST_PKGS := ./pkg/decimal ./pkg/amount ./pkg/fees ./pkg/timeout ./pkg/state ./pkg/model ./pkg/wire ./pkg/reconcile ./pkg/htlc ./pkg/psbt ./pkg/market ./pkg/keys ./pkg/nip44 ./pkg/event ./pkg/vault ./pkg/rpc ./pkg/contract ./pkg/observe ./pkg/fund ./pkg/settle ./pkg/store ./pkg/nostr ./pkg/coord ./pkg/marketflow ./pkg/client ./pkg/vaultbackup ./pkg/platform ./pkg/worker ./pkg/swap
 
 .PHONY: all wasm server serve verify test wasmtest fmt vet clean
 

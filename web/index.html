@@ -390,6 +390,24 @@
         </div>
       </section>
       <section class="card">
+        <h3>Wallets</h3>
+        <p class="hint">
+          One signing and one watch-only wallet per chain. A row says what the node answers:
+          <em>absent</em> means it has no loaded wallet under that name, <em>loaded</em>
+          means it has the kind the slot needs, and <em>wrong type</em> means the wallet
+          there cannot do what the slot is for. One confirmation per wallet, and no funds
+          move when one is created.
+        </p>
+        <table class="table" id="wallet-slots-table">
+          <thead><tr><th>slot</th><th>chain</th><th>type</th><th>name</th><th>state</th><th></th></tr></thead>
+          <tbody id="wallet-slots"></tbody>
+        </table>
+        <p class="hint" id="wallet-slots-empty">No wallet status yet.</p>
+        <pre id="wallets-action-out" class="out" aria-live="polite">not run</pre>
+        <pre id="wallets" class="out" aria-live="polite">not read</pre>
+      </section>
+
+      <section class="card">
         <h3>Vault backup</h3>
         <p class="hint">
           The export holds every sealed record, key and document, and nothing in it is

@@ -282,3 +282,34 @@ func TestStatus(t *testing.T) {
 		t.Fatalf("methods = %v", status["methods"])
 	}
 }
+
+// TestGetWalletInfoIsAllowlisted: the browser creates wallets, so it has to be able to ask
+// what kind a wallet is.
+//
+// The method is a read, and the allowlist is explicit, so adding it is a deliberate act: it
+// is the only answer to "is this name a signing wallet or a watch-only one", and a client
+// that could not ask would find out at the first signature instead.
+func TestGetWalletInfoIsAllowlisted(t *testing.T) {
+	if !DefaultAllowlist["getwalletinfo"] {
+		t.Fatal("getwalletinfo is not on the allowlist")
+	}
+
+	n := newNode(t)
+	p := newProxy(t, n)
+
+	response := call(t, p, "/rpc/btc/wallet/alice",
+		`{"method":"getwalletinfo","params":[]}`)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d", response.Code)
+	}
+
+	if n.method != "getwalletinfo" {
+		t.Fatalf("the node was called with %q", n.method)
+	}
+
+	// And the wallet is in the path, which is how Core selects one.
+	if n.path != "/wallet/alice" {
+		t.Fatalf("the node saw path %q", n.path)
+	}
+}

@@ -483,6 +483,48 @@ func (n *Node) WalletLoaded(ctx context.Context, wallet string) (bool, error) {
 	return false, nil
 }
 
+// WalletInfo is what the node says about one loaded wallet.
+//
+// The one field the client acts on is PrivateKeysEnabled: a signing slot must hold a wallet
+// that can sign and a watch-only slot must hold one that cannot, and a name typed into the
+// wrong row is a mistake this is how the client catches.
+type WalletInfo struct {
+	WalletName         string `json:"walletname"`
+	WalletVersion      int64  `json:"walletversion"`
+	PrivateKeysEnabled bool   `json:"private_keys_enabled"`
+	Descriptors        bool   `json:"descriptors"`
+	// WatchOnly is what some nodes call a wallet with private keys disabled. It is read
+	// because two spellings of the same fact is how a type check silently stops working.
+	WatchOnly bool `json:"private_keys_disabled"`
+}
+
+// Signing reports whether the wallet can sign for itself.
+func (w WalletInfo) Signing() bool { return w.PrivateKeysEnabled && !w.WatchOnly }
+
+// GetWalletInfo asks the node about one loaded wallet.
+//
+// The call is wallet-scoped, so it is the node bound to that wallet that answers: a node
+// with no wallet selected answers this method with its own help text as an error.
+func (n *Node) GetWalletInfo(ctx context.Context, wallet string) (*WalletInfo, error) {
+	raw, err := n.WithWallet(wallet).callWithWallet(ctx, "getwalletinfo")
+
+	if err != nil {
+		return nil, err
+	}
+
+	var info WalletInfo
+
+	if err := decode(raw, &info); err != nil {
+		return nil, fmt.Errorf("%s: getwalletinfo: %w", n.Chain, err)
+	}
+
+	if info.WalletName == "" {
+		info.WalletName = wallet
+	}
+
+	return &info, nil
+}
+
 // LoadWallet loads an existing wallet.
 func (n *Node) LoadWallet(ctx context.Context, wallet string) error {
 	_, err := n.call(ctx, "loadwallet", wallet)

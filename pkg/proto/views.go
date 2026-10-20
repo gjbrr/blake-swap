@@ -54,6 +54,9 @@ type WalletView struct {
 	// rather than four booleans because a missing wallet is the normal state before
 	// the node has one, and the UI shows it per name.
 	Visible map[string]bool `json:"visible,omitempty"`
+	// Slots is the four rows the Settings view shows: the name, whether the node lists it,
+	// and whether it is the kind of wallet the slot needs.
+	Slots []WalletSlotView `json:"slots,omitempty"`
 }
 
 // VaultExportView is one backup file, ready for the page to save.
@@ -78,6 +81,45 @@ type VaultImportView struct {
 	// contents belongs in a page.
 	Entries int `json:"entries"`
 	Bytes   int `json:"bytes"`
+}
+
+// WalletCreateView is what one wallet creation did.
+//
+// Created and Loaded are different facts: a wallet that already existed and was loaded is
+// not a wallet this call made, and a client that said "created" for both would send an
+// operator looking for a wallet it did not create.
+type WalletCreateView struct {
+	Slot      string `json:"slot"`
+	Name      string `json:"name"`
+	Chain     string `json:"chain"`
+	WatchOnly bool   `json:"watch_only"`
+	Created   bool   `json:"created"`
+	Loaded    bool   `json:"loaded"`
+	Signing   bool   `json:"signing"`
+}
+
+// WalletSlotView is one of the four wallet slots.
+//
+// The four slots are fixed, so the Settings view shows four rows whatever the node has: a
+// participant whose node has no BTC wallet needs to see that row, not an absent one.
+type WalletSlotView struct {
+	// Slot is blake, btc, blake_watch or btc_watch.
+	Slot string `json:"slot"`
+	// Label is what the row is called.
+	Label string `json:"label"`
+	// Chain is which node holds it.
+	Chain string `json:"chain"`
+	// WatchOnly marks a slot that must hold a wallet with no private keys.
+	WatchOnly bool `json:"watch_only"`
+	// Name is the stored name, which is what a create would use.
+	Name string `json:"name"`
+	// Loaded reports whether the node lists it.
+	Loaded bool `json:"loaded"`
+	// Signing reports whether the node says the wallet can sign. It is meaningful only
+	// while Loaded is true.
+	Signing bool `json:"signing"`
+	// State is absent, loaded, wrong type, or unknown when the node could not be asked.
+	State string `json:"state"`
 }
 
 // HeightView is the two chain tips.

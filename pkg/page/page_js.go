@@ -108,6 +108,7 @@ const (
 	cmdMarketAcceptMatch = "market-accept-match:"
 	cmdMarketAcceptOffer = "market-accept-reverse-offer:"
 	cmdMarketIgnoreMatch = "market-ignore-match:"
+	cmdWalletCreate      = "wallet-create:"
 	cmdMarketTakes       = "market-takes:"
 	cmdOpenSwap          = "open-swap:"
 	cmdCoordSend         = "coord-send:"
@@ -117,26 +118,29 @@ const (
 // The element ids are part of the page contract: index.html renders them and the
 // headless check in scripts/verify-browser.py reads them.
 const (
-	ElementPageStatus   = "page-status"
-	ElementWorkerStatus = "worker-status"
-	ElementHello        = "hello"
-	ElementRoundTrip    = "round-trip"
-	ElementVault        = "vault"
-	ElementVaultBackup  = "vault-backup-out"
-	ElementVaultTest    = "vaulttest"
-	ElementVaultChip    = "vault-chip"
-	ElementIdentity     = "identity"
-	ElementProxy        = "proxy"
-	ElementEngine       = "engine"
-	ElementMarket       = "market"
-	ElementCoord        = "coord"
-	ElementWallets      = "wallets"
-	ElementEngineStatus = "engine-status-out"
-	ElementMarketRelays = "market-relays-out"
-	ElementAlert        = "alert"
-	ElementAlertCommand = "alert-command"
-	ElementAlertText    = "alert-text"
-	ElementBusy         = "busy-line"
+	ElementPageStatus      = "page-status"
+	ElementWorkerStatus    = "worker-status"
+	ElementHello           = "hello"
+	ElementRoundTrip       = "round-trip"
+	ElementVault           = "vault"
+	ElementVaultBackup     = "vault-backup-out"
+	ElementVaultTest       = "vaulttest"
+	ElementVaultChip       = "vault-chip"
+	ElementIdentity        = "identity"
+	ElementProxy           = "proxy"
+	ElementEngine          = "engine"
+	ElementMarket          = "market"
+	ElementCoord           = "coord"
+	ElementWallets         = "wallets"
+	ElementWalletSlots     = "wallet-slots"
+	ElementWalletSlotEmpty = "wallet-slots-empty"
+	ElementWalletAction    = "wallets-action-out"
+	ElementEngineStatus    = "engine-status-out"
+	ElementMarketRelays    = "market-relays-out"
+	ElementAlert           = "alert"
+	ElementAlertCommand    = "alert-command"
+	ElementAlertText       = "alert-text"
+	ElementBusy            = "busy-line"
 
 	ElementIdentityOnce  = "identity-secret-once"
 	ElementIdentityValue = "identity-secret-value"
@@ -349,6 +353,9 @@ type app struct {
 	relays      []string
 	proxy       string
 	walletNames map[string]string
+	// walletSlots is the four rows the Settings view shows, with the node's answer about
+	// each. It comes from wallets.status, so the page never guesses which wallet exists.
+	walletSlots []proto.WalletSlotView
 }
 
 // pendingAction is one act waiting for its second gesture.
@@ -589,6 +596,12 @@ func handleUI(state *app, link tinyspawn.Duplex[proto.Envelope], seq *uint32, cm
 
 	if matchID, found := strings.CutPrefix(cmd, cmdMarketIgnoreMatch); found {
 		beginMarketIgnoreMatch(state, matchID)
+
+		return
+	}
+
+	if slot, found := strings.CutPrefix(cmd, cmdWalletCreate); found {
+		beginWalletCreate(state, slot)
 
 		return
 	}
@@ -951,6 +964,12 @@ func finishCommand(
 		bootstrap(state, link, seq, refresh)
 	}
 
+	// The wallet rows are the node's answer, so they are re-read after anything that could
+	// have changed one: a different name, or a wallet that did not exist a moment ago.
+	if result.Command == "wallets.set" || result.Command == "wallets.create" {
+		queueCommand(refresh, state, link, seq, proto.Request{Command: "wallets.status"})
+	}
+
 	// An identity is what makes the engine usable: without one, every chain read is refused
 	// with "no participant identity". Setting or generating one therefore refreshes the
 	// reads that depend on it, rather than leaving a page that says it cannot reach a chain.
@@ -1161,6 +1180,12 @@ func applyResult(state *app, result proto.Result) {
 	case "wallets.status":
 		renderWallets(state, result)
 		renderSettings(state)
+
+	case "wallets.create":
+		// Its own panel: the status read that follows replaces the wallets panel, and what
+		// a create did ("created" or "already exists") is the one thing that read cannot
+		// say.
+		routeText(ElementWalletAction, result.Text, "ok")
 
 	case "wallets.set":
 		routeText(ElementWallets, result.Text, "ok")

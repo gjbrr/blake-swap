@@ -81,9 +81,14 @@ var DefaultAllowlist = map[string]bool{
 	"estimatesmartfee": true,
 
 	// Wallet lifecycle and reads.
-	"listwallets":       true,
-	"loadwallet":        true,
-	"createwallet":      true,
+	"listwallets":  true,
+	"loadwallet":   true,
+	"createwallet": true,
+	// getwalletinfo is a read, and it is the only way the browser can tell a wallet that
+	// can sign from one that cannot. It is allowlisted deliberately: a wallet created into
+	// the wrong slot, or a name typed into the wrong row, would otherwise only surface as a
+	// signing failure later, at the moment money is meant to move.
+	"getwalletinfo":     true,
 	"getbalances":       true,
 	"listunspent":       true,
 	"listtransactions":  true,

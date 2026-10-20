@@ -518,7 +518,109 @@ func renderWallets(state *app, result proto.Result) {
 	fillInput(InputWalletBlakeWatch, wallets.BlakeWatch)
 	fillInput(InputWalletBTCWatch, wallets.BTCWatch)
 
+	state.walletSlots = wallets.Slots
+
+	renderWalletSlots(state)
+
 	routeText(ElementWallets, result.Text, "ok")
+}
+
+// renderWalletSlots renders the four wallet rows of the Settings view.
+//
+// The rows are the slots, never the names: a participant whose node has no BTC wallet needs
+// to see the empty BTC row in order to fill it, and a view built from names would leave it
+// out. What is in the row is the node's own answer, because "the wallet exists" and "the
+// wallet is the kind this slot needs" are two facts and only the node knows either.
+func renderWalletSlots(state *app) {
+	clear(ElementWalletSlots)
+
+	if len(state.walletSlots) == 0 {
+		toggle(ElementWalletSlotEmpty, true)
+
+		return
+	}
+
+	toggle(ElementWalletSlotEmpty, false)
+
+	for _, slot := range state.walletSlots {
+		actions := elem("td")
+
+		switch slot.State {
+		case "loaded":
+			// Nothing to do: the slot holds the kind of wallet it needs.
+		case "wrong type":
+			// Also nothing to do from here: the wallet on the node is the wrong kind, and
+			// the fix is on the node, not in this page.
+		default:
+			actions = actions.child(elem("button").
+				attr("type", "button").
+				onCmd(cmdWalletCreate + slot.Slot).
+				text("Create or load"))
+		}
+
+		kind := "signing"
+
+		if slot.WatchOnly {
+			kind = "watch-only"
+		}
+
+		appendTo(ElementWalletSlots, elem("tr").
+			child(elem("td").text(slot.Label)).
+			child(elem("td").text(slot.Chain)).
+			child(elem("td").text(kind)).
+			child(elem("td").text(orDash(slot.Name))).
+			child(elem("td").text(slot.State)).
+			child(actions))
+	}
+}
+
+// beginWalletCreate opens the confirmation for one wallet slot.
+//
+// The name comes from the status view, which is the stored name or the default: the page
+// does not invent one, and a person who wants a different name sets it in the Setup fields
+// first. One slot, one confirmation, one result.
+func beginWalletCreate(state *app, argument string) {
+	var slot proto.WalletSlotView
+
+	for _, candidate := range state.walletSlots {
+		if candidate.Slot == argument {
+			slot = candidate
+		}
+	}
+
+	if slot.Name == "" {
+		showError(state, "wallets.create", "slot "+argument+" has no wallet name; set one in Setup")
+
+		return
+	}
+
+	kind := "signing"
+
+	if slot.WatchOnly {
+		kind = "watch-only"
+	}
+
+	spec := actionSpec{
+		command: "wallets.create",
+		label:   "Create or load wallet",
+		what: "Ask the " + slot.Chain + " node for a wallet named " + slot.Name + ": it is " +
+			"loaded if the node already has one, and created as a " + kind + " wallet if it " +
+			"does not. No funds move, and nothing is signed.",
+	}
+
+	request := proto.Request{
+		Command: "wallets.create",
+		Args:    map[string]string{"slot": slot.Slot, "name": slot.Name},
+	}
+
+	facts := [][2]string{
+		{"slot", slot.Label},
+		{"chain", slot.Chain},
+		{"name", slot.Name},
+		{"type", kind},
+	}
+
+	openConfirmation(state, spec, request, "", facts)
 }
 
 // fillInput puts a stored value into a field without overwriting what is being typed.

@@ -13,12 +13,12 @@ import (
 	"github.com/gjbrr/blake-swap/pkg/event"
 	"github.com/gjbrr/blake-swap/pkg/market"
 	"github.com/gjbrr/blake-swap/pkg/marketflow"
+	"github.com/gjbrr/blake-swap/pkg/model"
 	"github.com/gjbrr/blake-swap/pkg/nostr"
 	"github.com/gjbrr/blake-swap/pkg/platform"
-	"github.com/gjbrr/blake-swap/pkg/model"
 	"github.com/gjbrr/blake-swap/pkg/proto"
-	"github.com/gjbrr/blake-swap/pkg/store"
 	"github.com/gjbrr/blake-swap/pkg/relaystub"
+	"github.com/gjbrr/blake-swap/pkg/store"
 )
 
 // TestMarketAcceptRefusesBadIDs: a malformed id is refused as what it is, not looked up.

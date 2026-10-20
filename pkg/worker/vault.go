@@ -671,7 +671,7 @@ func handleCommand(
 	}
 
 	switch {
-	case request.Command == "wallets.status":
+	case request.Command == "wallets.status", request.Command == "wallets.create":
 		return engine.Handle(ctx, request)
 	case strings.HasPrefix(request.Command, "vault."),
 		strings.HasPrefix(request.Command, "state."),

@@ -318,6 +318,16 @@ def rig_config() -> dict:
     return rig if rig.get("running") else {}
 
 
+# The four slot labels, which the page renders from the worker's view. They are here rather
+# than repeated per check so a renamed label fails in one place.
+WALLET_SLOT_LABELS = {
+    "blake": "BLAKE signing wallet",
+    "btc": "BTC signing wallet",
+    "blake_watch": "BLAKE watch-only wallet",
+    "btc_watch": "BTC watch-only wallet",
+}
+
+
 def node_cli(chain: str, *args: str, wallet: str = "") -> str:
     """Run one node command against the rig and return its output."""
     rig = rig_config()
@@ -742,8 +752,21 @@ async def configure(ui: Ui, relay_url: str) -> bool:
 
         return False
 
-    if not await ui.wait_panel("wallets", "wallets set"):
-        print(f"FAIL: the wallets were refused:\n{await ui.panel('wallets')}", file=sys.stderr)
+    # The result is one line and the page re-reads the wallet rows after it, so what is
+    # asserted is the refusal being absent rather than the panel keeping a sentence the
+    # refresh is meant to replace.
+    if not await ui.wait_command("wallets.set"):
+        print("FAIL: the wallets were never sent", file=sys.stderr)
+
+        return False
+
+    if not await ui.wait_idle(30):
+        print("FAIL: setting the wallets never finished", file=sys.stderr)
+
+        return False
+
+    if error := await ui.last_error():
+        print(f"FAIL: the wallets were refused: {error}", file=sys.stderr)
 
         return False
 
@@ -1575,6 +1598,271 @@ async def set_file_input(ui: Ui, selector: str, path: Path) -> bool:
         print(f"FAIL: the file input could not be set: {answer['error']}", file=sys.stderr)
 
         return False
+
+    return True
+
+
+async def wallet_row(ui: Ui, slot: str) -> dict:
+    """Read one wallet slot row out of the Settings table."""
+    return json.loads(await ui.js(
+        "(() => {"
+        "  const rows = [...document.querySelectorAll('#wallet-slots tr')];"
+        "  for (const row of rows) {"
+        "    const cells = [...row.querySelectorAll('td')].map((c) => c.textContent.trim());"
+        "    if (!cells.length) { continue; }"
+        f"    if (cells[0] !== {WALLET_SLOT_LABELS.get(slot, '')!r}) {{ continue; }}"
+        "    const button = row.querySelector('button');"
+        "    return JSON.stringify({"
+        "      state: cells[4] || '',"
+        "      name: cells[3] || '',"
+        "      command: button ? button.getAttribute('data-uicmd') : ''"
+        "    });"
+        "  }"
+        "  return JSON.stringify({state: 'missing', name: '', command: ''});"
+        "})()"
+    ))
+
+
+async def wait_wallet_row(ui: Ui, slot: str, want: str, budget: float = 0) -> dict:
+    """Wait for one slot row to report a state."""
+    deadline = time.time() + (budget or ui.budget)
+    row = {"state": "", "name": "", "command": ""}
+
+    while time.time() < deadline:
+        row = await wallet_row(ui, slot)
+
+        if row.get("state") == want:
+            return row
+
+        await asyncio.sleep(0.2)
+
+    return row
+
+
+async def wallet_create_round_trip(ui: Ui, work: Path, relay_url: str) -> bool:
+    """Create the four wallets from Settings and prove the node has them.
+
+    The names are fresh ones, so what is proved is creation rather than a status read: the
+    node is asked through the rig's own RPC afterwards, which is a different client than the
+    page. The wrong-type refusal is checked against a signing wallet deliberately put in a
+    watch-only slot, because that mistake is the one a person cannot see by looking.
+    """
+    #
+    # The names carry this run's stamp: the rig outlives one run of this check, and a name
+    # that already existed would turn "created" into "loaded" and quietly stop proving the
+    # thing the scenario is for.
+    #
+    stamp = str(int(time.time()))
+
+    names = {
+        "blake": "page-signing-blake-" + stamp,
+        "btc": "page-signing-btc-" + stamp,
+        "blake_watch": "page-watch-blake-" + stamp,
+        "btc_watch": "page-watch-btc-" + stamp,
+    }
+
+    # 1. Point the four slots at names the node does not have yet.
+    await ui.view("setup")
+
+    await ui.set("wallet-blake", names["blake"])
+    await ui.set("wallet-btc", names["btc"])
+    await ui.set("wallet-blake-watch", names["blake_watch"])
+    await ui.set("wallet-btc-watch", names["btc_watch"])
+
+    if not await ui.act("wallets-set", confirm=False):
+        return require(False, "the wallet names were not saved")
+
+    if not await ui.wait_idle(ui.budget):
+        return require(False, "saving the wallet names never finished")
+
+    print("PASS: wallets: the four slots point at fresh names")
+
+    # 2. Create each one from its own row, with its own confirmation.
+    await ui.view("settings")
+
+    if not await ui.wait_idle(ui.budget):
+        return require(False, "the settings view never settled")
+
+    for slot, label in WALLET_SLOT_LABELS.items():
+        row = await wait_wallet_row(ui, slot, "absent")
+
+        if not require(row.get("command") == "wallet-create:" + slot,
+                       f"the {slot} row offers {row.get('command')!r} while its state is "
+                       f"{row.get('state')!r}, want a create; rows:\n"
+                       f"{await ui.panel('wallet-slots')}"):
+            return False
+
+        if not await ui.act("wallet-create:" + slot):
+            return require(False, f"creating the {slot} wallet was not confirmed")
+
+        if not await ui.wait_command("wallets.create"):
+            return require(False, f"the {slot} create was never sent")
+
+        if not await ui.wait_idle(ui.budget):
+            return require(False, f"the {slot} create never finished")
+
+        error = await ui.last_error()
+
+        if not require(error == "", f"creating the {slot} wallet was refused: {error}"):
+            return False
+
+        panel = await ui.panel("wallets-action-out")
+
+        if not require("was created" in panel,
+                       f"the {slot} create did not report a creation:\n{panel}"):
+            return False
+
+        row = await wait_wallet_row(ui, slot, "loaded")
+
+        if not require(row.get("state") == "loaded",
+                       f"the {slot} row says {row.get('state')!r} after creating it"):
+            return False
+
+        if not require(row.get("command") == "",
+                       f"the {slot} row still offers {row.get('command')!r} when loaded"):
+            return False
+
+        print(f"PASS: wallets: {label} created as {names[slot]}")
+
+    # 3. The node itself has them, asked through the rig's own CLI.
+    for chain, name, watch in (
+        ("blake", names["blake"], False),
+        ("btc", names["btc"], False),
+        ("blake", names["blake_watch"], True),
+        ("btc", names["btc_watch"], True),
+    ):
+        listed = node_cli(chain, "listwallets")
+
+        if not require(json.dumps(name) in listed,
+                       f"the {chain} node does not list {name}:\n{listed}"):
+            return False
+
+        info = json.loads(node_cli(chain, "getwalletinfo", wallet=name))
+        signing = bool(info.get("private_keys_enabled"))
+
+        if not require(signing != watch,
+                       f"{name} on {chain} has private_keys_enabled={signing},"
+                       f" want a {'watch-only' if watch else 'signing'} wallet"):
+            return False
+
+    print("PASS: wallets: the node lists all four, with the right kind each")
+
+    # 4. A reload keeps the names and the states.
+    await ui.js("location.reload(); 'reloading'")
+    await asyncio.sleep(1)
+
+    if not await ui.wait_boot(ui.budget):
+        return require(False, "the page did not come back after a reload")
+
+    await ui.view("setup")
+    await ui.set("passphrase", "browser-check-passphrase")
+
+    if not await ui.act("vault-unlock", confirm=False):
+        return require(False, "the vault did not unlock after a reload")
+
+    if not await wait_bootstrap(ui):
+        return require(False, "the page did not finish starting after a reload")
+
+    await ui.view("settings")
+
+    if not await ui.wait_idle(ui.budget):
+        return require(False, "the settings view never settled after a reload")
+
+    for slot, name in names.items():
+        row = await wait_wallet_row(ui, slot, "loaded")
+
+        if not require(row.get("state") == "loaded",
+                       f"after a reload the {slot} row says {row.get('state')!r}"):
+            return False
+
+        if not require(row.get("name") == name,
+                       f"after a reload the {slot} row names {row.get('name')!r},"
+                       f" want {name!r}"):
+            return False
+
+    print("PASS: wallets: the names and the states survived a reload")
+
+    # 5. A signing wallet in a watch-only slot, in two states.
+    #
+    # Loaded, the node can say what kind it is, so the row reports the wrong type and
+    # offers nothing: the fix is on the node, not here. Not loaded, the node cannot say, so
+    # the row offers the operation and the worker refuses it after loading it — which is
+    # the refusal text a person would read.
+    wrong = "page-wrong-type-" + stamp
+
+    node_cli("blake", "createwallet", wrong, "false", "true", "", "false", "true")
+
+    await ui.view("setup")
+
+    await ui.set("wallet-blake-watch", wrong)
+
+    if not await ui.act("wallets-set", confirm=False):
+        return require(False, "the wrong-type name was not saved")
+
+    if not await ui.wait_idle(ui.budget):
+        return require(False, "saving the wrong-type name never finished")
+
+    await ui.view("settings")
+
+    if not await ui.wait_idle(ui.budget):
+        return require(False, "the settings view never settled")
+
+    row = await wait_wallet_row(ui, "blake_watch", "wrong type")
+
+    if not require(row.get("state") == "wrong type",
+                   f"the wrong-type wallet is reported as {row.get('state')!r}"):
+        return False
+
+    if not require(row.get("command") == "",
+                   f"the wrong-type row offers {row.get('command')!r}, want no action"):
+        return False
+
+    print("PASS: wallets: a loaded signing wallet in a watch-only slot is the wrong type")
+
+    node_cli("blake", "unloadwallet", wrong)
+
+    # Re-enter the view so the status is read again.
+    await ui.view("market")
+    await ui.view("settings")
+
+    if not await ui.wait_idle(ui.budget):
+        return require(False, "the settings view never settled")
+
+    row = await wait_wallet_row(ui, "blake_watch", "absent")
+
+    if not require(row.get("command") == "wallet-create:blake_watch",
+                   f"the unloaded wrong-type row offers {row.get('command')!r}"):
+        return False
+
+    if not await ui.act("wallet-create:blake_watch"):
+        return require(False, "the wrong-type create was not confirmed")
+
+    if not await ui.wait_command("wallets.create"):
+        return require(False, "the wrong-type create was never sent")
+
+    if not await ui.wait_idle(ui.budget):
+        return require(False, "the wrong-type create never finished")
+
+    refusal = await ui.last_error()
+
+    if not require(
+        "exists as a signing wallet, not a watch-only wallet" in refusal,
+        f"the wrong-type refusal is {refusal!r}",
+    ):
+        return False
+
+    print(f"PASS: wallets: the worker refused a signing wallet in a watch-only slot "
+          f"({refusal[:56]}...)")
+
+    # Put the slot back so the client is left consistent.
+    await ui.view("setup")
+    await ui.set("wallet-blake-watch", names["blake_watch"])
+
+    if not await ui.act("wallets-set", confirm=False):
+        return require(False, "the watch-only name could not be restored")
+
+    if not await ui.wait_idle(ui.budget):
+        return require(False, "restoring the watch-only name never finished")
 
     return True
 
@@ -2909,6 +3197,9 @@ async def drive(url: str, budget: float, work: Path, relay_url: str = "") -> int
         if not await vault_export_import_round_trip(ui, work, str(ignored_match_id)):
             return 1
 
+        if not await wallet_create_round_trip(ui, work, relay_url):
+            return 1
+
         if not await refusal_paths(ui, budget):
             return 1
 
@@ -2951,8 +3242,10 @@ def main() -> int:
 
     binary = ROOT / "bin" / "blake-swap-app"
 
-    if not binary.is_file():
-        subprocess.run(["make", "server"], cwd=ROOT, check=True, stdout=subprocess.DEVNULL)
+    # Built every run, not only when it is missing: a stale binary in bin/ would serve the
+    # page from old code and the check would pass on a proxy allowlist that no longer
+    # matches the source. `make` is incremental, so this is a stat call when nothing changed.
+    subprocess.run(["make", "server"], cwd=ROOT, check=True, stdout=subprocess.DEVNULL)
 
     relay_process, relay_url = start_relay(work)
 

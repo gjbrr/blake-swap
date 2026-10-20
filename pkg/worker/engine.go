@@ -91,6 +91,15 @@ func (d *engineDomain) Handle(ctx context.Context, request proto.Request) proto.
 		return d.walletStatus(ctx, request)
 	}
 
+	//
+	// Creating a wallet is the other command that does not need the engine: it needs the
+	// node and the vault, exactly as the status read does, and demanding an identity and a
+	// relay list first would refuse a first-run step for a reason nobody can act on.
+	//
+	if request.Command == "wallets.create" {
+		return d.createWallet(ctx, request)
+	}
+
 	if request.Command == "engine.status" {
 		return d.status(ctx, request)
 	}
@@ -791,6 +800,7 @@ func (d *engineDomain) walletStatus(ctx context.Context, request proto.Request) 
 		Blake: names[SecretWalletBlake], BTC: names[SecretWalletBTC],
 		BlakeWatch: names[SecretWalletBlakeWatch], BTCWatch: names[SecretWalletBTCWatch],
 		Visible: map[string]bool{},
+		Slots:   walletSlotViews(names),
 	}
 
 	lines := []string{
@@ -800,36 +810,97 @@ func (d *engineDomain) walletStatus(ctx context.Context, request proto.Request) 
 		"BTC watch wallet:   " + views.BTCWatch,
 	}
 
-	if _, err := d.build(ctx); err != nil {
+	if err := d.connect(ctx); err != nil {
 		// The names are still worth reporting when the node is unreachable: the
 		// configuration is a fact, the visibility is an observation.
 		lines = append(lines, "node: "+err.Error())
+
+		for index := range views.Slots {
+			views.Slots[index].State = "unknown"
+		}
 
 		return withView(proto.Result{
 			Command: request.Command, OK: true, Text: strings.Join(lines, "\n"),
 		}, views)
 	}
 
-	for chainName, wallet := range map[string]string{
-		"blake": views.Blake, "btc": views.BTC,
-		"blake-watch": views.BlakeWatch, "btc-watch": views.BTCWatch,
-	} {
-		visible := d.walletVisible(ctx, chainName, wallet)
+	for index := range views.Slots {
+		slot := &views.Slots[index]
 
-		views.Visible[wallet] = visible
+		state, signing := d.slotState(ctx, *slot)
 
-		state := "not visible"
+		slot.Loaded = state != "absent" && state != "unknown"
+		slot.Signing = signing
+		slot.State = state
 
-		if visible {
-			state = "visible"
-		}
+		views.Visible[slot.Name] = slot.Loaded
 
-		lines = append(lines, wallet+": "+state)
+		lines = append(lines, slot.Label+": "+state)
 	}
 
 	return withView(proto.Result{
 		Command: request.Command, OK: true, Text: strings.Join(lines, "\n"),
 	}, views)
+}
+
+// walletSlotViews turns the four stored names into the four rows.
+//
+// The rows are the slots, not the names: a participant whose node has no BTC wallet still
+// has an empty BTC row to fill, and a view built from names would simply omit it.
+func walletSlotViews(names map[string]string) []proto.WalletSlotView {
+	out := make([]proto.WalletSlotView, 0, 4)
+
+	for _, argument := range []string{"blake", "btc", "blake_watch", "btc_watch"} {
+		slot, err := walletSlotFor(argument)
+
+		if err != nil {
+			continue
+		}
+
+		out = append(out, proto.WalletSlotView{
+			Slot: slot.argument, Label: slot.label, Chain: slot.chain,
+			WatchOnly: slot.watch, Name: names[slot.secret], State: "unknown",
+		})
+	}
+
+	return out
+}
+
+// slotState asks the node what one slot holds.
+//
+// "wrong type" is its own state rather than a variant of "loaded": a wallet of the wrong
+// kind is the one case where the client should offer neither Create nor Load, and a person
+// needs to be told which of the two things is wrong.
+func (d *engineDomain) slotState(ctx context.Context, slot proto.WalletSlotView) (string, bool) {
+	node := d.chainNode(slot.Chain)
+
+	if node == nil || slot.Name == "" {
+		return "absent", false
+	}
+
+	loaded, err := node.ListWallets(ctx)
+
+	if err != nil {
+		return "unknown", false
+	}
+
+	if !containsWallet(loaded, slot.Name) {
+		return "absent", false
+	}
+
+	info, err := node.GetWalletInfo(ctx, slot.Name)
+
+	if err != nil {
+		return "unknown", false
+	}
+
+	spec := walletSlot{argument: slot.Slot, chain: slot.Chain, watch: slot.WatchOnly}
+
+	if walletTypeMatches(spec, info) != nil {
+		return "wrong type", info.Signing()
+	}
+
+	return "loaded", info.Signing()
 }
 
 // walletVisible asks the node whether it has a wallet with this name.
@@ -881,35 +952,62 @@ func (d *engineDomain) wallets(ctx context.Context) (map[string]string, error) {
 	return names, nil
 }
 
+// connect builds the two chain nodes from the vault's proxy address.
+//
+// It is separate from build because the wallet commands need the nodes and nothing else:
+// creating a wallet does not need an identity, a relay list or a coordination mode, and a
+// client that demanded them would refuse a first-run setup step for a reason the operator
+// cannot act on.
+func (d *engineDomain) connect(ctx context.Context) error {
+	if d.vault == nil || d.vault.store == nil {
+		return fmt.Errorf("the vault is locked")
+	}
+
+	proxy, err := d.vault.proxyAddress(ctx)
+
+	if err != nil {
+		return err
+	}
+
+	if proxy == "" {
+		return fmt.Errorf("no proxy address: set it with proxy.set")
+	}
+
+	d.btc, err = chain.New(chain.BTC, chain.Config{URL: proxy + "/rpc/btc"})
+
+	if err != nil {
+		return err
+	}
+
+	d.blake, err = chain.New(chain.Blake, chain.Config{URL: proxy + "/rpc/blake"})
+
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// chainNode is the node for one chain, once connect has built them.
+func (d *engineDomain) chainNode(name string) *chain.Node {
+	if name == "blake" {
+		return d.blake
+	}
+
+	return d.btc
+}
+
 // build assembles the engine from the vault.
 func (d *engineDomain) build(ctx context.Context) (*swap.Engine, error) {
 	if d.vault == nil || d.vault.store == nil {
 		return nil, fmt.Errorf("the vault is locked")
 	}
 
-	proxy, err := d.vault.proxyAddress(ctx)
-
-	if err != nil {
+	if err := d.connect(ctx); err != nil {
 		return nil, err
-	}
-
-	if proxy == "" {
-		return nil, fmt.Errorf("no proxy address: set it with proxy.set")
 	}
 
 	identity, err := d.identity(ctx)
-
-	if err != nil {
-		return nil, err
-	}
-
-	d.btc, err = chain.New(chain.BTC, chain.Config{URL: proxy + "/rpc/btc"})
-
-	if err != nil {
-		return nil, err
-	}
-
-	d.blake, err = chain.New(chain.Blake, chain.Config{URL: proxy + "/rpc/blake"})
 
 	if err != nil {
 		return nil, err

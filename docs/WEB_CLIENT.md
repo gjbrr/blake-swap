@@ -201,6 +201,40 @@ wrong passphrase or a damaged file leaves the current vault exactly as it was, w
 restore also works when the current vault will not open: it is reachable from the lock
 screen.
 
+## The four wallets
+
+A participant needs one signing and one watch-only wallet per chain, and Settings both shows
+what the node has and offers to make what it does not. The rows are the four slots, never a
+list of names: an empty BTC row is what tells a person that the BTC wallet is why funding
+refuses.
+
+Each row shows the slot (BLAKE signing, BTC signing, BLAKE watch-only, BTC watch-only), the
+chain, the stored name and the node's answer:
+
+- **absent** - the node has no loaded wallet under that name;
+- **loaded** - the node has it, and it is the kind the slot needs;
+- **wrong type** - the node has it and it is the other kind, so it cannot do what the slot is
+  for. The fix is on the node, so the row offers nothing;
+- **unknown** - the node could not be asked.
+
+Where the row offers **Create or load**, one confirmation follows, and no funds move. The
+command is `wallets.create slot=<blake|btc|blake_watch|btc_watch> name=<name>`: the slot
+decides the vault key and whether the wallet is watch-only, so there is no second flag that
+could disagree with it. If the node already has the wallet it is loaded, not created, and
+the reply says which happened.
+
+There is one control rather than a Create button and a Load button, and that is a limit of
+the node rather than a simplification: `listwallets` lists the *loaded* wallets, so a client
+cannot tell a wallet that does not exist from one that exists on disk and is not loaded. The
+command tries `loadwallet` first and falls back to `createwallet`, so both cases work through
+the one control, and the answer reports `created` only when it really created something.
+
+`createwallet` is sent with `descriptors=true` and with `disable_private_keys` set for the
+watch-only slots, because a legacy wallet cannot import the HTLC descriptor and a signing
+wallet cannot hold a watch-only descriptor. A wallet whose kind does not suit its slot is
+refused in words that name both: `wallet NAME exists as a signing wallet, not a watch-only
+wallet` and the converse.
+
 ## What is not implemented
 
-Not implemented: wallet creation from the page, and any activity log.
+Not implemented: any activity log.

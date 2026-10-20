@@ -116,6 +116,13 @@ fallbackfee=0.0001
 # no-txindex case.
 txindex=0
 
+# Serve BIP157 compact block filters. The wasm wallet follows the chain
+# through nostrino, and a node without these two flags answers
+# getcfheaders with "peer requested unsupported block filter type: 0" and
+# drops the peer.
+blockfilterindex=1
+peerblockfilters=1
+
 [regtest]
 rpcbind=127.0.0.1
 rpcallowip=127.0.0.1

@@ -340,9 +340,10 @@ Five layers. Arrows are import direction; nothing lower imports anything higher.
 | `cmd/blake-swap-cli` | `argparse` + `main()` | drop-in CLI: parsing, dispatch, output, exit codes |
 | `cmd/server` | (new) | static hosting, `/rpc/{btc,blake}` proxy, config, auth token. Built as `bin/blake-swap-app` |
 | `pkg/proto` | (new) | page ↔ worker request/response contract |
-| `pkg/worker`, `pkg/page` | (new / extends) | worker domain wiring (vault, engine, market, coord); the page's six views, its confirmation dialog and its busy rule |
+| `pkg/worker`, `pkg/page` | (new / extends) | worker domain wiring (vault, engine, market, coord, activity); the page's eight views, its confirmation dialog, its file download and upload, and its busy rule |
 | `pkg/view` | (new) | engine result → view model, so the page renders instead of parsing |
 | `pkg/marketops` | (new) | the market accept path shared by the CLI and the worker: takes, accept-take, publish-match, accept-match, cancel |
+| `pkg/vaultbackup` | (new) | the vault backup format and its parser: the versioned envelope, the checksum over a canonical string, the size and shape bounds, and `Parse` for a file the client did not write |
 | `pkg/nodeconfig` | `tests/node_config.py` | which node a command talks to: environment, then a running rig, then conventional locations; a stopped rig is a reason, not a fallback |
 | `pkg/relaystub` | (new) | a loopback relay the suites and the browser check drive, so no test needs a public relay |
 | `cmd/blake-swap-relay` | (new) | the same relay as a binary, for a two-host run |

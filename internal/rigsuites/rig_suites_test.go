@@ -279,6 +279,33 @@ func TestParticipantIsolationSuite(t *testing.T) {
 	r.Expect(t, bob, messages, "protocol requires alice", "fund-blake", id)
 }
 
+// assertTimeoutWindows checks the cross-chain safety margin the record carries.
+//
+// The record prints BTC window, Bob's recovery budget and the BLAKE window in seconds for a
+// v1.5 record; the BLAKE window must exceed the BTC window by at least the recovery budget.
+// Heights are deliberately not compared: they belong to independent chains.
+func assertTimeoutWindows(
+	t *testing.T, r *rigtest.Rig, side *rigtest.Side, messages, id string,
+) {
+	t.Helper()
+
+	btcWindow := r.FieldInt(t, side, messages, id, "btc_window")
+	recovery := r.FieldInt(t, side, messages, id, "bob_recovery")
+	blakeWindow := r.FieldInt(t, side, messages, id, "blake_window")
+
+	if btcWindow <= 0 || recovery <= 0 || blakeWindow <= 0 {
+		t.Fatalf("the record does not carry the timeout windows: %d/%d/%d",
+			btcWindow, recovery, blakeWindow)
+	}
+
+	if gap := blakeWindow - btcWindow; gap < recovery {
+		t.Fatalf(
+			"BLAKE window %d is only %d s past Bitcoin's %d, less than Bob's %d s budget",
+			blakeWindow, gap, btcWindow, recovery,
+		)
+	}
+}
+
 // Parity: tests/pre_btc_refund_tests.py
 //
 // Alice funds BLAKE and Bob never funds Bitcoin. Until BLAKE's own timelock she
@@ -294,12 +321,33 @@ func TestPreBTCRefundSuite(t *testing.T) {
 	r.Run(t, alice, messages, "publish-blake-funded", id)
 	r.Run(t, bob, messages, "receive-blake-funded", id)
 
-	btcTimeout := r.FieldInt(t, alice, messages, id, "btc_timeout")
-	blakeTimeout := r.FieldInt(t, alice, messages, id, "blake_timeout")
+	//
+	// The two CLTV heights are absolute heights on two independent chains, so their
+	// ordering means nothing: a BLAKE height can be above or below a Bitcoin height
+	// depending on how many blocks each chain happens to have mined. The policy records
+	// the safety margins as wall-clock windows instead, and that difference is the
+	// invariant. Asserting the heights here was comparing two unrelated counters.
+	//
+	// pkg/timeout is the authority: ValidatePlan accepts a plan when
+	// BlakeWindowSeconds - BTCWindowSeconds covers Bob's recovery budget. This test
+	// restates the same gap from what the record prints, so a policy change that
+	// silently dropped the margin would fail here as well as in the unit suite.
+	//
+	assertTimeoutWindows(t, r, alice, messages, id)
 
-	if blakeTimeout <= btcTimeout {
-		t.Fatalf("the BLAKE timeout %d is not after Bitcoin's %d", blakeTimeout, btcTimeout)
-	}
+	// And the same invariant on a pair of chains at very different heights, which is
+	// the case an absolute comparison cannot survive: the heights differ by hundreds of
+	// blocks, the windows do not.
+	r.Mine(t, "btc", alice.Role, 300)
+
+	other := r.Handshake(t, alice, bob, messages)
+
+	r.Run(t, alice, messages, "fund-blake", other)
+
+	assertTimeoutWindows(t, r, alice, messages, other)
+
+	// The CLTV deadline is a BLAKE height, so it is read from the swap this test refunds.
+	blakeTimeout := r.FieldInt(t, alice, messages, id, "blake_timeout")
 
 	// Before her own timelock Alice waits. There is nothing to claim and nothing
 	// to refund, and a refusal is the honest answer.

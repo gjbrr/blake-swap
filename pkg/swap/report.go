@@ -273,7 +273,10 @@ func (e *Engine) WatchHTLC(ctx context.Context, swapID string) (*fund.WatchStatu
 			wallet = e.BTCWatchWallet
 		}
 
-		status := fund.ImportWatchOnly(ctx, node, swap, ch, derived, wallet)
+		status := fund.ImportWatchOnly(
+			ctx, node, swap, ch, derived, wallet,
+			fund.ImportWhenForRecovery(ctx, node, swap),
+		)
 		statuses = append(statuses, status)
 	}
 

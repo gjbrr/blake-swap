@@ -175,6 +175,27 @@ scripts/blake engine watch-htlc <swap-id>            # both chains
 scripts/blake engine watch-htlc <swap-id> --chain blake --json
 ```
 
+**The rescan start is chosen per command, and it matters.** The automatic
+import used to say `"now"` everywhere, which is right only when the descriptor
+describes an output that does not exist yet. It is wrong for the recovery
+command: a descriptor imported after the funding block with `"now"` stores the
+address, never scans the block that funded it, and leaves a funded HTLC that
+the watch-only wallet reports as somebody else's. So the engine passes an
+explicit timestamp:
+
+- `fund-blake` / `fund-btc`, before the broadcast: `"now"` on a chain with
+  history, and `0` on regtest, where a full rescan is free and catches a block
+  mined between the import and the funding transaction;
+- `watch-htlc` and the dashboard's watch status, which may run long after the
+  fact: `0` on regtest, and the swap's creation time less a day on a chain with
+  history, which is the earliest block that can hold its funding.
+
+The import's own verdict is reported: `watch-htlc` prints
+`PASS: descriptor imported` or the node's reason, and a watch wallet that
+turns out to have private keys enabled is refused by name rather than by the
+node's "cannot import descriptor without private keys to a wallet with private
+keys enabled".
+
 What is still manual is the part that needs a *private* key: if the signing
 wallet has already lost the keys, the descriptor in the watch-only wallet
 cannot spend, and sections 3–5 above are the drill. The private form needs its

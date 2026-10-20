@@ -43,6 +43,13 @@ type Node interface {
 	ListWallets(ctx context.Context) ([]string, error)
 	EnsureWallet(ctx context.Context, wallet string, watchOnly bool) error
 	DescriptorInfo(ctx context.Context, body string) (*chain.DescriptorInfo, error)
+	// GetWalletInfo reports what kind of wallet a name is, so a watch-only import can
+	// refuse a signing wallet by naming the problem instead of letting the node refuse
+	// the import in a message nothing reads.
+	GetWalletInfo(ctx context.Context, wallet string) (*chain.WalletInfo, error)
+	// ChainInfo is the node's own description of the chain, which decides the rescan
+	// start a descriptor import uses.
+	ChainInfo(ctx context.Context) (*chain.ChainInfo, error)
 	DeriveAddresses(ctx context.Context, descriptor string) ([]string, error)
 	TxOut(ctx context.Context, txid string, vout int64) (*chain.TxOut, error)
 	RawTx(ctx context.Context, txid, blockHash string) (*chain.Tx, error)
@@ -192,7 +199,10 @@ func Fund(
 		// case it exists to protect.
 		//
 		if !opts.SkipWatchOnly {
-			receipt.Watch = ImportWatchOnly(ctx, node, swap, ch, derived, watchWallet(opts, ch))
+			receipt.Watch = ImportWatchOnly(
+				ctx, node, swap, ch, derived, watchWallet(opts, ch),
+				importWhenForFunding(ctx, node),
+			)
 		}
 
 		//

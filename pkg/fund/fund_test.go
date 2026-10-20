@@ -80,6 +80,25 @@ func (f *fakeChain) EnsureWallet(_ context.Context, wallet string, watchOnly boo
 	return nil
 }
 
+func (f *fakeChain) GetWalletInfo(
+	_ context.Context, wallet string,
+) (*chain.WalletInfo, error) {
+	held, ok := f.wallets[wallet]
+
+	if !ok {
+		return nil, fmt.Errorf("wallet %s not loaded", wallet)
+	}
+
+	return &chain.WalletInfo{
+		WalletName:         wallet,
+		PrivateKeysEnabled: !held.watchOnly,
+	}, nil
+}
+
+func (f *fakeChain) ChainInfo(context.Context) (*chain.ChainInfo, error) {
+	return &chain.ChainInfo{Chain: "regtest", Blocks: f.height}, nil
+}
+
 func (f *fakeChain) DescriptorInfo(_ context.Context, body string) (*chain.DescriptorInfo, error) {
 	sum := sha256.Sum256([]byte(body))
 
@@ -207,7 +226,9 @@ func (w *fakeWallet) AddressInfo(_ context.Context, address string) (*chain.Addr
 	return &chain.AddressInfo{Address: address, Solvable: w.solvable}, nil
 }
 
-func (w *fakeWallet) ImportDescriptor(_ context.Context, descriptor string) (*chain.ImportResult, error) {
+func (w *fakeWallet) ImportDescriptor(
+	_ context.Context, descriptor string, _ chain.ImportWhen,
+) (*chain.ImportResult, error) {
 	if w.failImprt {
 		return &chain.ImportResult{
 			Success: false,
@@ -575,6 +596,16 @@ func TestFundWatchOnlyFailureIsReportedNotFatal(t *testing.T) {
 
 	node.Bind("alice").(*fakeWallet).balance = decimal.MustParse("5")
 	node.EnsureWallet(context.Background(), "alice-watch", true)
+	//
+	// The watch wallet is provisioned the way the node would have it: watch-only, with
+	// no keys. A wallet bound into existence by the test would be a signing wallet, and
+	// the import would be refused for holding private keys — which is the refusal the
+	// next test is about, not this one.
+	//
+	if err := node.EnsureWallet(context.Background(), "alice-watch", true); err != nil {
+		t.Fatal(err)
+	}
+
 	node.Bind("alice-watch").(*fakeWallet).failImprt = true
 
 	receipt, err := Fund(context.Background(), node, swap, chain.Blake, fundedOptions(chain.Blake))
@@ -602,6 +633,10 @@ func TestFundWatchOnlyFailureIsReportedNotFatal(t *testing.T) {
 func TestFundImportHappensBeforeTheBroadcast(t *testing.T) {
 	node := newFakeChain()
 	swap := testSwap()
+
+	if err := node.EnsureWallet(context.Background(), "alice-watch", true); err != nil {
+		t.Fatal(err)
+	}
 
 	watch := node.Bind("alice-watch").(*fakeWallet)
 	watch.failImprt = false

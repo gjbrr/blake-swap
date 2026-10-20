@@ -36,24 +36,32 @@ func watchWallet(opts Options, ch chain.Chain) string {
 	return WatchWalletName(ch, opts.Wallet, opts.WatchWallet)
 }
 
-// WatchStatus is the outcome of the pre-funding watch-only import.
+// WatchStatus is the outcome of a watch-only import.
 type WatchStatus struct {
 	Chain      chain.Chain
 	Wallet     string
 	Address    string
 	Descriptor string
-	Imported   bool
-	Reason     string
+	// When is the rescan start the import used, which is what makes a silent miss
+	// explainable.
+	When     chain.ImportWhen
+	Imported bool
+	Reason   string
 }
 
-// ImportWatchOnly records the HTLC in a watch-only wallet before funds move.
+// ImportWatchOnly records the HTLC in a watch-only wallet and reports what the
+// node said about it.
 //
 // Idempotent: the descriptor is a pure function of the swap terms, so a second
 // call imports an identical string and the node reports that as a warning
-// rather than an error. The timestamp is "now" on purpose — the descriptor is
-// imported before the HTLC is funded, and rescanning the chain to find an
-// output that does not exist yet would be wasted work. What the import buys is
-// that the output is *solvable* the moment it appears.
+// rather than an error.
+//
+// when is the rescan start, and it is not a detail. An import with "now" that
+// happens after the funding block has been mined stores the descriptor and
+// never sees the output, and the wallet then reports a funded HTLC as somebody
+// else's; the caller decides between ImportNow (nothing exists yet),
+// ImportEverything on regtest and for a restore, and ImportFrom a creation time
+// on a chain with real history. See chain.ImportWhen.
 func ImportWatchOnly(
 	ctx context.Context,
 	node Node,
@@ -61,12 +69,14 @@ func ImportWatchOnly(
 	ch chain.Chain,
 	derived *contract.Contract,
 	wallet string,
+	when chain.ImportWhen,
 ) WatchStatus {
 	status := WatchStatus{
 		Chain:      ch,
 		Wallet:     wallet,
 		Address:    derived.Address,
 		Descriptor: derived.Descriptor,
+		When:       when,
 	}
 
 	if err := ensureWatchOnly(ctx, node, wallet); err != nil {
@@ -75,7 +85,7 @@ func ImportWatchOnly(
 		return status
 	}
 
-	result, err := node.Bind(wallet).ImportDescriptor(ctx, derived.Descriptor)
+	result, err := node.Bind(wallet).ImportDescriptor(ctx, derived.Descriptor, when)
 
 	if err != nil {
 		status.Reason = err.Error()
@@ -94,14 +104,94 @@ func ImportWatchOnly(
 	return status
 }
 
-// ensureWatchOnly loads the wallet, creating it without keys when absent.
+// ensureWatchOnly loads the wallet, creating it without keys when absent, and
+// refuses one that has keys.
 //
 // disable_private_keys and blank are the arguments that matter: the wallet holds
 // no key of its own and generates none, so it can never be confused with the
 // signing wallet, and importing the public HTLC descriptor is the only way it
 // learns about an output.
+//
+// The type check is not paranoia. A name that already exists as a signing wallet
+// keeps working for every other command, and the node refuses the import with
+// "Cannot import descriptor without private keys to a wallet with private keys
+// enabled" — a refusal that used to be swallowed, leaving a funded HTLC that the
+// watch-only wallet could not see. Naming the problem here is what turns that
+// into an operator's answer.
 func ensureWatchOnly(ctx context.Context, node Node, wallet string) error {
-	return node.EnsureWallet(ctx, wallet, true)
+	if err := node.EnsureWallet(ctx, wallet, true); err != nil {
+		return err
+	}
+
+	info, err := node.GetWalletInfo(ctx, wallet)
+
+	if err != nil {
+		return fmt.Errorf("wallet %s: %w", wallet, err)
+	}
+
+	if info.Signing() {
+		return fmt.Errorf(
+			"wallet %s has private keys enabled, so it cannot hold a watch-only descriptor; "+
+				"set a watch-only wallet name for this chain", wallet,
+		)
+	}
+
+	return nil
+}
+
+// recoveryRescanMarginSeconds is how far before a swap's creation its recovery import
+// starts.
+//
+// A block's timestamp is set by the miner and can be earlier than the moment the block was
+// found, so a rescan from exactly the creation second can step over the funding block. A
+// day of blocks is a cheap margin on a chain with history and free on regtest.
+const recoveryRescanMarginSeconds = 24 * 60 * 60
+
+// importWhenForFunding is the rescan start a pre-funding import uses.
+//
+// Nothing exists yet, so "now" is right and cheapest. On regtest a rescan from the
+// beginning costs nothing and survives the one race that matters: a block mined between the
+// import and the funding transaction, which is exactly what a fast regtest does. A node
+// that cannot say what chain it follows is treated as a chain with history, where "now" is
+// the harmless answer for an import that expects no history.
+func importWhenForFunding(ctx context.Context, node Node) chain.ImportWhen {
+	if regtest, err := isRegtest(ctx, node); err == nil && regtest {
+		return chain.ImportEverything()
+	}
+
+	return chain.ImportNow()
+}
+
+// ImportWhenForRecovery is the rescan start a recovery import uses.
+//
+// The opposite trade: money may already have moved, so an import that misses it is worse
+// than a slow one. On regtest the whole chain. On a chain with history, the swap's creation
+// time less a margin. A record with no creation time, or a node that cannot say what chain
+// it follows, rescans from the beginning: correct and possibly slow, and the status carries
+// the choice so an operator can see it.
+func ImportWhenForRecovery(
+	ctx context.Context, node Node, swap *model.Swap,
+) chain.ImportWhen {
+	if regtest, err := isRegtest(ctx, node); err == nil && regtest {
+		return chain.ImportEverything()
+	}
+
+	if swap != nil && swap.CreatedAt > 0 {
+		return chain.ImportFrom(swap.CreatedAt - recoveryRescanMarginSeconds)
+	}
+
+	return chain.ImportEverything()
+}
+
+// isRegtest asks the node whether it follows a regtest chain.
+func isRegtest(ctx context.Context, node Node) (bool, error) {
+	info, err := node.ChainInfo(ctx)
+
+	if err != nil {
+		return false, err
+	}
+
+	return info.Chain == "regtest", nil
 }
 
 // Solvability says whether any loaded wallet can currently solve this swap's

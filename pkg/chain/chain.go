@@ -449,6 +449,48 @@ func (n *Node) EstimateSmartFee(ctx context.Context, confTarget int64) (*FeeEsti
 	return &estimate, nil
 }
 
+// ChainInfo is the part of getblockchaininfo the client decides with.
+type ChainInfo struct {
+	// Chain is main, test, signet or regtest, as the node spells it.
+	Chain string `json:"chain"`
+	// Blocks is the current tip height, in blocks.
+	Blocks int64 `json:"blocks"`
+	// BestBlockHash is the tip hash.
+	BestBlockHash string `json:"bestblockhash"`
+}
+
+// ChainInfo returns the node's own description of the chain it follows.
+func (n *Node) ChainInfo(ctx context.Context) (*ChainInfo, error) {
+	raw, err := n.call(ctx, "getblockchaininfo")
+
+	if err != nil {
+		return nil, err
+	}
+
+	var info ChainInfo
+
+	if err := decode(raw, &info); err != nil {
+		return nil, fmt.Errorf("%s: getblockchaininfo: %w", n.Chain, err)
+	}
+
+	return &info, nil
+}
+
+// IsRegtest reports whether the node follows a regtest chain.
+//
+// It is asked rather than configured because the answer belongs to the node: the same
+// datadir can be started against a different network, and a client that assumed one would
+// choose the wrong rescan start silently.
+func (n *Node) IsRegtest(ctx context.Context) (bool, error) {
+	info, err := n.ChainInfo(ctx)
+
+	if err != nil {
+		return false, err
+	}
+
+	return info.Chain == "regtest", nil
+}
+
 // ListWallets returns the loaded wallet names.
 func (n *Node) ListWallets(ctx context.Context) ([]string, error) {
 	raw, err := n.call(ctx, "listwallets")
@@ -747,11 +789,74 @@ func (n *Node) DeriveAddresses(ctx context.Context, descriptor string) ([]string
 	return addresses, nil
 }
 
+// ImportWhen is the history start an imported descriptor rescans from.
+//
+// It is the one argument of importdescriptors that decides whether an import sees money
+// that already moved, and getting it wrong is silent: the descriptor is stored, the address
+// derives, and the wallet then reports an output it holds as somebody else's. Three cases
+// cover the two callers:
+//
+//   - a descriptor imported *before* funding describes outputs that do not exist yet, so
+//     there is nothing to rescan and "now" is both correct and cheapest;
+//   - a descriptor restored into a fresh watch-only wallet must find what already exists,
+//     so it rescans from the beginning (free on regtest, and the reason a mainnet restore
+//     should pass a creation time instead);
+//   - a recovery import on a chain with real history rescans from the moment the swap
+//     was created, which is the earliest block that can hold its funding.
+type ImportWhen struct {
+	// Now means this describes a new address set and there is nothing in the past.
+	Now bool
+	// Unix is the rescan start when Now is false. Zero means the beginning of the chain.
+	Unix int64
+}
+
+// ImportNow is the history start for a descriptor that describes only new outputs.
+func ImportNow() ImportWhen { return ImportWhen{Now: true} }
+
+// ImportEverything is the history start of a wallet that must find what already exists.
+//
+// It is cheap on regtest and expensive on a chain with a long history, so the recovery
+// path prefers ImportFrom with the swap's creation time when it has one.
+func ImportEverything() ImportWhen { return ImportWhen{} }
+
+// ImportFrom is the history start at a unix time.
+func ImportFrom(unix int64) ImportWhen {
+	if unix <= 0 {
+		return ImportEverything()
+	}
+
+	return ImportWhen{Unix: unix}
+}
+
+// render is the value importdescriptors takes: "now" or an epoch second.
+func (w ImportWhen) render() any {
+	if w.Now {
+		return "now"
+	}
+
+	return w.Unix
+}
+
+// String describes the choice, for an error or an operator's report.
+func (w ImportWhen) String() string {
+	if w.Now {
+		return "now"
+	}
+
+	if w.Unix == 0 {
+		return "the beginning of the chain"
+	}
+
+	return fmt.Sprintf("unix %d", w.Unix)
+}
+
 // ImportDescriptor imports a descriptor into the bound wallet.
-func (n *Node) ImportDescriptor(ctx context.Context, descriptor string, watchOnly bool) error {
+func (n *Node) ImportDescriptor(
+	ctx context.Context, descriptor string, watchOnly bool, when ImportWhen,
+) error {
 	request := []map[string]any{{
 		"desc":      descriptor,
-		"timestamp": "now",
+		"timestamp": when.render(),
 		"active":    false,
 		"watchonly": watchOnly,
 	}}
@@ -787,8 +892,10 @@ type Wallet interface {
 	// whether it can currently solve it.
 	AddressInfo(ctx context.Context, address string) (*AddressInfo, error)
 	// ImportDescriptor imports the descriptor and reports the node's verdict
-	// per descriptor rather than as one opaque error.
-	ImportDescriptor(ctx context.Context, descriptor string) (*ImportResult, error)
+	// per descriptor rather than as one opaque error. when is the rescan start,
+	// and it is the argument that decides whether an import sees money that
+	// already moved.
+	ImportDescriptor(ctx context.Context, descriptor string, when ImportWhen) (*ImportResult, error)
 	// SendToAddress sends funds at an explicit feerate, or at the node's own
 	// estimate when the rate is nil.
 	SendToAddress(ctx context.Context, address string, sats amount.Sats, feeRate *decimal.Dec) (string, error)
@@ -832,8 +939,10 @@ func (w *walletNode) AddressInfo(ctx context.Context, address string) (*AddressI
 	return w.node.AddressInfo(ctx, address)
 }
 
-func (w *walletNode) ImportDescriptor(ctx context.Context, descriptor string) (*ImportResult, error) {
-	return w.node.ImportDescriptorResult(ctx, descriptor)
+func (w *walletNode) ImportDescriptor(
+	ctx context.Context, descriptor string, when ImportWhen,
+) (*ImportResult, error) {
+	return w.node.ImportDescriptorResult(ctx, descriptor, when)
 }
 
 func (w *walletNode) SendToAddress(
@@ -944,10 +1053,12 @@ func (r ImportResult) Reason() string {
 // funding needs the verdict rather than a bool: a node that refuses the import
 // has to be reported to the operator, but it must not stop the funding that is
 // already in progress — see pkg/fund.
-func (n *Node) ImportDescriptorResult(ctx context.Context, descriptor string) (*ImportResult, error) {
+func (n *Node) ImportDescriptorResult(
+	ctx context.Context, descriptor string, when ImportWhen,
+) (*ImportResult, error) {
 	request := []map[string]any{{
 		"desc":      descriptor,
-		"timestamp": "now",
+		"timestamp": when.render(),
 		"active":    false,
 		"internal":  false,
 	}}

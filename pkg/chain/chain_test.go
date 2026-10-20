@@ -528,7 +528,9 @@ func TestRigWalletSurface(t *testing.T) {
 
 	watch := node.Bind(watchName)
 
-	result, err := watch.ImportDescriptor(ctx, compiled.Descriptor)
+	// A wallet that already holds the HTLC is what a restore has to find, so the import
+	// rescans from the beginning rather than from now.
+	result, err := watch.ImportDescriptor(ctx, compiled.Descriptor, ImportEverything())
 
 	if err != nil {
 		t.Fatal(err)

@@ -175,7 +175,7 @@ func (w *fakeWallet) AddressInfo(context.Context, string) (*chain.AddressInfo, e
 	return nil, fmt.Errorf("unused")
 }
 
-func (w *fakeWallet) ImportDescriptor(context.Context, string) (*chain.ImportResult, error) {
+func (w *fakeWallet) ImportDescriptor(context.Context, string, chain.ImportWhen) (*chain.ImportResult, error) {
 	return nil, fmt.Errorf("unused")
 }
 

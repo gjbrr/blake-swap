@@ -74,6 +74,29 @@ func (c *chainNode) EnsureWallet(_ context.Context, wallet string, watchOnly boo
 	return nil
 }
 
+// GetWalletInfo answers for the wallets this fake has, so the watch-only import can
+// check the kind rather than reaching a nil method on the embedded interface.
+func (c *chainNode) GetWalletInfo(
+	_ context.Context, wallet string,
+) (*chain.WalletInfo, error) {
+	held, ok := c.wallets[wallet]
+
+	if !ok {
+		return nil, fmt.Errorf("wallet %s not loaded", wallet)
+	}
+
+	return &chain.WalletInfo{
+		WalletName:         wallet,
+		PrivateKeysEnabled: !held.watchOnly,
+	}, nil
+}
+
+// ChainInfo says regtest: the whole funding flow here is the regtest one, where a
+// rescan from the beginning is free.
+func (c *chainNode) ChainInfo(context.Context) (*chain.ChainInfo, error) {
+	return &chain.ChainInfo{Chain: "regtest", Blocks: c.height}, nil
+}
+
 func (c *chainNode) DescriptorInfo(_ context.Context, body string) (*chain.DescriptorInfo, error) {
 	sum := sha256.Sum256([]byte(body))
 
@@ -211,7 +234,9 @@ func (w *testWallet) AddressInfo(_ context.Context, address string) (*chain.Addr
 	}, nil
 }
 
-func (w *testWallet) ImportDescriptor(_ context.Context, descriptor string) (*chain.ImportResult, error) {
+func (w *testWallet) ImportDescriptor(
+	_ context.Context, descriptor string, _ chain.ImportWhen,
+) (*chain.ImportResult, error) {
 	w.imported = append(w.imported, descriptor)
 
 	return &chain.ImportResult{Success: true}, nil

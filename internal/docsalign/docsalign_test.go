@@ -221,8 +221,20 @@ func TestReferencedPathsExist(t *testing.T) {
 	root := repoRoot(t)
 
 	// Generated at run time and deliberately not committed.
+	//
+	// A documented path that a build or a run produces is not a path a clean checkout
+	// has. The check exists to catch a stale reference, so an output named here is a
+	// path the documentation is allowed to name without the file being committed: the
+	// wasm modules come from `make wasm`, and the two screenshots are written by the
+	// check script that captures them. Requiring them in a clean checkout would make
+	// this test fail on every clone and pass only on a machine that had built once.
+	//
 	generated := map[string]bool{
-		"scripts/participant-env": true,
+		"scripts/participant-env":  true,
+		"web/page.wasm":            true,
+		"web/worker.wasm":          true,
+		"web/hello-screenshot.png": true,
+		"web/boot-screenshot.png":  true,
 	}
 
 	pattern := regexp.MustCompile(

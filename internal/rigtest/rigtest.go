@@ -250,22 +250,77 @@ func EnsureWallets(t *testing.T, r *Rig) {
 			t.Fatalf("listwallets: %v", err)
 		}
 
-		for _, wallet := range []string{"alice", "bob", "alice-watch", "bob-watch"} {
-			if strings.Contains(loaded, `"`+wallet+`"`) {
-				continue
+		for _, wallet := range []struct {
+			name string
+			// watchOnly wallets hold descriptors and no keys, which is what the
+			// settlement path imports an HTLC into. Creating one as a signing
+			// wallet would make every watch-only import fail with "Cannot import
+			// descriptor without private keys to a wallet with private keys
+			// enabled" -- and the import failure is reported rather than raised,
+			// so the suite would fail later with a wallet that cannot see a
+			// funded HTLC.
+			watchOnly bool
+		}{
+			{"alice", false},
+			{"bob", false},
+			{"alice-watch", true},
+			{"bob-watch", true},
+		} {
+			if !strings.Contains(loaded, `"`+wallet.name+`"`) {
+				if _, err := r.node(chain.cli, chain.datadir, "loadwallet",
+					wallet.name); err != nil {
+					// A descriptor wallet, because the HTLC is a descriptor and a
+					// legacy wallet cannot import one.
+					flags := "false"
+
+					if wallet.watchOnly {
+						flags = "true"
+					}
+
+					if _, err := r.node(chain.cli, chain.datadir, "createwallet",
+						wallet.name, flags, "false", "", "false", "true"); err != nil {
+						t.Fatalf("creating wallet %s: %v", wallet.name, err)
+					}
+				}
 			}
 
-			if _, err := r.node(chain.cli, chain.datadir, "loadwallet", wallet); err == nil {
-				continue
-			}
-
-			// A descriptor wallet, because the HTLC is a descriptor and a legacy
-			// wallet cannot import one.
-			if _, err := r.node(chain.cli, chain.datadir, "createwallet",
-				wallet, "false", "false", "", "false", "true"); err != nil {
-				t.Fatalf("creating wallet %s: %v", wallet, err)
-			}
+			r.assertWalletKind(t, chain.cli, chain.datadir, wallet.name, wallet.watchOnly)
 		}
+	}
+}
+
+// assertWalletKind fails when a provisioned wallet is not the kind its name says.
+//
+// A watch-only name that is a signing wallet keeps working for every command except the one
+// that matters: the watch-only descriptor import, whose refusal the settlement path reports
+// instead of raising. Catching it here turns a confusing suite failure into a rig problem
+// with a name.
+func (r *Rig) assertWalletKind(
+	t *testing.T, cli, datadir, wallet string, watchOnly bool,
+) {
+	t.Helper()
+
+	output, err := r.node(cli, datadir, "-rpcwallet="+wallet, "getwalletinfo")
+
+	if err != nil {
+		t.Fatalf("getwalletinfo %s: %v", wallet, err)
+	}
+
+	var info struct {
+		PrivateKeysEnabled bool `json:"private_keys_enabled"`
+	}
+
+	if err := json.Unmarshal([]byte(output), &info); err != nil {
+		t.Fatalf("getwalletinfo %s: %v: %s", wallet, err, output)
+	}
+
+	if info.PrivateKeysEnabled == watchOnly {
+		t.Fatalf(
+			"rig wallet %s has private_keys_enabled=%v, so it is a %s wallet, not a %s one",
+			wallet, info.PrivateKeysEnabled,
+			map[bool]string{true: "signing", false: "watch-only"}[info.PrivateKeysEnabled],
+			map[bool]string{true: "watch-only", false: "signing"}[watchOnly],
+		)
 	}
 }
 

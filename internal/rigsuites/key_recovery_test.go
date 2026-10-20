@@ -117,6 +117,22 @@ func TestHTLCKeyRecoverySuite(t *testing.T) {
 		t.Fatalf("the plan's address is not a regtest address: %q", address)
 	}
 
+	//
+	// The watch-only import is asserted before the address is, because the two failures
+	// look identical from outside: a wallet that cannot see the HTLC is either a wallet
+	// the import never reached or a wallet whose import rescanned the wrong range. The
+	// command's own verdict says which.
+	//
+	// watch-htlc is the recovery path as well as the pre-funding one, so it rescans from
+	// the beginning of a regtest chain. That is what makes a descriptor imported *after*
+	// the funding block find an output that already exists.
+	//
+	watchedImport := r.Run(t, alice, messages, "watch-htlc", id)
+
+	if !strings.Contains(watchedImport, "PASS: descriptor imported") {
+		t.Fatalf("the watch-only import did not succeed:\n%s", watchedImport)
+	}
+
 	// The watch-only wallet imported the descriptor when the leg was funded, so it
 	// can see the HTLC even though it cannot spend it.
 	watched := walletAddressInfo(t, r, "blake", "alice-watch", address)

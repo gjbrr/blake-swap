@@ -104,6 +104,9 @@ func (d *marketDomain) Handle(ctx context.Context, request proto.Request) proto.
 	case "market.accept-match":
 		return d.acceptMatch(ctx, request)
 
+	case "market.accept-reverse-match":
+		return d.acceptReverseMatch(ctx, request)
+
 	case "market.cancel":
 		return d.cancel(ctx, request)
 	}
@@ -764,6 +767,57 @@ func (d *marketDomain) acceptMatch(ctx context.Context, request proto.Request) p
 		Command: request.Command,
 		OK:      true,
 		Text:    "imported match " + imported.MatchID + " as swap " + imported.SwapID,
+	}, action)
+}
+
+// acceptReverseMatch imports a btc-for-blake match as its taker.
+//
+// In this direction the maker is protocol Bob and the taker is protocol Alice, so this is
+// where the taker creates the secret against deadlines it derived itself — which is why it
+// is a separate command rather than a flag on the forward one.
+func (d *marketDomain) acceptReverseMatch(ctx context.Context, request proto.Request) proto.Result {
+	matchID := strings.ToLower(strings.TrimSpace(request.Args["match_id"]))
+
+	if len(matchID) != 64 {
+		return proto.Result{
+			Command: request.Command,
+			Error:   "match_id must be the full 64-character Nostr event ID",
+		}
+	}
+
+	env, _, err := d.acceptEnv(ctx)
+
+	if err != nil {
+		return failed(request.Command, err)
+	}
+
+	imported, err := marketops.ImportReverseMatch(ctx, env, matchID, nil, marketops.MatchHooks{})
+
+	if err != nil {
+		return failed(request.Command, err)
+	}
+
+	action := view.Action(request.Command, imported.SwapID, "accept-reverse-market-match")
+	action.Message = imported.MatchID
+	action.Details = []proto.ActionFact{
+		{Label: "match id", Value: imported.MatchID},
+		{Label: "maker", Value: imported.Maker},
+		{Label: "taker", Value: imported.Taker},
+		{Label: "BLAKE", Value: imported.Blake.Format()},
+		{Label: "BTC sats", Value: strconv.FormatInt(imported.BTCSats, 10)},
+		{Label: "direction", Value: "btc-for-blake"},
+	}
+
+	if imported.Repeated {
+		action.Details = append(action.Details, proto.ActionFact{
+			Label: "note", Value: "this match had already been imported; the existing swap was reused",
+		})
+	}
+
+	return withView(proto.Result{
+		Command: request.Command,
+		OK:      true,
+		Text:    "imported reverse match " + imported.MatchID + " as swap " + imported.SwapID,
 	}, action)
 }
 

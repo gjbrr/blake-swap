@@ -8,6 +8,7 @@ import (
 	"math"
 
 	"github.com/gjbrr/blake-swap/pkg/event"
+	"github.com/gjbrr/blake-swap/pkg/market"
 	"github.com/gjbrr/blake-swap/pkg/marketflow"
 	"github.com/gjbrr/blake-swap/pkg/model"
 	"github.com/gjbrr/blake-swap/pkg/store"
@@ -354,4 +355,162 @@ func asFloat(value any) float64 {
 	}
 
 	return math.NaN()
+}
+
+// ImportReverseMatch imports a btc-for-blake match as the taker.
+//
+// In this direction the market maker is protocol Bob and the taker is protocol Alice, so
+// this is where Alice creates the secret. That is the whole asymmetry: Bob publishes the
+// match and reserves the swap id, and only Alice generates S, from her own machine, against
+// deadlines she derives from her own view of both chains.
+func ImportReverseMatch(
+	ctx context.Context, env *Env, matchID string, supplied *event.Event, hooks MatchHooks,
+) (*MatchImport, error) {
+	if err := env.check(); err != nil {
+		return nil, err
+	}
+
+	if len(matchID) != 64 {
+		return nil, fmt.Errorf("match_id must be the full 64-character Nostr event ID")
+	}
+
+	alice := env.Identity.Public
+
+	candidate := supplied
+
+	if candidate == nil {
+		fetched, err := FetchEvent(ctx, env, matchID)
+
+		if err != nil {
+			return nil, err
+		}
+
+		candidate = fetched
+	}
+
+	item, err := validateMatch(ctx, env, *candidate, alice)
+
+	if err != nil {
+		return nil, err
+	}
+
+	if err := reverseMatchRoles(item, alice); err != nil {
+		return nil, err
+	}
+
+	bob := item.Maker
+
+	record, err := env.Records.Load(ctx, item.SwapID)
+
+	if err == nil {
+		if record.NostrAlicePub == nil || *record.NostrAlicePub != alice {
+			return nil, fmt.Errorf("SECURITY FAILURE: existing Alice swap has different Alice identity")
+		}
+
+		if record.NostrBobPub == nil || *record.NostrBobPub != bob {
+			return nil, fmt.Errorf("SECURITY FAILURE: existing Alice swap has different Bob identity")
+		}
+
+		if record.BlakeAmount() != item.BlakeAmount {
+			return nil, fmt.Errorf("SECURITY FAILURE: existing Alice swap has different BLAKE terms")
+		}
+
+		if record.BTCSats != item.BTCSats {
+			return nil, fmt.Errorf("SECURITY FAILURE: existing Alice swap has different BTC terms")
+		}
+
+		imported := MatchImport{
+			MatchID: matchID, OfferID: item.OfferID, TakeID: item.TakeID, SwapID: item.SwapID,
+			Maker: item.Maker, Taker: item.Taker,
+			Blake: item.BlakeAmount, BTCSats: item.BTCSats,
+			Repeated: true,
+		}
+
+		if hooks.AfterImport != nil {
+			hooks.AfterImport(imported)
+		}
+
+		return &imported, nil
+	}
+
+	if !errors.Is(err, store.ErrNotFound) {
+		return nil, err
+	}
+
+	// The reserved swap id is adopted, not invented: it is what both sides refer to when
+	// they speak about this negotiation, so only the secret is new here.
+	created, err := env.Engine.New(ctx, swap.NewRequest{
+		BlakeAmount: item.BlakeAmount,
+		BTCSats:     item.BTCSats,
+		SwapID:      item.SwapID,
+		NostrBobPub: bob,
+		Random:      env.Random,
+	})
+
+	if err != nil {
+		return nil, err
+	}
+
+	// The binding reserves the swap id for this exact match, so it must survive a crash
+	// that loses the process but not the disk.
+	binding := map[string]any{
+		"version":   2,
+		"direction": string(item.Direction),
+
+		"offer_id": item.OfferID,
+		"take_id":  item.TakeID,
+		"match_id": matchID,
+		"swap_id":  item.SwapID,
+
+		"maker": item.Maker,
+		"taker": item.Taker,
+
+		"maker_role": item.MakerRole,
+		"taker_role": item.TakerRole,
+
+		"blake_amount": json.Number(item.BlakeAmount.Format()),
+		"btc_sats":     item.BTCSats,
+	}
+
+	if err := env.writeDocument(ctx, bindingPath(item.SwapID), binding); err != nil {
+		return nil, err
+	}
+
+	imported := MatchImport{
+		MatchID: matchID, OfferID: item.OfferID, TakeID: item.TakeID, SwapID: created.Swap.SwapID,
+		Maker: item.Maker, Taker: item.Taker,
+		Blake: item.BlakeAmount, BTCSats: item.BTCSats,
+	}
+
+	if hooks.AfterImport != nil {
+		hooks.AfterImport(imported)
+	}
+
+	return &imported, nil
+}
+
+// reverseMatchRoles checks that a validated match is this participant's reverse trade.
+//
+// The direction implies the roles, so all four checks say the same thing four ways: a
+// btc-for-blake match is Bob's advertisement accepted by Alice, and the current participant
+// must be that Alice. Each is refused separately because the operator's remedy differs — a
+// wrong direction is a wrong command, a wrong taker is a wrong key.
+func reverseMatchRoles(item *marketflow.ParsedMatch, alice string) error {
+	if item.Direction != market.BTCForBlake {
+		return fmt.Errorf("Market match is not btc-for-blake")
+	}
+
+	if item.MakerRole != "bob" {
+		return fmt.Errorf("SECURITY FAILURE: reverse match maker is not protocol Bob")
+	}
+
+	if item.TakerRole != "alice" {
+		return fmt.Errorf("SECURITY FAILURE: reverse match taker is not protocol Alice")
+	}
+
+	if item.Taker != alice {
+		return fmt.Errorf("SECURITY FAILURE: current participant is not the matched taker")
+	}
+
+	return nil
 }

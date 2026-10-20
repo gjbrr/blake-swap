@@ -3,13 +3,12 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"path/filepath"
 	"strings"
 
 	"github.com/gjbrr/blake-swap/pkg/market"
 	"github.com/gjbrr/blake-swap/pkg/marketflow"
+	"github.com/gjbrr/blake-swap/pkg/marketops"
 	"github.com/gjbrr/blake-swap/pkg/model"
 	"github.com/gjbrr/blake-swap/pkg/store"
 	"github.com/gjbrr/blake-swap/pkg/swap"
@@ -32,14 +31,6 @@ func runAcceptReverseMarketMatch(ctx context.Context, engine *swap.Engine, args 
 		return fmt.Errorf("match_id must be the full 64-character Nostr event ID")
 	}
 
-	key, err := engineKey(engine)
-
-	if err != nil {
-		return err
-	}
-
-	alice := key.PublicKey()
-
 	client := marketClient()
 
 	found, err := fetchEventByID(ctx, client, matchID)
@@ -48,59 +39,33 @@ func runAcceptReverseMarketMatch(ctx context.Context, engine *swap.Engine, args 
 		return err
 	}
 
-	item, err := validateMarketMatchFor(ctx, client, *found, alice)
+	env, err := marketEnvOrError(engine, client, func(line string) { fmt.Print(line) })
 
 	if err != nil {
 		return err
 	}
 
-	if err := reverseMatchRoles(item, alice); err != nil {
-		return err
-	}
+	_, err = marketops.ImportReverseMatch(ctx, env, matchID, found, marketops.MatchHooks{
+		AfterImport: func(imported marketops.MatchImport) {
+			if imported.Repeated {
+				fmt.Print(renderReverseMatchAlreadyImported(imported.MatchID, imported.SwapID))
 
-	bob := item.Maker
+				return
+			}
 
-	records := store.NewFile(stateDirectory())
+			record, loadErr := store.NewFile(stateDirectory()).Load(ctx, imported.SwapID)
 
-	record, err := records.Load(ctx, item.SwapID)
+			if loadErr != nil {
+				return
+			}
 
-	if err == nil {
-		return repeatAcceptReverseMarketMatch(record, item, matchID, alice, bob)
-	}
-
-	if !errors.Is(err, store.ErrNotFound) {
-		return err
-	}
-
-	// The reserved swap id is adopted, not invented: it is what both sides refer to when
-	// they speak about this negotiation, so only the secret is new here.
-	created, err := engine.New(ctx, swap.NewRequest{
-		BlakeAmount: item.BlakeAmount,
-		BTCSats:     item.BTCSats,
-		SwapID:      item.SwapID,
-		NostrBobPub: bob,
-		Random:      randReader(),
+			fmt.Print(renderReverseMatchImported(
+				imported.MatchID, record, imported.Taker, imported.Maker,
+			))
+		},
 	})
 
-	if err != nil {
-		return err
-	}
-
-	record = created.Swap
-
-	binding := reverseMatchBinding(item, matchID)
-
-	// The binding reserves the swap id for this exact match, so it must survive a crash
-	// that loses the process but not the disk.
-	if err := writeBinding(
-		filepath.Join(stateDirectory(), matchBindingDirectory, record.SwapID+".json"), binding,
-	); err != nil {
-		return err
-	}
-
-	fmt.Print(renderReverseMatchImported(matchID, record, alice, bob))
-
-	return nil
+	return err
 }
 
 // reverseMatchRoles checks that a validated match is this participant's reverse trade.

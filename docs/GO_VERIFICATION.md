@@ -170,6 +170,7 @@ loopback relay and the app server in front of the live rig, then:
 | reload in the middle | the vault locks, unlocking restores the dashboard **and the selected swap** from the sealed store, and the next action is still the right one |
 | refusals | an action the engine refuses is shown in its own words; an unknown swap is refused; a dead relay is an error rather than an empty market; a triple click sends one command |
 | market handshake | the browser publishes an offer, a CLI taker takes it, the browser lists the take and accepts it (creating the swap and publishing the match), and the CLI taker imports that match into its own record |
+| reverse match import | `market.accept-reverse-match` in the worker and `accept-reverse-market-match` in the CLI call the same `marketops.ImportReverseMatch`; the CLI's output is unchanged, and the shared state machine refuses a wrong direction, a wrong taker, and a redefinition of an existing swap |
 
 The worker's write surface is the engine's, not a second protocol: create, publish, accept,
 receive, fund, verify, claim, refund, extract, complete, sync, resume, recovery plan, watch,

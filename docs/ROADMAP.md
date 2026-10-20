@@ -234,7 +234,11 @@ offer, accepts one, imports a match, and withdraws an offer. `scripts/verify-bro
 proves the handshake against a CLI taker: publish, take, list, accept, publish the match, and
 import it on the taker's side.
 
-Still not in the browser: the **reverse market direction** (`btc-for-blake`), where the
-maker is protocol Bob. Its accept path is a separate flow (`accept-reverse-market-offer`,
-`accept-market-reverse-match`) that the browser refuses with a message naming the take and
-pointing at the CLI, rather than guessing. `market.ignore-match` is also CLI-only.
+In the **reverse direction** (`btc-for-blake`, where the maker is protocol Bob) the taker's
+side is now in the browser: `market.accept-reverse-match` imports a reverse match, creating
+the secret as protocol Alice — the operation `marketops.ImportReverseMatch`, shared with the
+CLI. What is still CLI-only is the maker's two steps: accepting a reverse take (which
+publishes the reverse match and reserves the swap id) and importing Alice's protocol offer
+afterwards (`accept-reverse-swap-offer`). A browser participant can therefore be the reverse
+*taker* end to end, and the reverse *maker* still needs the CLI for those two commands.
+`market.ignore-match` is also CLI-only.

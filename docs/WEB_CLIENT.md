@@ -134,11 +134,14 @@ for a host-side operator.
 
 ## What is not implemented
 
-**The reverse market direction.** The browser can complete a market trade in the
+**The reverse market direction.** The browser completes a market trade in the
 `blake-for-btc` direction: take an offer, accept the take as the maker, import a match as the
-taker, and withdraw an offer. The reverse direction (`btc-for-blake`, where the maker is
-protocol Bob) has its own accept flow that is still CLI-only; the browser refuses it with a
-message naming the take rather than guessing.
+taker, and withdraw an offer. In the reverse direction (`btc-for-blake`, where the maker is
+protocol Bob) the taker's half is available too: importing a reverse match creates the secret
+as protocol Alice. The maker's two steps — accepting a reverse take, which publishes the
+reverse match and reserves the swap id, and importing Alice's protocol offer afterwards —
+are still CLI-only, so a browser participant is a complete reverse *taker* and needs the CLI
+to be the reverse *maker*.
 
 `market.ignore-match` is also CLI-only.
 

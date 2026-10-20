@@ -159,6 +159,10 @@ func (n *Node) call(ctx context.Context, method string, params ...any) (json.Raw
 }
 
 func (n *Node) callWithWallet(ctx context.Context, method string, params ...any) (json.RawMessage, error) {
+	if err := refuseNodeWallet(method); err != nil {
+		return nil, err
+	}
+
 	return n.Client.Call(ctx, method, params...)
 }
 

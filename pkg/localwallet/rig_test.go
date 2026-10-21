@@ -413,9 +413,7 @@ func TestFundAndSettleAnHTLC(t *testing.T) {
 
 		rpc(t, name, "generatetoaddress", "1", rpc(t, name, "getnewaddress"))
 
-		if _, err := rig.dom.Sync(name, 0); err != nil {
-			t.Fatalf("%s sync after claim: %v", name, err)
-		}
+		syncChain(t, rig, name)
 
 		paid := contractCoin(t, rig.dom, name, payout[0].Script())
 
@@ -427,37 +425,78 @@ func TestFundAndSettleAnHTLC(t *testing.T) {
 	}
 }
 
-// ensureCoins gives the wallet one confirmed coin on a chain if it has none, so the proof does
-// not depend on what an earlier run left behind.
+// ensureCoins gives the wallet a coin it can really spend: a fresh in-window address, funded
+// from the rig wallet and confirmed. A restored wallet also lists coins from earlier runs, some
+// already spent on-chain; the wallet has no spend reconciliation yet, so this test funds its own
+// and spends the newest coin, which is this one.
 func ensureCoins(t *testing.T, rig *walletRig, name string) {
 	t.Helper()
 
-	coins, err := rig.dom.SpendableOn(name)
+	// Inside the scan window (0..99): a coin outside it is never seen.
+	index := uint32(time.Now().UnixNano() % 90)
+
+	addresses, err := rig.dom.Addresses(name, false, index, 1)
 
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if len(coins) > 0 {
-		return
-	}
-
-	addresses, err := rig.dom.Addresses(name, false, 0, 1)
-
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	rpc(t, name, "sendtoaddress", addresses[0].Text, "0.001")
+	rpc(t, name, "sendtoaddress", addresses[0].Text, "0.002")
 	rpc(t, name, "generatetoaddress", "1", rpc(t, name, "getnewaddress"))
+	syncChain(t, rig, name)
 
-	if _, err := rig.dom.Sync(name, 0); err != nil {
-		t.Fatalf("%s sync after funding the wallet: %v", name, err)
+	coins, err := rig.dom.UnspentOn(name)
+
+	if err != nil {
+		t.Fatal(err)
 	}
 
-	if coins, _ := rig.dom.SpendableOn(name); len(coins) == 0 {
-		t.Fatalf("%s: the wallet still has no coin", name)
+	for _, coin := range coins {
+		if string(coin.Script) == string(addresses[0].Script()) {
+			return
+		}
 	}
+
+	t.Fatalf("%s: the fresh coin at index %d was not seen (%d coins)", name, index, len(coins))
+}
+
+// waitForMempool waits until the node knows a transaction before a block is mined. A P2P
+// broadcast is fire-and-forget, so mining immediately can produce a block that does not
+// include it.
+func waitForMempool(t *testing.T, name, txid string) {
+	t.Helper()
+
+	n := nodes[name]
+
+	for attempt := 0; attempt < 30; attempt++ {
+		cmd := exec.Command(n.cli, "-datadir="+n.datadir, "-rpcwallet=rig", "getmempoolentry", txid)
+
+		if err := cmd.Run(); err == nil {
+			return
+		}
+
+		time.Sleep(200 * time.Millisecond)
+	}
+
+	t.Fatalf("%s: %s never reached the mempool", name, txid)
+}
+
+// syncChain advances the wallet, retrying a dropped rig connection a couple of times. A node
+// closing an idle socket between two test steps is not what these tests are about.
+func syncChain(t *testing.T, rig *walletRig, name string) {
+	t.Helper()
+
+	var err error
+
+	for attempt := 0; attempt < 3; attempt++ {
+		if _, err = rig.dom.Sync(name, 0); err == nil {
+			return
+		}
+
+		time.Sleep(2 * time.Second)
+	}
+
+	t.Fatalf("%s sync: %v", name, err)
 }
 
 // contractCoin returns the wallet's coin paying script, failing if there is none.
@@ -658,9 +697,7 @@ func TestFundThroughTheEngine(t *testing.T) {
 
 		rpc(t, name, "generatetoaddress", "1", rpc(t, name, "getnewaddress"))
 
-		if _, err := rig.dom.Sync(name, 0); err != nil {
-			t.Fatalf("%s sync: %v", name, err)
-		}
+		syncChain(t, rig, name)
 
 		coin := contractCoin(t, rig.dom, name, p2wsh(derived.Script))
 

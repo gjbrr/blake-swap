@@ -9,7 +9,9 @@ require (
 )
 
 require (
+	git.smesh.lol/nostrino v0.0.0
 	git.smesh.lol/tiny-actor v0.0.0-20261018082025-e35a9da444cd // indirect
+	git.smesh.lol/tinywallet v0.0.0
 	github.com/btcsuite/btcd/chainhash/v2 v2.0.0 // indirect
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
 	github.com/decred/dcrd/crypto/blake256 v1.1.0 // indirect
@@ -23,3 +25,7 @@ require (
 	golang.org/x/sys v0.41.0 // indirect
 	lukechampine.com/frand v1.5.1 // indirect
 )
+
+replace git.smesh.lol/tinywallet => ../../tinygo/tinywallet
+
+replace git.smesh.lol/nostrino => ../../tinygo/nostrino

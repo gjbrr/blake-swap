@@ -376,7 +376,10 @@ type LocalSpendRequest struct {
 	Chain       chain.Chain
 	Funding     chain.Outpoint
 	Destination string
-	InputSats   int64
+	// Descriptor is the contract the spend is against, as the swap renders it. A local wallet
+	// reads the terms out of it rather than asking a node to compile it.
+	Descriptor string
+	InputSats  int64
 	// FeeSats is the fee the plan chose; the wallet subtracts it from InputSats.
 	FeeSats int64
 	// SecretHash and Preimage are a claim's hashlock terms; a refund carries neither.
@@ -411,6 +414,7 @@ func Claim(ctx context.Context, node Node, req Request, opts Options) (*Plan, er
 				Chain:       req.Chain,
 				Funding:     req.Funding,
 				Destination: req.Destination,
+				Descriptor:  req.Descriptor,
 				InputSats:   req.InputSats,
 				FeeSats:     feeSats,
 				SecretHash:  req.SecretHash,
@@ -478,6 +482,7 @@ func Refund(ctx context.Context, node Node, req Request, opts Options) (*Plan, e
 				Chain:       req.Chain,
 				Funding:     req.Funding,
 				Destination: req.Destination,
+				Descriptor:  req.Descriptor,
 				InputSats:   req.InputSats,
 				FeeSats:     feeSats,
 				LockTime:    req.LockTime,

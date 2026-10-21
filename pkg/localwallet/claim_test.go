@@ -6,13 +6,15 @@ import (
 	"encoding/hex"
 	"os"
 	"os/exec"
+	"strconv"
 	"testing"
 
 	"github.com/btcsuite/btcd/btcec/v2"
 
 	"fmt"
-	swapchain "github.com/gjbrr/blake-swap/pkg/chain"
 	"strings"
+
+	swapchain "github.com/gjbrr/blake-swap/pkg/chain"
 
 	"github.com/gjbrr/blake-swap/pkg/contract"
 	"github.com/gjbrr/blake-swap/pkg/decimal"
@@ -108,13 +110,7 @@ func TestSettleAClaimThroughTheEngine(t *testing.T) {
 
 		t.Logf("fee %d sats, plan %s", plan.FeeSats, plan.Hex)
 
-		n := nodes[name]
-		out, err := exec.Command(n.cli, "-datadir="+n.datadir, "sendrawtransaction", plan.Hex).CombinedOutput()
-		if err != nil {
-			t.Fatalf("sendrawtransaction: %v: %s", err, out)
-		}
-
-		claimTxID := strings.TrimSpace(string(out))
+		claimTxID := broadcast(t, name, plan.Hex)
 
 		rpc(t, name, "generatetoaddress", "1", rpc(t, name, "getnewaddress"))
 		syncChain(t, rig, name)
@@ -132,4 +128,24 @@ func TestSettleAClaimThroughTheEngine(t *testing.T) {
 		say(t, "%s: settle.Claim paid %d to %s in %s (fee %d), payout coin at height %d",
 			name, paid.Value, destination[0].Text, claimTxID, plan.FeeSats, paid.Height)
 	}
+}
+
+// broadcast sends a settlement the way the CLI does and, when the node refuses it, asks
+// testmempoolaccept why. A P2P broadcast hides the rejection reason; this is where the reason
+// becomes a test failure somebody can act on.
+func broadcast(t *testing.T, name, rawTx string) string {
+	t.Helper()
+
+	n := nodes[name]
+
+	out, err := exec.Command(n.cli, "-datadir="+n.datadir, "sendrawtransaction", rawTx).CombinedOutput()
+
+	if err != nil {
+		check, _ := exec.Command(n.cli, "-datadir="+n.datadir, "testmempoolaccept",
+			"["+strconv.Quote(rawTx)+"]").CombinedOutput()
+
+		t.Fatalf("%s: sendrawtransaction: %v: %s\ntestmempoolaccept: %s", name, err, out, check)
+	}
+
+	return strings.TrimSpace(string(out))
 }

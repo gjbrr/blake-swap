@@ -399,6 +399,40 @@ func TestClaimRefusesWithoutAPreimage(t *testing.T) {
 	}
 }
 
+// TestClaimRefusesAShortPreimage: the contract's claim branch checks OP_SIZE 32,
+// so a peer's short preimage cannot open it however much the claim is signed.
+// The engine refuses the claim instead of building one the chain will reject.
+func TestClaimRefusesAShortPreimage(t *testing.T) {
+	node := newFakeNode(1_000_000)
+
+	_, err := Claim(context.Background(), node, Request{
+		Chain: chain.Blake, InputSats: node.inputSats, Wallet: "bob",
+		SecretHash: sha256Hex(strings.Repeat("11", 32)),
+		Preimage:   strings.Repeat("11", 16),
+	}, Options{})
+
+	if err == nil || !strings.Contains(err.Error(), "checks 32") {
+		t.Fatalf("a 16-byte preimage gave %v", err)
+	}
+
+	if node.createRawCalls != 0 || node.lastFinalizeInput != "" {
+		t.Fatal("a refused claim was still built")
+	}
+}
+
+// TestClaimRefusesANonHexPreimage: a secret is bytes, and half a byte is not one.
+func TestClaimRefusesANonHexPreimage(t *testing.T) {
+	node := newFakeNode(1_000_000)
+
+	_, err := Claim(context.Background(), node, Request{
+		Chain: chain.Blake, InputSats: node.inputSats, Wallet: "bob", Preimage: "zz",
+	}, Options{})
+
+	if err == nil || !strings.Contains(err.Error(), "not hex") {
+		t.Fatalf("a non-hex preimage gave %v", err)
+	}
+}
+
 // TestRefundNeedsNoPreimage: the timelock branch is the fallback for when the
 // secret never arrives, so it must not require one.
 func TestRefundNeedsNoPreimage(t *testing.T) {
@@ -585,7 +619,7 @@ func TestClaimAndRefundUseALocalWallet(t *testing.T) {
 		Descriptor:  "wsh(script)",
 		InputSats:   50_000,
 		SecretHash:  "00ff",
-		Preimage:    "ffee",
+		Preimage:    strings.Repeat("ff", 32),
 		Wallet:      "btc",
 	}
 

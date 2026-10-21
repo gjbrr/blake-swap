@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -457,7 +458,7 @@ func ensureCoins(t *testing.T, rig *walletRig, name string) {
 		}
 	}
 
-	t.Fatalf("%s: the fresh coin at index %d was not seen (%d coins)", name, index, len(coins))
+	t.Fatalf("%s: the fresh coin at index %d (%s) was not seen (%d coins)", name, index, addresses[0].Text, len(coins))
 }
 
 // waitForMempool waits until the node knows a transaction before a block is mined. A P2P
@@ -481,22 +482,40 @@ func waitForMempool(t *testing.T, name, txid string) {
 	t.Fatalf("%s: %s never reached the mempool", name, txid)
 }
 
-// syncChain advances the wallet, retrying a dropped rig connection a couple of times. A node
-// closing an idle socket between two test steps is not what these tests are about.
+// syncChain advances the wallet until its verified tip reaches the node's height, retrying a
+// dropped rig connection or a node whose compact-filter index is still catching up with the
+// block it just mined.
+//
+// Waiting for the tip rather than for "a sync that did not error" is what makes the rig
+// deterministic: a sync that stops short returns successfully, and the coin the test just
+// funded is then simply not there yet.
 func syncChain(t *testing.T, rig *walletRig, name string) {
 	t.Helper()
 
-	var err error
+	height, err := strconv.ParseInt(rpc(t, name, "getblockcount"), 10, 64)
 
-	for attempt := 0; attempt < 3; attempt++ {
-		if _, err = rig.dom.Sync(name, 0); err == nil {
-			return
-		}
-
-		time.Sleep(2 * time.Second)
+	if err != nil {
+		t.Fatalf("%s: getblockcount: %v", name, err)
 	}
 
-	t.Fatalf("%s sync: %v", name, err)
+	var last []uint32
+
+	for attempt := 0; attempt < 60; attempt++ {
+		report, syncErr := rig.dom.Sync(name, 0)
+		last = report.New
+
+		if syncErr == nil {
+			status, statusErr := rig.dom.Status(name)
+
+			if statusErr == nil && int64(status.Position.Tip) >= height {
+				return
+			}
+		}
+
+		time.Sleep(time.Second)
+	}
+
+	t.Fatalf("%s: the wallet never reached the node's height %d (last new heights %v)", name, height, last)
 }
 
 // contractCoin returns the wallet's coin paying script, failing if there is none.

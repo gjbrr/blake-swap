@@ -60,3 +60,23 @@ regtest rig, whose chains diverge at genesis, and must be set for mainnet BLAKE.
    the contract names the wallet's address pubkey, so the wallet signs with a key it already
    derives — no key is passed over the channel.
 3. The two-chain rig proof: fund and settle an HTLC with this adapter, no wallet RPC.
+
+## The engine's claim and refund, proved on both chains
+
+`TestSettleAClaimThroughTheEngine` and `TestRefundThroughTheEngine` (in `pkg/localwallet`) run
+`fund.Fund`, `settle.Claim` and `settle.Refund` against a wallet that holds the keys itself, on
+btc and blake, and check the payout coin and that the contract is spent. No node wallet RPC is
+in the path. Two failures during that work are worth recording because they were real bugs and
+not test noise:
+
+- The contract's claim branch is `OP_SIZE 32`, so a preimage of any other length signs a witness
+  that verifies locally and is rejected by every node. `settle.Claim` now refuses a preimage that
+  is not 32 bytes, and `tx.SignHTLCClaim` refuses it too, before a signature exists.
+- A refund failed on blake with "Negative locktime" and passed on btc. The locktime was 43,283
+  (`0xa913`); a script number's top byte with the high bit set reads as negative, so the encoding
+  needs a zero pad. btc's height happened to make a positive number, so the byte-for-byte vector
+  never covered it. Fixed in `tinywallet/pkg/script` and `pkg/psbt`, with boundary tests.
+
+The rig tests also wait for the wallet's verified tip to reach the node's height before using a
+freshly mined block: a sync that stops short returns successfully, and the coin it just funded is
+then simply not there yet.

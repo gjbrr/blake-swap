@@ -15,6 +15,7 @@ package settle
 
 import (
 	"context"
+	"encoding/hex"
 	"fmt"
 
 	"github.com/gjbrr/blake-swap/pkg/amount"
@@ -400,6 +401,23 @@ type LocalSpendRequest struct {
 func Claim(ctx context.Context, node Node, req Request, opts Options) (*Plan, error) {
 	if req.Preimage == "" {
 		return nil, fmt.Errorf("a claim requires the revealed preimage")
+	}
+
+	// The contract's claim branch begins with OP_SIZE 32, so a preimage of any other
+	// length signs a witness no node will accept: the claim would be built, signed and
+	// broadcast, and then rejected. Refusing it here keeps that mistake where it is —
+	// the peer's preimage is wrong — instead of turning it into a failed settlement.
+	secret, err := hex.DecodeString(req.Preimage)
+
+	if err != nil {
+		return nil, fmt.Errorf("the claim preimage is not hex: %w", err)
+	}
+
+	if len(secret) != 32 {
+		return nil, fmt.Errorf(
+			"the claim preimage is %d bytes, and the contract's claim branch checks 32",
+			len(secret),
+		)
 	}
 
 	finalize := func(feeSats int64) (string, error) {

@@ -80,3 +80,17 @@ not test noise:
 The rig tests also wait for the wallet's verified tip to reach the node's height before using a
 freshly mined block: a sync that stops short returns successfully, and the coin it just funded is
 then simply not there yet.
+
+## The end state
+
+- Claim and refund of a wallet-held HTLC, on btc and blake, through the engine, with no wallet RPC:
+  `TestSettleAClaimThroughTheEngine`, `TestRefundThroughTheEngine`, `TestFundAndSettleAnHTLC`,
+  `TestFundThroughTheEngine` — all green run alone (`go test ./pkg/localwallet/ ./pkg/settle/` with
+  `NOSTRINO_RIG=1`, 218 s).
+- A node-driven settlement now signs within a bound derived from the PSBT itself (its inputs, and
+  at most a tenth as fee) instead of the empty policy.
+- The reference rig suites need the rig exclusively: `TestCrossImplRefundBothLegs`,
+  `TestSettlementDurability*` and `TestHTLCKeyRecoverySuite` pass when run alone (214 s), and fail,
+  with errors about transactions the node's wallet does not know, when another rig test is mining
+  beside them. The whole `internal/rigsuites` package is longer than a 25-minute window and should
+  be given its own.

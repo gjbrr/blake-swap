@@ -10,6 +10,9 @@ import (
 	"github.com/gjbrr/blake-swap/pkg/amount"
 	"github.com/gjbrr/blake-swap/pkg/chain"
 	"github.com/gjbrr/blake-swap/pkg/walletdep"
+
+	"git.smesh.lol/tinywallet/pkg/psbt"
+	"git.smesh.lol/tinywallet/pkg/tx"
 )
 
 // fakeWallet records what the adapter asks of the local wallet.
@@ -23,10 +26,11 @@ type fakeWallet struct {
 		chain, address string
 		sats, fee      uint64
 	}
-	signed    []byte
-	signedN   int
-	raw       string
-	deriveErr error
+	signed       []byte
+	signedN      int
+	signedPolicy Policy
+	raw          string
+	deriveErr    error
 }
 
 func (f *fakeWallet) Height(context.Context, string) (int64, error) { return f.height, nil }
@@ -50,7 +54,9 @@ func (f *fakeWallet) Derive(context.Context, string, HTLCTerms) (Contract, error
 
 func (f *fakeWallet) Watch(context.Context, string, []byte) error { return nil }
 
-func (f *fakeWallet) SignPSBT(context.Context, string, []byte, Policy) ([]byte, int, error) {
+func (f *fakeWallet) SignPSBT(_ context.Context, _ string, _ []byte, policy Policy) ([]byte, int, error) {
+	f.signedPolicy = policy
+
 	return f.signed, f.signedN, nil
 }
 
@@ -119,10 +125,18 @@ func TestLocalWalletAnswersFromTheWallet(t *testing.T) {
 		t.Fatalf("send args %+v", wallet.sendArgs)
 	}
 
-	result, err := bound.ProcessPSBT(ctx, "cHNidP8=", "ALL")
+	psbtRaw := witnessPSBT(t, 70_000)
+
+	result, err := bound.ProcessPSBT(ctx, string(psbtRaw), "ALL")
 
 	if err != nil || result.PSBT != "signed-psbt" {
 		t.Fatalf("process psbt %+v, %v", result, err)
+	}
+
+	// The policy is the wallet's rule about what it will sign: at most the PSBT's own inputs,
+	// at most a tenth of them as fee.
+	if wallet.signedPolicy.MaxSpend != 70_000 || wallet.signedPolicy.MaxFee != 7_000 {
+		t.Fatalf("the signing policy is %+v", wallet.signedPolicy)
 	}
 
 	walletTx, err := bound.Tx(ctx, "aa11")
@@ -190,10 +204,37 @@ func TestProcessPSBTRefusesToPretend(t *testing.T) {
 	node, wallet := adapter(t)
 	wallet.signedN = 0
 
-	if _, err := node.Bind("btc").ProcessPSBT(ctx, "cHNidP8=", "ALL"); err == nil {
+	if _, err := node.Bind("btc").ProcessPSBT(ctx, string(witnessPSBT(t, 70_000)), "ALL"); err == nil {
 		t.Fatal("a PSBT with no wallet input was reported as signed")
+	}
+
+	// A PSBT the wallet cannot bound — no inputs, or no amounts — is refused rather than
+	// signed blind.
+	if _, err := node.Bind("btc").ProcessPSBT(ctx, "cHNidP8=", "ALL"); err == nil {
+		t.Fatal("a PSBT that is not a PSBT was signed")
 	}
 }
 
 // keep fmt imported for the adapter's error formatting.
 var _ = fmt.Sprintf
+
+// witnessPSBT builds a PSBT with one input whose value is known, which is what a node-driven
+// settlement hands the wallet after utxoupdatepsbt.
+func witnessPSBT(t *testing.T, amount uint64) []byte {
+	t.Helper()
+
+	transaction := tx.New()
+	transaction.AddInput(tx.Outpoint{Hash: [32]byte{9}, Index: 0}, 0xfffffffe)
+	transaction.AddOutput(amount-1_000, []byte{0x00, 0x14, 1, 2, 3})
+
+	raw, err := psbt.Write(transaction, []psbt.SegwitInput{{
+		Amount:       amount,
+		ScriptPubKey: []byte{0x00, 0x14, 1, 2, 3, 4},
+	}})
+
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	return raw
+}

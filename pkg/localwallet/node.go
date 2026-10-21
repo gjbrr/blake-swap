@@ -9,6 +9,8 @@ import (
 	"github.com/gjbrr/blake-swap/pkg/contract"
 	"github.com/gjbrr/blake-swap/pkg/decimal"
 	"github.com/gjbrr/blake-swap/pkg/walletdep"
+
+	"git.smesh.lol/tinywallet/pkg/psbt"
 )
 
 // Node is the swap's node surface with its wallet half backed by tinywallet.
@@ -186,6 +188,42 @@ func (n *Node) SendRaw(ctx context.Context, hexTx string) (string, error) {
 	return n.Chain.SendRaw(ctx, hexTx)
 }
 
+// maxSettlementPercent is the largest fee a settlement may pay, as a percentage of its inputs.
+const maxSettlementPercent = 10
+
+// policyForPSBT bounds a signing request by what the PSBT itself says it may spend.
+//
+// The bound is not a guess about the fee: it is the wallet's own rule about what it will sign
+// without being asked. A PSBT whose inputs have no amounts cannot be bounded, so it is refused
+// rather than signed blind.
+func policyForPSBT(raw []byte) (Policy, error) {
+	file, err := psbt.Read(raw)
+
+	if err != nil {
+		return Policy{}, fmt.Errorf("localwallet: %w", err)
+	}
+
+	if len(file.Inputs) == 0 {
+		return Policy{}, fmt.Errorf("localwallet: a psbt with no inputs")
+	}
+
+	var total uint64
+
+	for _, input := range file.Inputs {
+		if len(input.ScriptPubKey) == 0 {
+			return Policy{}, fmt.Errorf("localwallet: an input has no witness utxo, so the spend is unbounded")
+		}
+
+		total += input.Amount
+	}
+
+	if total == 0 {
+		return Policy{}, fmt.Errorf("localwallet: a psbt whose inputs hold nothing")
+	}
+
+	return Policy{MaxSpend: total, MaxFee: total * maxSettlementPercent / 100}, nil
+}
+
 // boundWallet is one name bound to the local wallet.
 type boundWallet struct {
 	node *Node
@@ -316,8 +354,18 @@ func (w *boundWallet) Decode(ctx context.Context, hexTx string) (*chain.Tx, erro
 }
 
 // ProcessPSBT signs with the wallet's own keys.
-func (w *boundWallet) ProcessPSBT(ctx context.Context, psbt, sighash string) (*chain.ProcessPSBTResult, error) {
-	signed, count, err := w.node.Wallet.SignPSBT(ctx, string(w.node.Chain.Chain), []byte(psbt), Policy{})
+func (w *boundWallet) ProcessPSBT(ctx context.Context, raw, sighash string) (*chain.ProcessPSBTResult, error) {
+	// A node-driven settlement hands the wallet a PSBT it built: the wallet may spend at most
+	// the inputs that PSBT already names, and pay at most a tenth of them as fee. That is the
+	// decision an empty policy left open — an unbounded signer is one that signs whatever it
+	// is handed.
+	policy, err := policyForPSBT([]byte(raw))
+
+	if err != nil {
+		return nil, err
+	}
+
+	signed, count, err := w.node.Wallet.SignPSBT(ctx, string(w.node.Chain.Chain), []byte(raw), policy)
 
 	if err != nil {
 		return nil, err

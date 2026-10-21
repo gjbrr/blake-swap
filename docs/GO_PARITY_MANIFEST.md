@@ -8,7 +8,7 @@ It records what replaces each part of the Python engine in Go, and what has not 
 
 Statuses: **ported** (behaviour and tests), **partial** (in progress), **pending** (not started), **waived** (an explicit, checked reason why the Go artifact cannot carry the same assertion).
 
-## Modules (31/34 ported)
+## Modules (32/35 ported)
 
 | Python | Go | Status | Contents |
 |---|---|---|---|
@@ -40,10 +40,9 @@ Statuses: **ported** (behaviour and tests), **partial** (in progress), **pending
 | `src/swap_v2.py (market flow)` | `pkg/marketflow` | ported | market events: offer, take, cancel and match are built, parsed and validated the same way; state is derived from evidence, for one offer and for a whole book of them; the market commands that drive it are in the CLI |
 | `src/swap_v2.py (CLI)` | `cmd/blake-swap-cli` | partial | the drop-in CLI: every command with the reference's arguments and environment, plus `next` with no argument as discovery and `next SWAP_ID` as an extension. Byte-identical to the reference, proved command by command by a scripted walk that runs both implementations: `show`, `list`, `status`, `reconcile`, `dashboard`, `resume`, `run`, `market`, `market-state`, `new`, `publish-offer`, `accept-offer`, `receive-accept`, every funding, claim and refund publish and receive, `verify-blake`, `verify-btc`, `fund-blake`, `fund-btc`, `claim-btc`, `claim-blake`, `refund-btc`, `refund-blake`, `complete`, `extract-secret`, `resume-all`, `publish-market-offer`, `publish-market-match`. The four market commands that fetch by id still print their relay chatter differently; they are correct and tested, and that wording is the remaining gap |
 | `(new)` | `pkg/vault` | ported | passphrase KDF and record encryption with the NIP-44 primitives |
+| `(new)` | `pkg/walletdep` | ported | the refusal the browser gives for every node wallet path: a sentinel error plus the operation name, so a missing wallet service is reported as a missing wallet service rather than as a proxy or node failure. The package itself is not build-tagged; what is gated on `js && wasm` is the code that answers the node-wallet methods with it, so the CLI and the rig suites keep their node wallet |
 | `(new)` | `pkg/proxy` | ported | the node RPC proxy: credentials stay server-side, the method allowlist and a per-address rate limit are the boundary |
 | `(new)` | `pkg/worker` | ported | the browser worker's domains: the event loop, the encrypted-state domain, the read-only engine domain it drives through the app server's proxy, the market domain that reads, publishes and takes over the browser's own WebSocket, the coordination domain that publishes and receives all seven settlement message types over a relay with sender pinning and fail-closed decryption, and the command dispatcher |
-| `(new)` | `pkg/walletdep` | ported | the refusal the browser gives for every node wallet path: a sentinel error plus the operation name, so a missing wallet service is reported as a missing wallet service rather than as a proxy or node failure; gated on `js && wasm`, so the CLI and the rig suites keep their node wallet |
-
 | `(new)` | `pkg/client` | ported | the browser client's encrypted state: a store.Store whose records are sealed with a passphrase-derived key before they reach IndexedDB, with a pluggable entropy source |
 | `src/swap_v2.py (seeded adversarial corpus scheduler)` | `pkg/adversary` | partial | the corpus's language-independent scheduler: the documented SHA-256 derivation, the stage vocabulary it chooses at, the fault profiles, and the rule that no seed may degenerate into the happy path. The part that is not here is not a port gap: replaying generated events against a live pair is the reference harness's job, and `tests/swap_seeded_adversarial_tests.py` still does it |
 | `(new)` | `pkg/adapter` | partial | the portable participant interface `blake-swap-adapter-v1`: capabilities, role-pinned commands and the portable state projection, served one JSON request per process. The part that is not here is not a port gap: pair orchestration and seeded scenario scheduling belong to the reference harness, which is what drives two implementations against each other |
@@ -81,6 +80,7 @@ Statuses: **ported** (behaviour and tests), **partial** (in progress), **pending
 | `build_market_offer_v2_event`, `nostr_parse_market_offer_event`, `build_market_take_event`, `nostr_validate_market_take_event`, `build_market_cancel_event`, `build_market_match_event`, `validate_market_match_evidence`, `nostr_derive_market_offer_state`, `nostr_market_cancellation_applies` | `BuildOffer`, `ParseOffer`, `BuildTake`, `ParseTake`, `BuildCancel`, `ParseCancel`, `BuildMatch`, `ParseMatch`, `DeriveState`, `CancellationApplies`, `Book`, `OpenOffers`, `Entry`, `MarketFilters` | `pkg/marketflow` |
 | `main` | — | `cmd/blake-swap-cli` |
 | — | `Seal`, `Open`, `DeriveKey` | `pkg/vault` |
+| — | `Refuse`, `ErrNoWalletService` | `pkg/walletdep` |
 | `run_chain_cli`, `chain_dispatch` | `Proxy`, `Config`, `Endpoint`, `DefaultAllowlist` | `pkg/proxy` |
 | — | `NewVaultDomain`, `Domain`, `Chans`, `SecretRelays`, `DefaultRelays` | `pkg/worker` |
 | `load_swap`, `save_swap`, `atomic_write_json` | `Encrypted`, `Create`, `Open`, `KV`, `Memory` | `pkg/client` |

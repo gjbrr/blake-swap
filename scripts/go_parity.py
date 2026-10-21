@@ -443,6 +443,16 @@ MODULES: list[Module] = [
         [],
     ),
     Module(
+        "(new)", "pkg/walletdep", "ported",
+        "the refusal the browser gives for every node wallet path: a sentinel error plus the "
+        "operation name, so a missing wallet service is reported as a missing wallet service "
+        "rather than as a proxy or node failure. The package itself is not build-tagged; what "
+        "is gated on `js && wasm` is the code that answers the node-wallet methods with it, so "
+        "the CLI and the rig suites keep their node wallet",
+        ["Refuse", "ErrNoWalletService"],
+        [],
+    ),
+    Module(
         "(new)", "pkg/proxy", "ported",
         "the node RPC proxy: credentials stay server-side, the method allowlist and a per-address rate limit are the boundary",
         ["Proxy", "Config", "Endpoint", "DefaultAllowlist"],

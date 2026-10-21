@@ -34,7 +34,10 @@ jobs:
     # Pinned rather than ubuntu-latest: the label moves to the next LTS in
     # November 2026, and a runner change should be a deliberate commit.
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    # The reference cross-implementation suites run two engines against each other on the rig and
+    # are the slowest thing here; the job budget has to cover them rather than the other way
+    # round. A failure from the budget expiring says nothing about the code.
+    timeout-minutes: 120
 
     steps:
       - uses: actions/checkout@v4
@@ -98,6 +101,27 @@ jobs:
           "$HOME/s/bitcoin-core/bin/bitcoin-cli" --version
           "$HOME/s/bitcoin-knots/bin/bitcoin-cli" --version
 
+      - name: Check out the module siblings
+        run: |
+          set -euo pipefail
+          #
+          # go.mod replaces tinywallet and nostrino with sibling checkouts, because the three
+          # repositories are developed together: a version of one is a commit of the other, and
+          # a release tag would put a second copy of a moving tree on the wire. CI starts from
+          # this repository alone, so it recreates the layout the replace directives name --
+          # <workspace>/../../tinygo/{tinywallet,nostrino} -- from the public repositories.
+          #
+          # They are cloned at their default branch on purpose: a change to either module that
+          # breaks this one should break this job, and a pinned commit would hide that until
+          # somebody remembered to bump it.
+          #
+          siblings="$GITHUB_WORKSPACE/../../tinygo"
+          mkdir -p "$siblings"
+          git clone --depth 1 https://git.smesh.lol/tinywallet.git "$siblings/tinywallet"
+          git clone --depth 1 https://git.smesh.lol/nostrino.git "$siblings/nostrino"
+          git -C "$siblings/tinywallet" log --oneline -1
+          git -C "$siblings/nostrino" log --oneline -1
+
       - name: Fail early on a regtest port conflict
         run: |
           set -euo pipefail
@@ -157,7 +181,7 @@ jobs:
           #
           go build ./...
           go vet ./pkg/... ./internal/...
-          go test -p 1 -timeout 30m ./pkg/... ./internal/...
+          go test -p 1 -timeout 45m ./pkg/... ./internal/...
 
       - name: WASM modules build
         run: |

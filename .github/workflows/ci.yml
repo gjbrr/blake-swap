@@ -111,14 +111,22 @@ jobs:
           # this repository alone, so it recreates the layout the replace directives name --
           # <workspace>/../../tinygo/{tinywallet,nostrino} -- from the public repositories.
           #
-          # They are cloned at their default branch on purpose: a change to either module that
+          # They are cloned at their main branch on purpose: a change to either module that
           # breaks this one should break this job, and a pinned commit would hide that until
           # somebody remembered to bump it.
           #
+          # --branch is not decoration. The forge's repositories do not advertise a usable
+          # HEAD -- one has none and the other still names a `master` that does not exist --
+          # so a plain `git clone` finds no default branch, prints "You appear to have cloned
+          # an empty repository", and the build then fails on a missing replace target. Naming
+          # the branch is what makes the checkout independent of that setting.
+          #
           siblings="$GITHUB_WORKSPACE/../../tinygo"
           mkdir -p "$siblings"
-          git clone --depth 1 https://git.smesh.lol/tinywallet.git "$siblings/tinywallet"
-          git clone --depth 1 https://git.smesh.lol/nostrino.git "$siblings/nostrino"
+          git clone --depth 1 --branch main \
+            https://git.smesh.lol/tinywallet.git "$siblings/tinywallet"
+          git clone --depth 1 --branch main \
+            https://git.smesh.lol/nostrino.git "$siblings/nostrino"
           git -C "$siblings/tinywallet" log --oneline -1
           git -C "$siblings/nostrino" log --oneline -1
 

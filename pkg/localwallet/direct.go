@@ -125,6 +125,12 @@ func (d *Direct) RawTx(_ context.Context, chain, txid string) (string, error) {
 	return sent.Hex, nil
 }
 
+// DeriveHTLC answers the contract derivation the engine asks a node for, so a build with a
+// local wallet needs no descriptor compiler.
+func (d *Direct) DeriveHTLC(_ context.Context, ch string, terms HTLCTerms) (Contract, error) {
+	return d.Derive(context.Background(), ch, terms)
+}
+
 // displayTxID renders a transaction id the way it is printed.
 func displayTxID(txid [32]byte) string {
 	reversed := make([]byte, len(txid))

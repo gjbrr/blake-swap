@@ -9,6 +9,7 @@ package localwallet
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"os/exec"
@@ -22,6 +23,11 @@ import (
 	chaincfg "git.smesh.lol/nostrino/pkg/chain"
 	"git.smesh.lol/nostrino/pkg/chaindata"
 	"git.smesh.lol/nostrino/pkg/neutrino"
+	"github.com/gjbrr/blake-swap/pkg/contract"
+	"github.com/gjbrr/blake-swap/pkg/decimal"
+	"github.com/gjbrr/blake-swap/pkg/fund"
+	"github.com/gjbrr/blake-swap/pkg/model"
+
 	"git.smesh.lol/tinywallet/pkg/domain"
 	"git.smesh.lol/tinywallet/pkg/psbt"
 	"git.smesh.lol/tinywallet/pkg/store"
@@ -40,15 +46,45 @@ const (
 type node struct {
 	chainName string
 	p2p       string
+	rpc       string
 	cli       string
 	datadir   string
 }
 
 var nodes = map[string]node{
-	"btc": {chainName: "btc", p2p: "127.0.0.1:18444",
+	"btc": {chainName: "btc", p2p: "127.0.0.1:18444", rpc: "http://127.0.0.1:18443/",
 		cli: "/home/mleku/s/bitcoin-core/bin/bitcoin-cli", datadir: "/home/mleku/.blake-swap-test/btc"},
-	"blake": {chainName: "blake", p2p: "127.0.0.1:19444",
+	"blake": {chainName: "blake", p2p: "127.0.0.1:19444", rpc: "http://127.0.0.1:19443/",
 		cli: "/home/mleku/s/bitcoin-blake2b/bin/bitcoin-cli", datadir: "/home/mleku/.blake-swap-test/blake"},
+}
+
+// rpcNode is the node handle the adapter's chain reads use. The cookie is the rig's own auth.
+func rpcNode(t *testing.T, name string) *swapchain.Node {
+	t.Helper()
+
+	n := nodes[name]
+
+	cookie, err := os.ReadFile(n.datadir + "/regtest/.cookie")
+
+	if err != nil {
+		t.Fatalf("%s cookie: %v", name, err)
+	}
+
+	user, pass, ok := strings.Cut(strings.TrimSpace(string(cookie)), ":")
+
+	if !ok {
+		t.Fatalf("%s cookie is not user:pass", name)
+	}
+
+	node, err := swapchain.New(swapchain.Chain(name), swapchain.Config{
+		URL: n.rpc, User: user, Password: pass,
+	})
+
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	return node
 }
 
 // seam adapts a light client to the wallet's chain interface.
@@ -506,4 +542,133 @@ func finalWitness(raw []byte) ([][]byte, error) {
 func say(t *testing.T, format string, args ...any) {
 	t.Helper()
 	t.Logf(format, args...)
+}
+
+// TestFundThroughTheEngine runs fund.Fund itself against the local wallet: the contract comes
+// from the wallet's own derivation (no node descriptor), the payment from its own coins, and
+// the receipt is checked against the node.
+func TestFundThroughTheEngine(t *testing.T) {
+	if os.Getenv("NOSTRINO_RIG") != "1" {
+		t.Skip("NOSTRINO_RIG is not set, and this test needs the regtest rig")
+	}
+
+	rig := newRig(t)
+	ctx := context.Background()
+	direct := NewDirect(rig.dom)
+
+	preimage := []byte("the engine's funding preimage")
+	sum := sha256.Sum256(preimage)
+
+	rate, err := decimal.Parse("2")
+
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, name := range []string{"btc", "blake"} {
+		ensureCoins(t, rig, name)
+
+		addresses, err := rig.dom.Addresses(name, false, 0, 1)
+
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		pub := hex.EncodeToString(addresses[0].Pubkey)
+
+		status, err := rig.dom.Status(name)
+
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		timeout := int64(status.Position.Tip) + 200
+
+		ptr := func(value string) *string { return &value }
+
+		swap := &model.Swap{
+			SwapID:               "rigfund" + name,
+			BlakeAmountBaseUnits: 20_000,
+			BTCSats:              25_000,
+			SecretHex:            ptr(hex.EncodeToString(preimage)),
+			SecretHash:           hex.EncodeToString(sum[:]),
+			BlakeTimeout:         timeout,
+			BTCTimeout:           timeout,
+			BlakeAlicePub:        ptr(pub),
+			BlakeBobPub:          ptr(pub),
+			BTCAlicePub:          ptr(pub),
+			BTCBobPub:            ptr(pub),
+		}
+
+		ch := swapchain.Chain(name)
+
+		adapter := New(rpcNode(t, name), direct)
+
+		terms := contract.Terms{
+			Claimer:    addresses[0].Pubkey,
+			Refunder:   addresses[0].Pubkey,
+			SecretHash: sum,
+			Locktime:   uint32(timeout),
+		}
+
+		derived, err := adapter.DeriveHTLC(ctx, ch, terms)
+
+		if err != nil {
+			t.Fatalf("%s derive: %v", name, err)
+		}
+
+		if err := direct.Watch(ctx, name, p2wsh(derived.Script)); err != nil {
+			t.Fatalf("%s watch: %v", name, err)
+		}
+
+		receipt, err := fund.Fund(ctx, adapter, swap, ch, fund.Options{
+			Wallet:        name,
+			SkipWatchOnly: true,
+			FeeRate:       &rate,
+			Intents:       fund.NewMemStore(),
+		})
+
+		if err != nil {
+			t.Fatalf("%s fund.Fund: %v", name, err)
+		}
+
+		if receipt.Address != derived.Address {
+			t.Fatalf("%s: funded %s, the contract is %s", name, receipt.Address, derived.Address)
+		}
+
+		want := swap.BTCSats
+
+		if ch == swapchain.Blake {
+			want = swap.BlakeAmountBaseUnits
+		}
+
+		if receipt.Amount != want {
+			t.Fatalf("%s: amount %d, want %d", name, receipt.Amount, want)
+		}
+
+		sent, err := rig.dom.Sends(name)
+
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if len(sent) == 0 || sent[len(sent)-1].TxID != receipt.TxID {
+			t.Fatalf("%s: the receipt's txid %s is not the wallet's send", name, receipt.TxID)
+		}
+
+		rpc(t, name, "generatetoaddress", "1", rpc(t, name, "getnewaddress"))
+
+		if _, err := rig.dom.Sync(name, 0); err != nil {
+			t.Fatalf("%s sync: %v", name, err)
+		}
+
+		coin := contractCoin(t, rig.dom, name, p2wsh(derived.Script))
+
+		if coin.Value != uint64(want) {
+			t.Fatalf("%s: the contract coin is %d, want %d", name, coin.Value, want)
+		}
+
+		say(t, "%s: fund.Fund paid %s (%d) in %s, coin at height %d",
+			name, receipt.Address, receipt.Amount, receipt.TxID, coin.Height)
+	}
 }

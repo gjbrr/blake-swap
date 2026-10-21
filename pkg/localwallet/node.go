@@ -6,6 +6,7 @@ import (
 
 	"github.com/gjbrr/blake-swap/pkg/amount"
 	"github.com/gjbrr/blake-swap/pkg/chain"
+	"github.com/gjbrr/blake-swap/pkg/contract"
 	"github.com/gjbrr/blake-swap/pkg/decimal"
 	"github.com/gjbrr/blake-swap/pkg/walletdep"
 )
@@ -74,6 +75,23 @@ func (n *Node) DescriptorInfo(context.Context, string) (*chain.DescriptorInfo, e
 // DeriveAddresses is the node's descriptor-to-address step, for the same reason.
 func (n *Node) DeriveAddresses(context.Context, string) ([]string, error) {
 	return nil, walletdep.Refuse("deriveaddresses")
+}
+
+// DeriveHTLC builds a contract from its terms, which is what the engine asks a node's
+// descriptor compiler for. It is the local half of contract.Derive.
+func (n *Node) DeriveHTLC(ctx context.Context, ch chain.Chain, terms contract.Terms) (contract.LocalContract, error) {
+	derived, err := n.Wallet.Derive(ctx, string(ch), HTLCTerms{
+		Claimer:    terms.Claimer,
+		Refunder:   terms.Refunder,
+		SecretHash: terms.SecretHash,
+		Locktime:   terms.Locktime,
+	})
+
+	if err != nil {
+		return contract.LocalContract{}, err
+	}
+
+	return contract.LocalContract{Address: derived.Address, Script: derived.Script}, nil
 }
 
 // TxOut is a chain read.

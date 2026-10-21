@@ -14,6 +14,7 @@ package contract
 
 import (
 	"context"
+	"encoding/hex"
 	"fmt"
 	"strconv"
 
@@ -28,6 +29,36 @@ type Node interface {
 	DescriptorInfo(ctx context.Context, body string) (*chain.DescriptorInfo, error)
 	DeriveAddresses(ctx context.Context, descriptor string) ([]string, error)
 	TxOut(ctx context.Context, txid string, vout int64) (*chain.TxOut, error)
+}
+
+// Terms are a contract's facts before a compiler touches them: the two public keys, the hash
+// of the preimage and the locktime. They are what a local wallet needs, and what a descriptor
+// is only one rendering of.
+type Terms struct {
+	// Claimer takes the money with the preimage; Refunder takes it back after Locktime.
+	Claimer  []byte
+	Refunder []byte
+	// SecretHash is the SHA-256 of the swap secret.
+	SecretHash [32]byte
+	// Locktime is the refund branch's absolute locktime.
+	Locktime uint32
+}
+
+// LocalContract is a contract derived without a node descriptor.
+type LocalContract struct {
+	// Address is the P2WSH address on the chain.
+	Address string
+	// Script is the witness script.
+	Script []byte
+}
+
+// Local is a node surface that can derive a contract from its terms.
+//
+// The local wallet has the script builder; a node has the descriptor compiler. Derive prefers
+// the local one when the node offers it, because a build with no node wallet has no compiler to
+// ask.
+type Local interface {
+	DeriveHTLC(ctx context.Context, ch chain.Chain, terms Terms) (LocalContract, error)
 }
 
 // Contract is one leg's on-chain facts.
@@ -94,6 +125,30 @@ func Derive(ctx context.Context, node Node, swap *model.Swap, ch chain.Chain) (*
 		return nil, err
 	}
 
+	expected := swap.BTCSats
+
+	if ch == chain.Blake {
+		expected = swap.BlakeAmountBaseUnits
+	}
+
+	// A local wallet derives the contract from its terms; a node compiles a descriptor. The
+	// two must agree, which is what the byte-for-byte script vector pins.
+	if local, ok := node.(Local); ok {
+		terms, err := bondTerms(bond, ch)
+
+		if err != nil {
+			return nil, err
+		}
+
+		derived, err := local.DeriveHTLC(ctx, ch, terms)
+
+		if err != nil {
+			return nil, fmt.Errorf("%s contract: %w", Name(ch), err)
+		}
+
+		return &Contract{Chain: ch, Address: derived.Address, Amount: expected}, nil
+	}
+
 	body, err := bond.Descriptor(htlc.Chain(ch))
 
 	if err != nil {
@@ -123,8 +178,6 @@ func Derive(ctx context.Context, node Node, swap *model.Swap, ch chain.Chain) (*
 		)
 	}
 
-	expected := swap.BTCSats
-
 	if ch == chain.Blake {
 		expected = swap.BlakeAmountBaseUnits
 	}
@@ -135,6 +188,64 @@ func Derive(ctx context.Context, node Node, swap *model.Swap, ch chain.Chain) (*
 		Address:    addresses[0],
 		Amount:     expected,
 	}, nil
+}
+
+// bondTerms renders a bond as the terms one chain's contract is built from.
+func bondTerms(bond htlc.Bond, ch chain.Chain) (Terms, error) {
+	var (
+		claimer, refunder string
+		locktime          int64
+	)
+
+	switch ch {
+	case chain.Blake:
+		claimer, refunder, locktime = bond.BlakeBobPub, bond.BlakeAlicePub, bond.BlakeTimeout
+	case chain.BTC:
+		claimer, refunder, locktime = bond.BTCAlicePub, bond.BTCBobPub, bond.BTCTimeout
+	default:
+		return Terms{}, fmt.Errorf("unknown HTLC chain: %s", ch)
+	}
+
+	key := func(text string) ([]byte, error) {
+		raw, err := hex.DecodeString(text)
+
+		if err != nil {
+			return nil, fmt.Errorf("%s public key: %w", Name(ch), err)
+		}
+
+		return raw, nil
+	}
+
+	rawClaimer, err := key(claimer)
+
+	if err != nil {
+		return Terms{}, err
+	}
+
+	rawRefunder, err := key(refunder)
+
+	if err != nil {
+		return Terms{}, err
+	}
+
+	hash, err := hex.DecodeString(bond.SecretHash)
+
+	if err != nil || len(hash) != 32 {
+		return Terms{}, fmt.Errorf("%s secret hash is not 32 bytes", Name(ch))
+	}
+
+	if locktime <= 0 || locktime > int64(^uint32(0)) {
+		return Terms{}, fmt.Errorf("%s timeout %d is not a locktime", Name(ch), locktime)
+	}
+
+	var terms Terms
+
+	terms.Claimer = rawClaimer
+	terms.Refunder = rawRefunder
+	copy(terms.SecretHash[:], hash)
+	terms.Locktime = uint32(locktime)
+
+	return terms, nil
 }
 
 // CheckOutput proves a chain output is this swap's HTLC.

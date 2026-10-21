@@ -361,6 +361,33 @@ type Request struct {
 	LockTime int64
 }
 
+// LocalSpend is a node that can build and finalise a contract spend itself.
+//
+// A node needs a descriptor to fill in the witness script and amount of a PSBT; a local wallet
+// already knows the contract it watched, so it builds the spend from the coin, the script and
+// (for a claim) the preimage, and finalises it. When a node offers this, settle uses it instead
+// of the CreateRawTransaction / UtxoUpdatePSBT / ProcessPSBT / FinalizePSBT chain.
+type LocalSpend interface {
+	SpendContract(ctx context.Context, req LocalSpendRequest) (hexTx string, err error)
+}
+
+// LocalSpendRequest is one contract spend for a local wallet to build.
+type LocalSpendRequest struct {
+	Chain       chain.Chain
+	Funding     chain.Outpoint
+	Destination string
+	InputSats   int64
+	// FeeSats is the fee the plan chose; the wallet subtracts it from InputSats.
+	FeeSats int64
+	// SecretHash and Preimage are a claim's hashlock terms; a refund carries neither.
+	SecretHash string
+	Preimage   string
+	// LockTime is the refund's absolute locktime.
+	LockTime int64
+	// Refund selects the timelock branch instead of the hashlock one.
+	Refund bool
+}
+
 // Claim builds and finalizes a claim of the HTLC.
 //
 // The preimage is injected between signing and finalizing: the wallet signs the
@@ -378,6 +405,18 @@ func Claim(ctx context.Context, node Node, req Request, opts Options) (*Plan, er
 		}
 
 		outputSats := req.InputSats - feeSats
+
+		if local, ok := node.(LocalSpend); ok {
+			return local.SpendContract(ctx, LocalSpendRequest{
+				Chain:       req.Chain,
+				Funding:     req.Funding,
+				Destination: req.Destination,
+				InputSats:   req.InputSats,
+				FeeSats:     feeSats,
+				SecretHash:  req.SecretHash,
+				Preimage:    req.Preimage,
+			})
+		}
 
 		raw, err := node.CreateRawTransaction(
 			ctx,
@@ -433,6 +472,18 @@ func Refund(ctx context.Context, node Node, req Request, opts Options) (*Plan, e
 		}
 
 		outputSats := req.InputSats - feeSats
+
+		if local, ok := node.(LocalSpend); ok {
+			return local.SpendContract(ctx, LocalSpendRequest{
+				Chain:       req.Chain,
+				Funding:     req.Funding,
+				Destination: req.Destination,
+				InputSats:   req.InputSats,
+				FeeSats:     feeSats,
+				LockTime:    req.LockTime,
+				Refund:      true,
+			})
+		}
 
 		raw, err := node.CreateRawTransactionAt(
 			ctx,

@@ -42,6 +42,9 @@ type fakeNode struct {
 	lastFinalizeInput string
 	sent              []string
 	finalizeComplete  bool
+	// Counts so a test can prove the local path skipped the node's PSBT builders.
+	createRawCalls  int
+	utxoUpdateCalls int
 }
 
 func newFakeNode(inputSats int64) *fakeNode {
@@ -58,6 +61,8 @@ func (f *fakeNode) Bind(wallet string) chain.Wallet { return &fakeWallet{name: w
 func (f *fakeNode) CreateRawTransaction(
 	_ context.Context, inputs []chain.Outpoint, outputs map[string]decimal.Dec,
 ) (string, error) {
+	f.createRawCalls++
+
 	if len(inputs) != 1 || len(outputs) != 1 {
 		return "", fmt.Errorf("settlement is single-input, single-output")
 	}
@@ -88,6 +93,7 @@ func (f *fakeNode) ConvertToPSBT(_ context.Context, hexTx string) (string, error
 }
 
 func (f *fakeNode) UtxoUpdatePSBT(_ context.Context, psbtHex string, descriptors []string) (string, error) {
+	f.utxoUpdateCalls++
 	if len(descriptors) != 1 || descriptors[0] == "" {
 		return "", fmt.Errorf("utxoupdatepsbt needs the HTLC descriptor")
 	}
@@ -549,5 +555,81 @@ func TestSettlementRateOverrideBelowTheFloorIsRefused(t *testing.T) {
 
 	if !strings.Contains(err.Error(), "BLAKE_SWAP_BTC_SPEND_FEE_RATE") {
 		t.Fatalf("error does not name the knob: %v", err)
+	}
+}
+
+// localNode is a node that can build a contract spend itself. The embedded fake answers the
+// rest of the surface, so the test can assert the local path was taken and nothing else was.
+type localNode struct {
+	*fakeNode
+	request *LocalSpendRequest
+	hexTx   string
+}
+
+func (l *localNode) SpendContract(_ context.Context, req LocalSpendRequest) (string, error) {
+	l.request = &req
+
+	return l.hexTx, nil
+}
+
+// TestClaimAndRefundUseALocalWallet: when the node offers a local spend, settle does not build
+// the PSBT through it — the wallet builds and finalises the claim or refund itself.
+func TestClaimAndRefundUseALocalWallet(t *testing.T) {
+	ctx := context.Background()
+	node := &localNode{fakeNode: newFakeNode(50_000), hexTx: "00beef"}
+
+	claim := Request{
+		Chain:       chain.BTC,
+		Funding:     chain.Outpoint{TxID: "aa11", Vout: 1},
+		Destination: "bcrt1qdest",
+		Descriptor:  "wsh(script)",
+		InputSats:   50_000,
+		SecretHash:  "00ff",
+		Preimage:    "ffee",
+		Wallet:      "btc",
+	}
+
+	plan, err := Claim(ctx, node, claim, Options{})
+
+	if err != nil {
+		t.Fatalf("Claim: %v", err)
+	}
+
+	if plan.Hex != "00beef" {
+		t.Fatalf("the plan is %q, want the local wallet's transaction", plan.Hex)
+	}
+
+	if node.request == nil {
+		t.Fatal("the local wallet was not asked to build the claim")
+	}
+
+	if node.request.Preimage != claim.Preimage || node.request.SecretHash != claim.SecretHash ||
+		node.request.Refund || node.request.InputSats != claim.InputSats ||
+		node.request.Destination != claim.Destination {
+		t.Fatalf("claim request %+v", node.request)
+	}
+
+	if node.createRawCalls != 0 || node.utxoUpdateCalls != 0 {
+		t.Fatal("the claim was built through the node after all")
+	}
+
+	node.request = nil
+
+	refund := Request{
+		Chain:       chain.BTC,
+		Funding:     claim.Funding,
+		Destination: claim.Destination,
+		Descriptor:  claim.Descriptor,
+		InputSats:   claim.InputSats,
+		LockTime:    500,
+		Wallet:      "btc",
+	}
+
+	if _, err := Refund(ctx, node, refund, Options{}); err != nil {
+		t.Fatalf("Refund: %v", err)
+	}
+
+	if node.request == nil || !node.request.Refund || node.request.LockTime != 500 {
+		t.Fatalf("refund request %+v", node.request)
 	}
 }

@@ -398,6 +398,50 @@ def test_stub_observed_traffic():
     assert STUB.connections > 0, "no client ever connected"
 
 
+
+def test_market_offer_carries_an_expiration_tag():
+    """
+    A live offer is a stored advertisement, so it tells a relay when it may
+    forget it (NIP-40). The tag and the content's expires_at are held
+    together: a signed event whose tag disagrees is refused, because the
+    relay's retention would otherwise outlive the terms the maker signed.
+    """
+    offer = publish_offer(blake=4.0, sats=1480000)
+
+    event = swap_v2.nostr_load_cached_event(offer["event_id"])
+    message = json.loads(event["content"])
+
+    tags = [tag for tag in event["tags"] if tag and tag[0] == "expiration"]
+    assert tags, f"offer {offer['event_id']} carries no expiration tag: {event['tags']}"
+    assert tags[0][1] == str(message["expires_at"]), (tags[0], message["expires_at"])
+
+    # The kind is a stored one, not an ephemeral kind: a relay that drops
+    # ephemeral events would lose every offer.
+    assert event["kind"] == 1, event["kind"]
+
+    # The tag is checked *after* the signature, so the tampered event has to be signed by the
+    # same key: the case that matters is a maker publishing different terms to the relay than
+    # the ones in the content, not a forgery by somebody else.
+    from coincurve import PrivateKey
+
+    private_key = PrivateKey(bytes.fromhex(swap_v2.nostr_private_key_hex()))
+    tampered = dict(event)
+    tampered["tags"] = [
+        ["expiration", str(message["expires_at"] + 3600)] if tag and tag[0] == "expiration" else tag
+        for tag in event["tags"]
+    ]
+    event_id = swap_v2.nostr_event_id(tampered)
+    tampered["id"] = event_id.hex()
+    tampered["sig"] = private_key.sign_schnorr(event_id).hex()
+
+    try:
+        swap_v2.nostr_parse_market_offer_event(tampered)
+    except RuntimeError as error:
+        assert "expiration tag" in str(error), error
+    else:
+        raise AssertionError("an offer whose expiration tag disagrees with its content was accepted")
+
+
 def main():
     print()
     print("=" * 72)
@@ -413,6 +457,7 @@ def main():
         check("a wrong-author lookup is refused", test_wrong_author_is_refused)
         check("the event cache and prefix resolution work", test_event_cache_and_prefix_resolution)
         check("a published market offer is discoverable and OPEN", test_market_offer_lifecycle)
+        check("a stored offer carries a NIP-40 expiration tag", test_market_offer_carries_an_expiration_tag)
         check("take -> match binds a swap and yields MATCHED", test_market_take_and_match)
         check("a cancelled offer derives CANCELLED", test_market_cancel)
         check("market-takes --json emits validated takes", test_market_takes_json_command)

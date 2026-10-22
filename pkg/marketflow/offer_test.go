@@ -1,6 +1,7 @@
 package marketflow
 
 import (
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -325,5 +326,67 @@ func resign(t *testing.T, e *event.Event) {
 
 	if err := event.Sign(e, signer); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// TestOfferCarriesAnExpirationTag: an offer is a stored advertisement, so it says when a relay
+// may forget it. NIP-40's expiration tag repeats the content's expires_at, and the two are held
+// together: a maker cannot keep an offer on a relay past the terms it signed.
+func TestOfferCarriesAnExpirationTag(t *testing.T) {
+	built, offer := buildTestOffer(t)
+
+	value, ok := built.TagValue("expiration")
+
+	if !ok {
+		t.Fatal("the offer carries no expiration tag")
+	}
+
+	if value != strconv.FormatInt(offer.ExpiresAt, 10) {
+		t.Fatalf("expiration tag %q, want %d", value, offer.ExpiresAt)
+	}
+
+	parsed, err := ParseOffer(built, time.Unix(1_700_000_100, 0))
+
+	if err != nil {
+		t.Fatalf("an offer with its own expiration tag was refused: %v", err)
+	}
+
+	if parsed.ExpiresAt != offer.ExpiresAt {
+		t.Fatalf("parsed expires_at %d", parsed.ExpiresAt)
+	}
+
+	// A tag that disagrees with the content is refused even though the signature is valid:
+	// the signer is the same key, the terms are not.
+	forged := built
+	forged.Tags = make([][]string, len(built.Tags))
+
+	for i, tag := range built.Tags {
+		forged.Tags[i] = append([]string(nil), tag...)
+
+		if tag[0] == "expiration" {
+			forged.Tags[i][1] = strconv.FormatInt(offer.ExpiresAt+3600, 10)
+		}
+	}
+
+	id, err := forged.ComputeID()
+
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	forged.ID = id
+
+	signer, err := keys.FromSecretHex(maker(t).Secret)
+
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := event.Sign(&forged, signer); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := ParseOffer(forged, time.Unix(1_700_000_100, 0)); err == nil {
+		t.Fatal("an offer whose expiration tag disagrees with its content was accepted")
 	}
 }

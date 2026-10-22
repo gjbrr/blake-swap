@@ -14,6 +14,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/gjbrr/blake-swap/pkg/amount"
@@ -112,6 +113,11 @@ func BuildOffer(key *nostr.Key, opts BuildOfferOptions) (event.Event, market.Off
 		{"base", "BLAKE"},
 		{"quote", "BTC"},
 		{"direction", string(opts.Direction)},
+		// NIP-40. An offer is a stored advertisement, and a relay that honours expiration can
+		// forget it at the maker's own deadline instead of keeping a stale trade for ever. The
+		// content's expires_at stays the authority; ParseOffer refuses an event whose tag and
+		// content disagree, so the relay's retention cannot outlive the offer's terms.
+		{"expiration", strconv.FormatInt(expiresAt, 10)},
 	}
 
 	built, err := event.Build(key.Public, event.WithContent(canonical), event.WithTags(tags))
@@ -209,6 +215,16 @@ func ParseOffer(e event.Event, now time.Time) (*ListedOffer, error) {
 	if offer.Version == 2 {
 		if value, ok := e.TagValue("direction"); !ok || value != string(offer.Direction) {
 			return nil, fmt.Errorf("market offer direction does not match Nostr direction tag")
+		}
+	}
+
+	// The expiration tag is optional so that offers from before it existed, and from other
+	// producers, still parse; when it is there it must say the same thing as the content.
+	if value, ok := e.TagValue("expiration"); ok {
+		if value != strconv.FormatInt(offer.ExpiresAt, 10) {
+			return nil, fmt.Errorf(
+				"market offer expiration tag %q does not match expires_at %d", value, offer.ExpiresAt,
+			)
 		}
 	}
 

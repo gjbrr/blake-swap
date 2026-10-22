@@ -11813,6 +11813,19 @@ def nostr_parse_market_offer_event(event):
             "after creation"
         )
 
+    #
+    # Optional so that an offer from before the tag existed still parses;
+    # when present it must agree with the content, or the relay's retention
+    # would outlive the terms the maker signed.
+    #
+    for tag in event.get("tags", []):
+        if len(tag) >= 2 and tag[0] == "expiration":
+            if tag[1] != str(expires_at):
+                raise RuntimeError(
+                    "Market offer expiration tag does not "
+                    "match expires_at"
+                )
+
     forbidden = {
         "secret_hex",
         "secret_hash",
@@ -12311,6 +12324,16 @@ def build_market_offer_v2_event(
             [
                 "direction",
                 direction,
+            ],
+            #
+            # NIP-40. The offer is stored, not ephemeral, and a relay that
+            # honours expiration may forget it at the maker's own deadline.
+            # The content's expires_at stays the authority; the parser refuses
+            # an event whose tag and content disagree.
+            #
+            [
+                "expiration",
+                str(expires_at),
             ],
         ],
         "content": content,

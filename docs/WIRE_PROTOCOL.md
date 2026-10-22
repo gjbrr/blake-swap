@@ -409,7 +409,8 @@ message that states roles inconsistent with its direction is invalid.
 ### 5.2 `market-offer`
 
 Tags: `["t","blake-swap-market"]`, `["base","BLAKE"]`,
-`["quote","BTC"]`, and for v2 `["direction",<direction>]`.
+`["quote","BTC"]`, for v2 `["direction",<direction>]`, and for v2 an
+`["expiration",<expires_at>]` tag (NIP-40).
 
 **Version 2 (current):**
 
@@ -439,6 +440,19 @@ material.
 **Expiry boundary.** At `created_at >= expires_at` the offer is
 `EXPIRED`. A market match is valid only if
 `match.created_at < offer.expires_at`.
+
+**Expiry on the relay.** An offer is a stored advertisement, not live
+traffic: it is kind `1`, so a relay keeps it until something removes it,
+and the market read is a `#t` subscription with a limit. The
+`expiration` tag (NIP-40) is how the maker tells a relay when it may
+forget the offer; without it every expired advertisement stays on the
+relay for ever and only the reader's own `EXPIRED` rule hides it. The
+tag MUST equal the content's `expires_at`; a reader refuses an event
+whose two disagree, so a relay's retention cannot outlive the terms the
+maker signed. A relay used for the market therefore needs to store kind
+`1`, index the `#t` tag, and — if it implements NIP-40 — drop the event
+at the tag's time. A relay that treats kind `1` as ephemeral loses every
+offer; a client that ignores the tag accumulates stale ones.
 
 ### 5.3 `market-take`
 
